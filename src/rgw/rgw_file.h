@@ -237,6 +237,9 @@ namespace rgw {
     uint16_t depth;
     uint32_t flags;
 
+    ceph::buffer::list etag;
+    ceph::buffer::list acls;
+
   public:
     const static std::string root_name;
 
@@ -381,6 +384,9 @@ namespace rgw {
 
     struct timespec get_ctime() const { return state.ctime; }
     struct timespec get_mtime() const { return state.mtime; }
+
+    const ceph::buffer::list& get_etag() const { return etag; }
+    const ceph::buffer::list& get_acls() const { return acls; }
 
     void create_stat(struct stat* st, uint32_t mask) {
       if (mask & RGW_SETATTR_UID)
@@ -637,6 +643,14 @@ namespace rgw {
 
     void set_atime(const struct timespec &ts) {
       state.atime = ts;
+    }
+
+    void set_etag(const ceph::buffer::list& _etag ) {
+      etag = _etag;
+    }
+
+    void set_acls(const ceph::buffer::list& _acls ) {
+      acls = _acls;
     }
 
     void encode(buffer::list& bl) const {
@@ -945,9 +959,8 @@ namespace rgw {
     int authorize(RGWRados* store) {
       int ret = rgw_get_user_info_by_access_key(store, key.id, user);
       if (ret == 0) {
-	RGWAccessKey* key0 = user.get_key0();
-	if (!key0 ||
-	    (key0->key != key.key))
+	RGWAccessKey* k = user.get_key(key.id);
+	if (!k || (k->key != key.key))
 	  return -EINVAL;
 	if (user.suspended)
 	  return -ERR_USER_SUSPENDED;
@@ -1474,7 +1487,7 @@ public:
   int operator()(const boost::string_ref name, const rgw_obj_key& marker,
 		uint8_t type) {
 
-    ceph_assert(name.length() > 0); // XXX
+    assert(name.length() > 0); // all cases handled in callers
 
     /* hash offset of name in parent (short name) for NFS readdir cookie */
     uint64_t off = XXH64(name.data(), name.length(), fh_key::seed);
@@ -1559,6 +1572,12 @@ public:
 			     << " prefix=" << prefix << " "
 			     << " cpref=" << sref
 			     << dendl;
+
+      if (sref.empty()) {
+	/* null path segment--could be created in S3 but has no NFS
+	 * interpretation */
+	return;
+      }
 
       this->operator()(sref, next_marker, RGW_FS_TYPE_DIRECTORY);
       ++ix;
@@ -1877,6 +1896,11 @@ public:
     if (bl.length() > cct->_conf->rgw_max_put_size)
       return -ERR_TOO_LARGE;
     return 0;
+  }
+
+  buffer::list* get_attr(const std::string& k) {
+    auto iter = attrs.find(k);
+    return (iter != attrs.end()) ? &(iter->second) : nullptr;
   }
 
 }; /* RGWPutObjRequest */

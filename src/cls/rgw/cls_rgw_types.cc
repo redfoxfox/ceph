@@ -58,11 +58,13 @@ void rgw_bucket_dir_entry_meta::dump(Formatter *f) const
   utime_t ut(mtime);
   encode_json("mtime", ut, f);
   encode_json("etag", etag, f);
+  encode_json("storage_class", storage_class, f);
   encode_json("owner", owner, f);
   encode_json("owner_display_name", owner_display_name, f);
   encode_json("content_type", content_type, f);
   encode_json("accounted_size", accounted_size, f);
   encode_json("user_data", user_data, f);
+  encode_json("appendable", appendable, f);
 }
 
 void rgw_bucket_dir_entry_meta::decode_json(JSONObj *obj) {
@@ -74,11 +76,13 @@ void rgw_bucket_dir_entry_meta::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("mtime", ut, obj);
   mtime = ut.to_real_time();
   JSONDecoder::decode_json("etag", etag, obj);
+  JSONDecoder::decode_json("storage_class", storage_class, obj);
   JSONDecoder::decode_json("owner", owner, obj);
   JSONDecoder::decode_json("owner_display_name", owner_display_name, obj);
   JSONDecoder::decode_json("content_type", content_type, obj);
   JSONDecoder::decode_json("accounted_size", accounted_size, obj);
   JSONDecoder::decode_json("user_data", user_data, obj);
+  JSONDecoder::decode_json("appendable", appendable, obj);
 }
 
 void rgw_bucket_dir_entry::generate_test_instances(list<rgw_bucket_dir_entry*>& o)

@@ -1,30 +1,30 @@
 import json
 import re
+import os
 import threading
 import functools
 import uuid
-from subprocess import check_output
+from subprocess import check_output, CalledProcessError
 
 from mgr_module import MgrModule
 
 import orchestrator
 
 
-all_completions = []
 
 
-class TestReadCompletion(orchestrator.ReadCompletion):
+class TestCompletionMixin(object):
+    all_completions = []  # Hacky global
 
-    def __init__(self, cb):
-        super(TestReadCompletion, self).__init__()
+    def __init__(self, cb, message, *args, **kwargs):
+        super(TestCompletionMixin, self).__init__(*args, **kwargs)
         self.cb = cb
         self._result = None
         self._complete = False
 
-        self.message = "<read op>"
+        self.message = message
 
-        global all_completions
-        all_completions.append(self)
+        TestCompletionMixin.all_completions.append(self)
 
     @property
     def result(self):
@@ -36,32 +36,23 @@ class TestReadCompletion(orchestrator.ReadCompletion):
 
     def execute(self):
         self._result = self.cb()
+        self.executed = True
         self._complete = True
 
+    def __str__(self):
+        return "{}(result={} message={}, exception={})".format(self.__class__.__name__, self.result,
+                                                               self.message, self.exception)
 
-class TestWriteCompletion(orchestrator.WriteCompletion):
-    def __init__(self, execute_cb, complete_cb, message):
-        super(TestWriteCompletion, self).__init__()
-        self.execute_cb = execute_cb
-        self.complete_cb = complete_cb
 
-        # Executed means I executed my API call, it may or may
-        # not have succeeded
-        self.executed = False
+class TestReadCompletion(TestCompletionMixin, orchestrator.ReadCompletion):
+    def __init__(self, cb):
+        super(TestReadCompletion, self).__init__(cb, "<read op>")
 
-        self._result = None
 
-        self.effective = False
-
+class TestWriteCompletion(TestCompletionMixin, orchestrator.WriteCompletion):
+    def __init__(self, cb, message):
+        super(TestWriteCompletion, self).__init__(cb, message)
         self.id = str(uuid.uuid4())
-
-        self.message = message
-
-        self.error = None
-
-        # XXX hacky global
-        global all_completions
-        all_completions.append(self)
 
     @property
     def is_persistent(self):
@@ -69,23 +60,17 @@ class TestWriteCompletion(orchestrator.WriteCompletion):
 
     @property
     def is_effective(self):
-        return self.effective
+        return self._complete
 
-    @property
-    def is_errored(self):
-        return self.error is not None
 
-    def execute(self):
-        if not self.executed:
-            self._result = self.execute_cb()
-            self.executed = True
-
-        if not self.effective:
-            # TODO: check self.result for API errors
-            if self.complete_cb is None:
-                self.effective = True
-            else:
-                self.effective = self.complete_cb()
+def deferred_write(message):
+    def wrapper(f):
+        @functools.wraps(f)
+        def inner(*args, **kwargs):
+            return TestWriteCompletion(lambda: f(*args, **kwargs),
+                                       '{}, args={}, kwargs={}'.format(message, args, kwargs))
+        return inner
+    return wrapper
 
 
 def deferred_read(f):
@@ -110,7 +95,6 @@ class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
 
     The implementation is similar to the Rook orchestrator, but simpler.
     """
-
     def _progress(self, *args, **kwargs):
         try:
             self.remote("progress", *args, **kwargs)
@@ -146,7 +130,7 @@ class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
                 self.log.exception("Completion {0} threw an exception:".format(
                     c.message
                 ))
-                c.error = e
+                c.exception = e
                 c._complete = True
                 if not c.is_read:
                     self._progress("complete", c.id)
@@ -181,41 +165,37 @@ class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
             # in case we had a caller that wait()'ed on them long enough
             # to get persistence but not long enough to get completion
 
-            global all_completions
-            self.wait(all_completions)
-            all_completions = [c for c in all_completions if not c.is_complete]
+            self.wait(TestCompletionMixin.all_completions)
+            TestCompletionMixin.all_completions = [c for c in TestCompletionMixin.all_completions if
+                                                   not c.is_complete]
 
             self._shutdown.wait(5)
 
     @deferred_read
-    def get_inventory(self, node_filter=None):
+    def get_inventory(self, node_filter=None, refresh=False):
         """
         There is no guarantee which devices are returned by get_inventory.
         """
+        if node_filter and node_filter.nodes is not None:
+            assert isinstance(node_filter.nodes, list)
         try:
             c_v_out = check_output(['ceph-volume', 'inventory', '--format', 'json'])
         except OSError:
             cmd = """
-            . /tmp/ceph-volume-virtualenv/bin/activate
+            . {tmpdir}/ceph-volume-virtualenv/bin/activate
             ceph-volume inventory --format json
             """
-            c_v_out = check_output(cmd, shell=True)
+            try:
+                c_v_out = check_output(cmd.format(tmpdir=os.environ.get('TMPDIR', '/tmp')), shell=True)
+            except (OSError, CalledProcessError):
+                c_v_out = check_output(cmd.format(tmpdir='.'),shell=True)
 
         for out in c_v_out.splitlines():
             if not out.startswith(b'-->') and not out.startswith(b' stderr'):
                 self.log.error(out)
                 devs = []
                 for device in json.loads(out):
-                    dev = orchestrator.InventoryDevice()
-                    if device["sys_api"]["rotational"] == "1":
-                        dev.type = 'hdd'  # 'ssd', 'hdd', 'nvme'
-                    elif 'nvme' in device["path"]:
-                        dev.type = 'nvme'
-                    else:
-                        dev.type = 'ssd'
-                    dev.size = device['sys_api']['size']
-                    dev.id = device['path']
-                    dev.extended = device
+                    dev = orchestrator.InventoryDevice.from_ceph_volume_inventory(device)
                     devs.append(dev)
                 return [orchestrator.InventoryNode('localhost', devs)]
         self.log.error('c-v failed: ' + str(c_v_out))
@@ -238,20 +218,64 @@ class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
         for p in processes:
             sd = orchestrator.ServiceDescription()
             sd.nodename = 'localhost'
-            sd.daemon_name = re.search('ceph-[^ ]+', p).group()
+            sd.service_instance = re.search('ceph-[^ ]+', p).group()
             result.append(sd)
 
         return result
 
+    @deferred_write("Adding stateless service")
     def add_stateless_service(self, service_type, spec):
-        raise NotImplementedError(service_type)
+        pass
 
-    def create_osds(self, spec):
-        raise NotImplementedError(str(spec))
+    @deferred_write("create_osds")
+    def create_osds(self, drive_group, all_hosts):
+        drive_group.validate(all_hosts)
 
+    @deferred_write("remove_osds")
+    def remove_osds(self, osd_ids):
+        assert isinstance(osd_ids, list)
+
+    @deferred_write("service_action")
     def service_action(self, action, service_type, service_name=None, service_id=None):
-        return TestWriteCompletion(
-            lambda: True, None,
-            "Pretending to {} service {} (name={}, id={})".format(
-                action, service_type, service_name, service_id))
+        pass
 
+    @deferred_write("remove_stateless_service")
+    def remove_stateless_service(self, service_type, id_):
+        pass
+
+    @deferred_write("update_stateless_service")
+    def update_stateless_service(self, service_type, spec):
+        pass
+
+    @deferred_read
+    def get_hosts(self):
+        return [orchestrator.InventoryNode('localhost', [])]
+
+    @deferred_write("add_host")
+    def add_host(self, host):
+        if host == 'raise_no_support':
+            raise orchestrator.OrchestratorValidationError("MON count must be either 1, 3 or 5")
+        if host == 'raise_bug':
+            raise ZeroDivisionError()
+        if host == 'raise_not_implemented':
+            raise NotImplementedError()
+        if host == 'raise_no_orchestrator':
+            raise orchestrator.NoOrchestrator()
+        if host == 'raise_import_error':
+            raise ImportError("test_orchestrator not enabled")
+        assert isinstance(host, str)
+
+    @deferred_write("remove_host")
+    def remove_host(self, host):
+        assert isinstance(host, str)
+
+    @deferred_write("update_mgrs")
+    def update_mgrs(self, num, hosts):
+        assert not hosts or len(hosts) == num
+        assert all([isinstance(h, str) for h in hosts])
+
+    @deferred_write("update_mons")
+    def update_mons(self, num, hosts):
+        assert not hosts or len(hosts) == num
+        assert all([isinstance(h[0], str) for h in hosts])
+        assert all([isinstance(h[1], str) or h[1] is None for h in hosts])

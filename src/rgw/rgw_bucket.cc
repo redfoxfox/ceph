@@ -31,6 +31,7 @@
 // until everything is moved from rgw_common
 #include "rgw_common.h"
 #include "rgw_reshard.h"
+#include "rgw_lc.h"
 #include "cls/user/cls_user_types.h"
 
 #define dout_context g_ceph_context
@@ -542,11 +543,13 @@ int rgw_remove_bucket(RGWRados *store, rgw_bucket& bucket, bool delete_children)
   int max = 1000;
 
   list_op.params.list_versions = true;
+  list_op.params.allow_unordered = true;
 
+  bool is_truncated = false;
   do {
     objs.clear();
 
-    ret = list_op.list_objects(max, &objs, &common_prefixes, NULL);
+    ret = list_op.list_objects(max, &objs, &common_prefixes, &is_truncated);
     if (ret < 0)
       return ret;
 
@@ -558,11 +561,11 @@ int rgw_remove_bucket(RGWRados *store, rgw_bucket& bucket, bool delete_children)
     for (const auto& obj : objs) {
       rgw_obj_key key(obj.key);
       ret = rgw_remove_object(store, info, bucket, key);
-      if (ret < 0)
+      if (ret < 0 && ret != -ENOENT) {
         return ret;
+      }
     }
-
-  } while (!objs.empty());
+  } while(is_truncated);
 
   string prefix, delimiter;
 
@@ -578,9 +581,12 @@ int rgw_remove_bucket(RGWRados *store, rgw_bucket& bucket, bool delete_children)
 
   RGWObjVersionTracker objv_tracker;
 
-  ret = store->delete_bucket(info, objv_tracker);
+  // if we deleted children above we will force delete, as any that
+  // remain is detrius from a prior bug
+  ret = store->delete_bucket(info, objv_tracker, !delete_children);
   if (ret < 0) {
-    lderr(store->ctx()) << "ERROR: could not remove bucket " << bucket.name << dendl;
+    lderr(store->ctx()) << "ERROR: could not remove bucket " <<
+      bucket.name << dendl;
     return ret;
   }
 
@@ -648,16 +654,20 @@ int rgw_remove_bucket_bypass_gc(RGWRados *store, rgw_bucket& bucket,
   RGWRados::Bucket::List list_op(&target);
 
   list_op.params.list_versions = true;
+  list_op.params.allow_unordered = true;
 
   std::list<librados::AioCompletion*> handles;
 
   int max = 1000;
   int max_aio = concurrent_max;
-  ret = list_op.list_objects(max, &objs, &common_prefixes, NULL);
-  if (ret < 0)
-    return ret;
+  bool is_truncated = true;
 
-  while (!objs.empty()) {
+  while (is_truncated) {
+    objs.clear();
+    ret = list_op.list_objects(max, &objs, &common_prefixes, &is_truncated);
+    if (ret < 0)
+      return ret;
+
     std::vector<rgw_bucket_dir_entry>::iterator it = objs.begin();
     for (; it != objs.end(); ++it) {
       RGWObjState *astate = NULL;
@@ -720,11 +730,6 @@ int rgw_remove_bucket_bypass_gc(RGWRados *store, rgw_bucket& bucket,
         max_aio = concurrent_max;
       }
     } // for all RGW objects
-    objs.clear();
-
-    ret = list_op.list_objects(max, &objs, &common_prefixes, NULL);
-    if (ret < 0)
-      return ret;
   }
 
   ret = drain_handles(handles);
@@ -740,7 +745,10 @@ int rgw_remove_bucket_bypass_gc(RGWRados *store, rgw_bucket& bucket,
 
   RGWObjVersionTracker objv_tracker;
 
-  ret = store->delete_bucket(info, objv_tracker);
+  // this function can only be run if caller wanted children to be
+  // deleted, so we can ignore the check for children as any that
+  // remain are detritus from a prior bug
+  ret = store->delete_bucket(info, objv_tracker, false);
   if (ret < 0) {
     lderr(store->ctx()) << "ERROR: could not remove bucket " << bucket.name << dendl;
     return ret;
@@ -880,7 +888,7 @@ int RGWBucket::link(RGWBucketAdminOpState& op_state, std::string *err_msg)
     auto sysobj = obj_ctx.get_obj(obj);
     r = sysobj.wop()
               .set_objv_tracker(&objv_tracker)
-              .write_attr(RGW_ATTR_ACL, aclbl);
+              .write_attr(RGW_ATTR_ACL, aclbl, null_yield);
     if (r < 0) {
       return r;
     }
@@ -895,7 +903,7 @@ int RGWBucket::link(RGWBucketAdminOpState& op_state, std::string *err_msg)
     auto inst_sysobj = obj_ctx.get_obj(obj_bucket_instance);
     r = inst_sysobj.wop()
                    .set_objv_tracker(&objv_tracker)
-                   .write_attr(RGW_ATTR_ACL, aclbl);
+                   .write_attr(RGW_ATTR_ACL, aclbl, null_yield);
     if (r < 0) {
       return r;
     }
@@ -1436,7 +1444,7 @@ static int bucket_stats(RGWRados *store, const std::string& tenant_name, std::st
   formatter->dump_string("bucket", bucket.name);
   formatter->dump_string("tenant", bucket.tenant);
   formatter->dump_string("zonegroup", bucket_info.zonegroup);
-  formatter->dump_string("placement_rule", bucket_info.placement_rule);
+  formatter->dump_string("placement_rule", bucket_info.placement_rule.to_str());
   ::encode_json("explicit_placement", bucket.explicit_placement, formatter);
   formatter->dump_string("id", bucket.bucket_id);
   formatter->dump_string("marker", bucket.marker);
@@ -1477,14 +1485,15 @@ int RGWBucketAdminOp::limit_check(RGWRados *store,
   formatter->open_array_section("users");
 
   for (const auto& user_id : user_ids) {
+
     formatter->open_object_section("user");
     formatter->dump_string("user_id", user_id);
-    bool done;
     formatter->open_array_section("buckets");
+
+    string marker;
+    bool is_truncated{false};
     do {
       RGWUserBuckets buckets;
-      string marker;
-      bool is_truncated;
 
       ret = rgw_read_user_buckets(store, user_id, buckets,
 				  marker, string(), max_entries, false,
@@ -1559,9 +1568,8 @@ int RGWBucketAdminOp::limit_check(RGWRados *store,
 	  }
 	}
       }
-
-      done = (m_buckets.size() < max_entries);
-    } while (!done); /* foreach: bucket */
+      formatter->flush(cout);
+    } while (is_truncated); /* foreach: bucket */
 
     formatter->close_section();
     formatter->close_section();
@@ -1868,6 +1876,94 @@ int RGWBucketAdminOp::clear_stale_instances(RGWRados *store,
                    };
 
   return process_stale_instances(store, op_state, flusher, process_f);
+}
+
+static int fix_single_bucket_lc(RGWRados *store,
+                                const std::string& tenant_name,
+                                const std::string& bucket_name)
+{
+  auto obj_ctx = store->svc.sysobj->init_obj_ctx();
+  RGWBucketInfo bucket_info;
+  map <std::string, bufferlist> bucket_attrs;
+  int ret = store->get_bucket_info(obj_ctx, tenant_name, bucket_name,
+                                   bucket_info, nullptr, &bucket_attrs);
+  if (ret < 0) {
+    // TODO: Should we handle the case where the bucket could've been removed between
+    // listing and fetching?
+    return ret;
+  }
+
+  return rgw::lc::fix_lc_shard_entry(store, bucket_info, bucket_attrs);
+}
+
+static void format_lc_status(Formatter* formatter,
+                             const std::string& tenant_name,
+                             const std::string& bucket_name,
+                             int status)
+{
+  formatter->open_object_section("bucket_entry");
+  std::string entry = tenant_name.empty() ? bucket_name : tenant_name + "/" + bucket_name;
+  formatter->dump_string("bucket", entry);
+  formatter->dump_int("status", status);
+  formatter->close_section(); // bucket_entry
+}
+
+static void process_single_lc_entry(RGWRados *store, Formatter *formatter,
+                                    const std::string& tenant_name,
+                                    const std::string& bucket_name)
+{
+  int ret = fix_single_bucket_lc(store, tenant_name, bucket_name);
+  format_lc_status(formatter, tenant_name, bucket_name, -ret);
+}
+
+int RGWBucketAdminOp::fix_lc_shards(RGWRados *store,
+                                    RGWBucketAdminOpState& op_state,
+                                    RGWFormatterFlusher& flusher)
+{
+  std::string marker;
+  void *handle;
+  Formatter *formatter = flusher.get_formatter();
+  static constexpr auto default_max_keys = 1000;
+
+  bool truncated;
+  if (const std::string& bucket_name = op_state.get_bucket_name();
+      ! bucket_name.empty()) {
+    const rgw_user user_id = op_state.get_user_id();
+    process_single_lc_entry(store, formatter, user_id.tenant, bucket_name);
+    formatter->flush(cout);
+  } else {
+    int ret = store->meta_mgr->list_keys_init("bucket", marker, &handle);
+    if (ret < 0) {
+      std::cerr << "ERROR: can't get key: " << cpp_strerror(-ret) << std::endl;
+      return ret;
+    }
+
+    {
+      formatter->open_array_section("lc_fix_status");
+      auto sg = make_scope_guard([&store, &handle, &formatter](){
+                                   store->meta_mgr->list_keys_complete(handle);
+                                   formatter->close_section(); // lc_fix_status
+                                   formatter->flush(cout);
+                                 });
+      do {
+        list<std::string> keys;
+        ret = store->meta_mgr->list_keys_next(handle, default_max_keys, keys, &truncated);
+        if (ret < 0 && ret != -ENOENT) {
+          std::cerr << "ERROR: lists_keys_next(): " << cpp_strerror(-ret) << std::endl;
+          return ret;
+        } if (ret != -ENOENT) {
+          for (const auto &key:keys) {
+            auto [tenant_name, bucket_name] = split_tenant(key);
+            process_single_lc_entry(store, formatter, tenant_name, bucket_name);
+          }
+        }
+        formatter->flush(cout); // regularly flush every 1k entries
+      } while (truncated);
+    }
+
+  }
+  return 0;
+
 }
 
 void rgw_data_change::dump(Formatter *f) const
@@ -2481,6 +2577,204 @@ public:
   }
 };
 
+void get_md5_digest(const RGWBucketEntryPoint *be, string& md5_digest) {
+
+   char md5[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 1];
+   unsigned char m[CEPH_CRYPTO_MD5_DIGESTSIZE];
+   bufferlist bl;
+
+   Formatter *f = new JSONFormatter(false);
+   be->dump(f);
+   f->flush(bl);
+
+   MD5 hash;
+   hash.Update((const unsigned char *)bl.c_str(), bl.length());
+   hash.Final(m);
+
+   buf_to_hex(m, CEPH_CRYPTO_MD5_DIGESTSIZE, md5);
+
+   delete f;
+
+   md5_digest = md5;
+}
+
+#define ARCHIVE_META_ATTR RGW_ATTR_PREFIX "zone.archive.info" 
+
+struct archive_meta_info {
+  rgw_bucket orig_bucket;
+
+  bool from_attrs(CephContext *cct, map<string, bufferlist>& attrs) {
+    auto iter = attrs.find(ARCHIVE_META_ATTR);
+    if (iter == attrs.end()) {
+      return false;
+    }
+
+    auto bliter = iter->second.cbegin();
+    try {
+      decode(bliter);
+    } catch (buffer::error& err) {
+      ldout(cct, 0) << "ERROR: failed to decode archive meta info" << dendl;
+      return false;
+    }
+
+    return true;
+  }
+
+  void store_in_attrs(map<string, bufferlist>& attrs) const {
+    encode(attrs[ARCHIVE_META_ATTR]);
+  }
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(orig_bucket, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(bufferlist::const_iterator& bl) {
+     DECODE_START(1, bl);
+     decode(orig_bucket, bl);
+     DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(archive_meta_info)
+
+class RGWArchiveBucketMetadataHandler : public RGWBucketMetadataHandler {
+public:
+  int remove(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker) override {
+    ldout(store->ctx(), 5) << "SKIP: bucket removal is not allowed on archive zone: bucket:" << entry << " ... proceeding to rename" << dendl;
+
+    string tenant_name, bucket_name;
+    parse_bucket(entry, &tenant_name, &bucket_name);
+
+    real_time mtime;
+
+    /* read original entrypoint */
+
+    RGWBucketEntryPoint be;
+    auto obj_ctx = store->svc.sysobj->init_obj_ctx();
+    map<string, bufferlist> attrs;
+    int ret = store->get_bucket_entrypoint_info(obj_ctx, tenant_name, bucket_name, be, &objv_tracker, &mtime, &attrs);
+    if (ret < 0) {
+        return ret;
+    }
+
+    string meta_name = bucket_name + ":" + be.bucket.bucket_id;
+
+    /* read original bucket instance info */
+
+    map<string, bufferlist> attrs_m;
+    ceph::real_time orig_mtime;
+    RGWBucketInfo old_bi;
+
+    ret = store->get_bucket_instance_info(obj_ctx, be.bucket, old_bi, &orig_mtime, &attrs_m);
+    if (ret < 0) {
+        return ret;
+    }
+
+    archive_meta_info ami;
+
+    if (!ami.from_attrs(store->ctx(), attrs_m)) {
+      ami.orig_bucket = old_bi.bucket;
+      ami.store_in_attrs(attrs_m);
+    }
+
+    /* generate a new bucket instance. We could have avoided this if we could just point a new
+     * bucket entry point to the old bucket instance, however, due to limitation in the way
+     * we index buckets under the user, bucket entrypoint and bucket instance of the same
+     * bucket need to have the same name, so we need to copy the old bucket instance into
+     * to a new entry with the new name
+     */
+
+    string new_bucket_name;
+
+    RGWBucketInfo new_bi = old_bi;
+    RGWBucketEntryPoint new_be = be;
+
+    string md5_digest;
+
+    get_md5_digest(&new_be, md5_digest);
+    new_bucket_name = ami.orig_bucket.name + "-deleted-" + md5_digest;
+
+    new_bi.bucket.name = new_bucket_name;
+    new_bi.objv_tracker.clear();
+
+    new_be.bucket.name = new_bucket_name;
+
+    ret = store->put_bucket_instance_info(new_bi, false, orig_mtime, &attrs_m);
+    if (ret < 0) {
+      ldout(store->ctx(), 0) << "ERROR: failed to put new bucket instance info for bucket=" << new_bi.bucket << " ret=" << ret << dendl;
+      return ret;
+    }
+
+    /* store a new entrypoint */
+
+    RGWObjVersionTracker ot;
+    ot.generate_new_write_ver(store->ctx());
+
+    ret = store->put_bucket_entrypoint_info(tenant_name, new_bucket_name, new_be, true, ot, mtime, &attrs);
+    if (ret < 0) {
+      ldout(store->ctx(), 0) << "ERROR: failed to put new bucket entrypoint for bucket=" << new_be.bucket << " ret=" << ret << dendl;
+      return ret;
+    }
+
+    /* link new bucket */
+
+    ret = rgw_link_bucket(store, new_be.owner, new_be.bucket, new_be.creation_time, false);
+    if (ret < 0) {
+      ldout(store->ctx(), 0) << "ERROR: failed to link new bucket for bucket=" << new_be.bucket << " ret=" << ret << dendl;
+      return ret;
+    }
+
+    /* clean up old stuff */
+
+    ret = rgw_unlink_bucket(store, be.owner, tenant_name, bucket_name, false);
+    if (ret < 0) {
+        lderr(store->ctx()) << "could not unlink bucket=" << entry << " owner=" << be.owner << dendl;
+    }
+
+    // if (ret == -ECANCELED) it means that there was a race here, and someone
+    // wrote to the bucket entrypoint just before we removed it. The question is
+    // whether it was a newly created bucket entrypoint ...  in which case we
+    // should ignore the error and move forward, or whether it is a higher version
+    // of the same bucket instance ... in which we should retry
+    ret = rgw_bucket_delete_bucket_obj(store, tenant_name, bucket_name, objv_tracker);
+    if (ret < 0) {
+        lderr(store->ctx()) << "could not delete bucket=" << entry << dendl;
+    }
+
+    ret = rgw_delete_system_obj(store, store->svc.zone->get_zone_params().domain_root, RGW_BUCKET_INSTANCE_MD_PREFIX + meta_name, NULL);
+
+    /* idempotent */
+
+    return 0;
+  }
+
+  int put(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker,
+          real_time mtime, JSONObj *obj, sync_type_t sync_type) override {
+    if (entry.find("-deleted-") != string::npos) {
+      RGWObjVersionTracker ot;
+      RGWMetadataObject *robj;
+      int ret = get(store, entry, &robj);
+      if (ret != -ENOENT) {
+        if (ret < 0) {
+          return ret;
+        }
+        ot.read_version = robj->get_version();
+        delete robj;
+
+        ret = remove(store, entry, ot);
+        if (ret < 0) {
+          return ret;
+        }
+      }
+    }
+
+    return RGWBucketMetadataHandler::put(store, entry, objv_tracker,
+                                         mtime, obj, sync_type);
+  }
+
+};
+
 class RGWBucketInstanceMetadataHandler : public RGWMetadataHandler {
 
 public:
@@ -2700,10 +2994,41 @@ public:
   }
 };
 
+class RGWArchiveBucketInstanceMetadataHandler : public RGWBucketInstanceMetadataHandler {
+public:
+
+  int remove(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker) override {
+    ldout(store->ctx(), 0) << "SKIP: bucket instance removal is not allowed on archive zone: bucket.instance:" << entry << dendl;
+    return 0;
+  }
+};
+
+RGWMetadataHandler *RGWBucketMetaHandlerAllocator::alloc() {
+  return new RGWBucketMetadataHandler;
+}
+
+RGWMetadataHandler *RGWBucketInstanceMetaHandlerAllocator::alloc() {
+  return new RGWBucketInstanceMetadataHandler;
+}
+
+RGWMetadataHandler *RGWArchiveBucketMetaHandlerAllocator::alloc() {
+  return new RGWArchiveBucketMetadataHandler;
+}
+
+RGWMetadataHandler *RGWArchiveBucketInstanceMetaHandlerAllocator::alloc() {
+  return new RGWArchiveBucketInstanceMetadataHandler;
+}
+
 void rgw_bucket_init(RGWMetadataManager *mm)
 {
-  bucket_meta_handler = new RGWBucketMetadataHandler;
+  auto sync_module = mm->get_store()->get_sync_module();
+  if (sync_module) {
+    bucket_meta_handler = sync_module->alloc_bucket_meta_handler();
+    bucket_instance_meta_handler = sync_module->alloc_bucket_instance_meta_handler();
+  } else {
+    bucket_meta_handler = RGWBucketMetaHandlerAllocator::alloc();
+    bucket_instance_meta_handler = RGWBucketInstanceMetaHandlerAllocator::alloc();
+  }
   mm->register_handler(bucket_meta_handler);
-  bucket_instance_meta_handler = new RGWBucketInstanceMetadataHandler;
   mm->register_handler(bucket_instance_meta_handler);
 }

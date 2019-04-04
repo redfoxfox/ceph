@@ -115,6 +115,7 @@
     lc list                    list all bucket lifecycle progress
     lc get                     get a lifecycle bucket configuration
     lc process                 manually process lifecycle
+    lc reshard fix             fix LC for a resharded bucket
     metadata get               get metadata info
     metadata put               put metadata info
     metadata rm                remove metadata info
@@ -211,6 +212,7 @@
      --read-only               set zone as read-only (when adding to zonegroup)
      --redirect-zone           specify zone id to redirect when response is 404 (not found)
      --placement-id            placement id for zonegroup placement commands
+     --storage-class           storage class for zonegroup placement commands
      --tags=<list>             list of tags for zonegroup placement add and modify commands
      --tags-add=<list>         list of tags to add for zonegroup placement modify command
      --tags-rm=<list>          list of tags to remove for zonegroup placement modify command
@@ -278,6 +280,7 @@
      --orphan-stale-secs       num of seconds to wait before declaring an object to be an orphan (default: 86400)
      --job-id                  set the job id (for orphans find)
      --max-concurrent-ios      maximum concurrent ios for orphans find (default: 32)
+     --detail                  detailed mode, log and stat head objects as well
   
   Orphans list-jobs options:
      --extra-info              provide extra info in job list

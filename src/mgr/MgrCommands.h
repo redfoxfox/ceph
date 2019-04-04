@@ -68,7 +68,9 @@ COMMAND("osd perf", \
         "osd", \
         "r")
 COMMAND("osd df " \
-	"name=output_method,type=CephChoices,strings=plain|tree,req=false", \
+        "name=output_method,type=CephChoices,strings=plain|tree,req=false " \
+        "name=filter_by,type=CephChoices,strings=class|name,req=false " \
+        "name=filter,type=CephString,req=false", \
 	"show OSD utilization", "osd", "r")
 COMMAND("osd blocked-by", \
 	"print histogram of which OSDs are blocking their peers", \
@@ -77,6 +79,34 @@ COMMAND("osd pool stats " \
         "name=pool_name,type=CephPoolname,req=false",
         "obtain stats from all pools, or from specified pool",
         "osd", "r")
+COMMAND("osd pool scrub " \
+        "name=who,type=CephPoolname,n=N", \
+        "initiate scrub on pool <who>", \
+        "osd", "rw")
+COMMAND("osd pool deep-scrub " \
+        "name=who,type=CephPoolname,n=N", \
+        "initiate deep-scrub on pool <who>", \
+        "osd", "rw")
+COMMAND("osd pool repair " \
+        "name=who,type=CephPoolname,n=N", \
+        "initiate repair on pool <who>", \
+        "osd", "rw")
+COMMAND("osd pool force-recovery " \
+        "name=who,type=CephPoolname,n=N", \
+        "force recovery of specified pool <who> first", \
+        "osd", "rw")
+COMMAND("osd pool force-backfill " \
+        "name=who,type=CephPoolname,n=N", \
+        "force backfill of specified pool <who> first", \
+        "osd", "rw")
+COMMAND("osd pool cancel-force-recovery " \
+        "name=who,type=CephPoolname,n=N", \
+        "restore normal recovery priority of specified pool <who>", \
+        "osd", "rw")
+COMMAND("osd pool cancel-force-backfill " \
+        "name=who,type=CephPoolname,n=N", \
+        "restore normal recovery priority of specified pool <who>", \
+        "osd", "rw")
 COMMAND("osd reweight-by-utilization " \
 	"name=oload,type=CephInt,req=false " \
 	"name=max_change,type=CephFloat,req=false "			\

@@ -47,7 +47,7 @@ class DeepSeaOrchestrator(MgrModule, orchestrator.Orchestrator):
     MODULE_OPTIONS = [
         {
             'name': 'salt_api_url',
-            'default': None
+            'default': ''
         },
         {
             'name': 'salt_api_eauth',
@@ -55,11 +55,11 @@ class DeepSeaOrchestrator(MgrModule, orchestrator.Orchestrator):
         },
         {
             'name': 'salt_api_username',
-            'default': None
+            'default': ''
         },
         {
             'name': 'salt_api_password',
-            'default': None
+            'default': ''
         }
     ]
 
@@ -120,7 +120,7 @@ class DeepSeaOrchestrator(MgrModule, orchestrator.Orchestrator):
         return True, ""
 
 
-    def get_inventory(self, node_filter=None):
+    def get_inventory(self, node_filter=None, refresh=False):
         """
         Note that this will raise an exception (e.g. if the salt-api is down,
         or the username/password is incorret).  Same for other methods.
@@ -133,17 +133,12 @@ class DeepSeaOrchestrator(MgrModule, orchestrator.Orchestrator):
             result = []
             if event_data['success']:
                 for node_name, node_devs in event_data["return"].items():
-                    devs = []
-                    for d in node_devs:
-                        dev = orchestrator.InventoryDevice()
-                        dev.blank = d['blank']
-                        dev.type = d['type']
-                        dev.id = d['id']
-                        dev.size = d['size']
-                        dev.extended = d['extended']
-                        dev.metadata_space_free = d['metadata_space_free']
-                        devs.append(dev)
+                    devs = list(map(lambda di:
+                        orchestrator.InventoryDevice.from_ceph_volume_inventory(di),
+                        node_devs))
                     result.append(orchestrator.InventoryNode(node_name, devs))
+            else:
+                self.log.error(event_data['return'])
             return result
 
         with self._completion_lock:
@@ -183,12 +178,14 @@ class DeepSeaOrchestrator(MgrModule, orchestrator.Orchestrator):
             result = []
             if event_data['success']:
                 for node_name, service_info in event_data["return"].items():
-                    for service_type, daemon_name in service_info.items():
+                    for service_type, service_instance in service_info.items():
                         desc = orchestrator.ServiceDescription()
                         desc.nodename = node_name
-                        desc.daemon_name = daemon_name
+                        desc.service_instance = service_instance
                         desc.service_type = service_type
                         result.append(desc)
+            else:
+                self.log.error(event_data['return'])
             return result
 
         with self._completion_lock:
@@ -441,7 +438,7 @@ class DeepSeaOrchestrator(MgrModule, orchestrator.Orchestrator):
     def _login(self):
         resp = self._do_request('POST', 'login', data = {
             "eauth": self.get_module_option('salt_api_eauth'),
-            "sharedsecret" if self.get_module_option('salt_api_eauth') == 'sharedsecret' else 'password': self.get_module_option('salt_api_password'),
+            "password": self.get_module_option('salt_api_password'),
             "username": self.get_module_option('salt_api_username')
         })
         self._token = resp.json()['return'][0]['token']

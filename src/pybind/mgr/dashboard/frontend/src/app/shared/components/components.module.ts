@@ -11,6 +11,7 @@ import { TooltipModule } from 'ngx-bootstrap/tooltip';
 
 import { DirectivesModule } from '../directives/directives.module';
 import { PipesModule } from '../pipes/pipes.module';
+import { BackButtonComponent } from './back-button/back-button.component';
 import { ConfirmationModalComponent } from './confirmation-modal/confirmation-modal.component';
 import { CriticalConfirmationModalComponent } from './critical-confirmation-modal/critical-confirmation-modal.component';
 import { ErrorPanelComponent } from './error-panel/error-panel.component';
@@ -20,7 +21,9 @@ import { InfoPanelComponent } from './info-panel/info-panel.component';
 import { LanguageSelectorComponent } from './language-selector/language-selector.component';
 import { LoadingPanelComponent } from './loading-panel/loading-panel.component';
 import { ModalComponent } from './modal/modal.component';
+import { RefreshSelectorComponent } from './refresh-selector/refresh-selector.component';
 import { SelectBadgesComponent } from './select-badges/select-badges.component';
+import { SelectComponent } from './select/select.component';
 import { SparklineComponent } from './sparkline/sparkline.component';
 import { SubmitButtonComponent } from './submit-button/submit-button.component';
 import { UsageBarComponent } from './usage-bar/usage-bar.component';
@@ -57,7 +60,10 @@ import { WarningPanelComponent } from './warning-panel/warning-panel.component';
     ConfirmationModalComponent,
     WarningPanelComponent,
     LanguageSelectorComponent,
-    GrafanaComponent
+    GrafanaComponent,
+    SelectComponent,
+    BackButtonComponent,
+    RefreshSelectorComponent
   ],
   providers: [],
   exports: [
@@ -66,6 +72,7 @@ import { WarningPanelComponent } from './warning-panel/warning-panel.component';
     HelperComponent,
     SelectBadgesComponent,
     SubmitButtonComponent,
+    BackButtonComponent,
     ErrorPanelComponent,
     LoadingPanelComponent,
     InfoPanelComponent,
@@ -73,7 +80,9 @@ import { WarningPanelComponent } from './warning-panel/warning-panel.component';
     ModalComponent,
     WarningPanelComponent,
     LanguageSelectorComponent,
-    GrafanaComponent
+    GrafanaComponent,
+    SelectComponent,
+    RefreshSelectorComponent
   ],
   entryComponents: [ModalComponent, CriticalConfirmationModalComponent, ConfirmationModalComponent]
 })

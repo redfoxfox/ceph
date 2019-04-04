@@ -35,17 +35,14 @@
 #include "include/spinlock.h"
 #include "include/scope_guard.h"
 
-#if defined(HAVE_XIO)
-#include "msg/xio/XioMsg.h"
-#endif
-
 using namespace ceph;
 
-#define CEPH_BUFFER_ALLOC_UNIT  (std::min(CEPH_PAGE_SIZE, 4096u))
+#define CEPH_BUFFER_ALLOC_UNIT  4096u
 #define CEPH_BUFFER_APPEND_SIZE (CEPH_BUFFER_ALLOC_UNIT - sizeof(raw_combined))
 
 #ifdef BUFFER_DEBUG
-# define bdout { std::lock_guard lg(ceph::spinlock()); std::cout
+static ceph::spinlock debug_lock;
+# define bdout { std::lock_guard<ceph::spinlock> lg(debug_lock); std::cout
 # define bendl std::endl; }
 #else
 # define bdout if (0) { std::cout
@@ -277,7 +274,7 @@ using namespace ceph;
     raw* clone_empty() override {
       return new raw_char(len);
     }
-    bool is_shareable() override {
+    bool is_shareable() const override {
       return false; // !shareable, will force make_shareable()
     }
     ~raw_unshareable() override {
@@ -307,69 +304,16 @@ using namespace ceph;
     }
   };
 
-#if defined(HAVE_XIO)
-  class buffer::xio_msg_buffer : public buffer::raw {
-  private:
-    XioDispatchHook* m_hook;
-  public:
-    xio_msg_buffer(XioDispatchHook* _m_hook, const char *d,
-	unsigned l) :
-      raw((char*)d, l), m_hook(_m_hook->get()) {}
-
-    bool is_shareable() { return false; }
-    static void operator delete(void *p)
-    {
-      xio_msg_buffer *buf = static_cast<xio_msg_buffer*>(p);
-      // return hook ref (counts against pool);  it appears illegal
-      // to do this in our dtor, because this fires after that
-      buf->m_hook->put();
-    }
-    raw* clone_empty() {
-      return new buffer::raw_char(len);
-    }
-  };
-
-  class buffer::xio_mempool : public buffer::raw {
-  public:
-    struct xio_reg_mem *mp;
-    xio_mempool(struct xio_reg_mem *_mp, unsigned l) :
-      raw((char*)_mp->addr, l), mp(_mp)
-    { }
-    ~xio_mempool() {}
-    raw* clone_empty() {
-      return new buffer::raw_char(len);
-    }
-  };
-
-  struct xio_reg_mem* get_xio_mp(const buffer::ptr& bp)
-  {
-    buffer::xio_mempool *mb = dynamic_cast<buffer::xio_mempool*>(bp.get_raw());
-    if (mb) {
-      return mb->mp;
-    }
-    return NULL;
-  }
-
-  buffer::raw* buffer::create_msg(
-      unsigned len, char *buf, XioDispatchHook* m_hook) {
-    XioPool& pool = m_hook->get_pool();
-    buffer::raw* bp =
-      static_cast<buffer::raw*>(pool.alloc(sizeof(xio_msg_buffer)));
-    new (bp) xio_msg_buffer(m_hook, buf, len);
-    return bp;
-  }
-#endif /* HAVE_XIO */
-
-  buffer::raw* buffer::copy(const char *c, unsigned len) {
-    raw* r = buffer::create_aligned(len, sizeof(size_t));
+  ceph::unique_leakable_ptr<buffer::raw> buffer::copy(const char *c, unsigned len) {
+    auto r = buffer::create_aligned(len, sizeof(size_t));
     memcpy(r->data, c, len);
     return r;
   }
 
-  buffer::raw* buffer::create(unsigned len) {
+  ceph::unique_leakable_ptr<buffer::raw> buffer::create(unsigned len) {
     return buffer::create_aligned(len, sizeof(size_t));
   }
-  buffer::raw* buffer::create_in_mempool(unsigned len, int mempool) {
+  ceph::unique_leakable_ptr<buffer::raw> buffer::create_in_mempool(unsigned len, int mempool) {
     return buffer::create_aligned_in_mempool(len, sizeof(size_t), mempool);
   }
   buffer::raw* buffer::claim_char(unsigned len, char *buf) {
@@ -388,7 +332,7 @@ using namespace ceph;
     return new raw_claim_buffer(buf, len, std::move(del));
   }
 
-  buffer::raw* buffer::create_aligned_in_mempool(
+  ceph::unique_leakable_ptr<buffer::raw> buffer::create_aligned_in_mempool(
     unsigned len, unsigned align, int mempool) {
     // If alignment is a page multiple, use a separate buffer::raw to
     // avoid fragmenting the heap.
@@ -402,23 +346,24 @@ using namespace ceph;
     if ((align & ~CEPH_PAGE_MASK) == 0 ||
 	len >= CEPH_PAGE_SIZE * 2) {
 #ifndef __CYGWIN__
-      return new raw_posix_aligned(len, align);
+      return ceph::unique_leakable_ptr<buffer::raw>(new raw_posix_aligned(len, align));
 #else
-      return new raw_hack_aligned(len, align);
+      return ceph::unique_leakable_ptr<buffer::raw>(new raw_hack_aligned(len, align));
 #endif
     }
-    return raw_combined::create(len, align, mempool);
+    return ceph::unique_leakable_ptr<buffer::raw>(
+      raw_combined::create(len, align, mempool));
   }
-  buffer::raw* buffer::create_aligned(
+  ceph::unique_leakable_ptr<buffer::raw> buffer::create_aligned(
     unsigned len, unsigned align) {
     return create_aligned_in_mempool(len, align,
 				     mempool::mempool_buffer_anon);
   }
 
-  buffer::raw* buffer::create_page_aligned(unsigned len) {
+  ceph::unique_leakable_ptr<buffer::raw> buffer::create_page_aligned(unsigned len) {
     return create_aligned(len, CEPH_PAGE_SIZE);
   }
-  buffer::raw* buffer::create_small_page_aligned(unsigned len) {
+  ceph::unique_leakable_ptr<buffer::raw> buffer::create_small_page_aligned(unsigned len) {
     if (len < CEPH_PAGE_SIZE) {
       return create_aligned(len, CEPH_BUFFER_ALLOC_UNIT);
     } else
@@ -429,21 +374,29 @@ using namespace ceph;
     return new raw_unshareable(len);
   }
 
-  buffer::ptr::ptr(raw *r) : _raw(r), _off(0), _len(r->len)   // no lock needed; this is an unref raw.
+  buffer::ptr::ptr(raw* r) : _raw(r), _off(0), _len(r->len)   // no lock needed; this is an unref raw.
   {
     r->nref++;
     bdout << "ptr " << this << " get " << _raw << bendl;
   }
+  buffer::ptr::ptr(ceph::unique_leakable_ptr<raw> r)
+    : _raw(r.release()),
+      _off(0),
+      _len(_raw->len)
+  {
+    _raw->nref.store(1, std::memory_order_release);
+    bdout << "ptr " << this << " get " << _raw << bendl;
+  }
   buffer::ptr::ptr(unsigned l) : _off(0), _len(l)
   {
-    _raw = create(l);
-    _raw->nref++;
+    _raw = buffer::create(l).release();
+    _raw->nref.store(1, std::memory_order_release);
     bdout << "ptr " << this << " get " << _raw << bendl;
   }
   buffer::ptr::ptr(const char *d, unsigned l) : _off(0), _len(l)    // ditto.
   {
-    _raw = copy(d, l);
-    _raw->nref++;
+    _raw = buffer::copy(d, l).release();
+    _raw->nref.store(1, std::memory_order_release);
     bdout << "ptr " << this << " get " << _raw << bendl;
   }
   buffer::ptr::ptr(const ptr& p) : _raw(p._raw), _off(p._off), _len(p._len)
@@ -464,6 +417,14 @@ using namespace ceph;
     ceph_assert(o+l <= p._len);
     ceph_assert(_raw);
     _raw->nref++;
+    bdout << "ptr " << this << " get " << _raw << bendl;
+  }
+  buffer::ptr::ptr(const ptr& p, ceph::unique_leakable_ptr<raw> r)
+    : _raw(r.release()),
+      _off(p._off),
+      _len(p._len)
+  {
+    _raw->nref.store(1, std::memory_order_release);
     bdout << "ptr " << this << " get " << _raw << bendl;
   }
   buffer::ptr& buffer::ptr::operator= (const ptr& p)
@@ -499,25 +460,9 @@ using namespace ceph;
     return *this;
   }
 
-  buffer::raw *buffer::ptr::clone()
+  ceph::unique_leakable_ptr<buffer::raw> buffer::ptr::clone()
   {
     return _raw->clone();
-  }
-
-  buffer::ptr& buffer::ptr::make_shareable() {
-    if (_raw && !_raw->is_shareable()) {
-      buffer::raw *tr = _raw;
-      _raw = tr->clone();
-      _raw->nref = 1;
-      if (unlikely(--tr->nref == 0)) {
-        ANNOTATE_HAPPENS_AFTER(&tr->nref);
-        ANNOTATE_HAPPENS_BEFORE_FORGET_ALL(&tr->nref);
-        delete tr;
-      } else {
-        ANNOTATE_HAPPENS_BEFORE(&tr->nref);
-      }
-    }
-    return *this;
   }
 
   void buffer::ptr::swap(ptr& other) noexcept
@@ -537,7 +482,8 @@ using namespace ceph;
   {
     if (_raw) {
       bdout << "ptr " << this << " release " << _raw << bendl;
-      if (--_raw->nref == 0) {
+      const bool last_one = (1 == _raw->nref.load(std::memory_order_acquire));
+      if (likely(last_one) || --_raw->nref == 0) {
         // BE CAREFUL: this is called also for hypercombined ptr_node. After
         // freeing underlying raw, `*this` can become inaccessible as well!
         const auto* delete_raw = _raw;
@@ -733,14 +679,8 @@ using namespace ceph;
     //     << " (p_off " << p_off << " in " << p->length() << ")"
     //     << std::endl;
 
-    p_off += o;
-
-    if (!o) {
-      return;
-    }
-    while (p_off > 0) {
-      if (p == ls->end())
-        throw end_of_buffer();
+    p_off +=o;
+    while (p != ls->end()) {
       if (p_off >= p->length()) {
         // skip this buffer
         p_off -= p->length();
@@ -749,6 +689,9 @@ using namespace ceph;
         // somewhere in this buffer!
         break;
       }
+    }
+    if (p == ls->end() && p_off) {
+      throw end_of_buffer();
     }
     off += o;
   }
@@ -805,7 +748,6 @@ using namespace ceph;
     while (len > 0) {
       if (p == ls->end())
 	throw end_of_buffer();
-      ceph_assert(p->length() > 0);
 
       unsigned howmuch = p->length() - p_off;
       if (len < howmuch) howmuch = len;
@@ -831,7 +773,6 @@ using namespace ceph;
     }
     if (p == ls->end())
       throw end_of_buffer();
-    ceph_assert(p->length() > 0);
     dest = create(len);
     copy(len, dest.c_str());
   }
@@ -844,7 +785,6 @@ using namespace ceph;
     }
     if (p == ls->end())
       throw end_of_buffer();
-    ceph_assert(p->length() > 0);
     unsigned howmuch = p->length() - p_off;
     if (howmuch < len) {
       dest = create(len);
@@ -902,7 +842,6 @@ using namespace ceph;
     while (1) {
       if (p == ls->end())
 	return;
-      ceph_assert(p->length() > 0);
 
       unsigned howmuch = p->length() - p_off;
       const char *c_str = p->c_str();
@@ -1002,10 +941,10 @@ using namespace ceph;
 
   buffer::list::list(list&& other) noexcept
     : _buffers(std::move(other._buffers)),
+      _carriage(&always_empty_bptr),
       _len(other._len),
       _memcopy_count(other._memcopy_count),
       last_p(this) {
-    append_buffer.swap(other.append_buffer);
     other.clear();
   }
 
@@ -1013,8 +952,8 @@ using namespace ceph;
   {
     std::swap(_len, other._len);
     std::swap(_memcopy_count, other._memcopy_count);
+    std::swap(_carriage, other._carriage);
     _buffers.swap(other._buffers);
-    append_buffer.swap(other.append_buffer);
     //last_p.swap(other.last_p);
     last_p = begin();
     other.last_p = other.begin();
@@ -1047,7 +986,6 @@ using namespace ceph;
 	  ++b;
 	}
       }
-      ceph_assert(b == std::cend(other._buffers));
       return true;
     }
 
@@ -1177,9 +1115,6 @@ using namespace ceph;
 
   void buffer::list::reassign_to_mempool(int pool)
   {
-    if (append_buffer.get_raw()) {
-      append_buffer.get_raw()->reassign_to_mempool(pool);
-    }
     for (auto& p : _buffers) {
       p.get_raw()->reassign_to_mempool(pool);
     }
@@ -1187,9 +1122,6 @@ using namespace ceph;
 
   void buffer::list::try_assign_to_mempool(int pool)
   {
-    if (append_buffer.get_raw()) {
-      append_buffer.get_raw()->try_assign_to_mempool(pool);
-    }
     for (auto& p : _buffers) {
       p.get_raw()->try_assign_to_mempool(pool);
     }
@@ -1224,6 +1156,7 @@ using namespace ceph;
   void buffer::list::rebuild()
   {
     if (_len == 0) {
+      _carriage = &always_empty_bptr;
       _buffers.clear_and_dispose();
       return;
     }
@@ -1242,8 +1175,10 @@ using namespace ceph;
       pos += node.length();
     }
     _memcopy_count += pos;
+    _carriage = &always_empty_bptr;
     _buffers.clear_and_dispose();
     if (likely(nb->length())) {
+      _carriage = nb.get();
       _buffers.push_back(*nb.release());
     }
     invalidate_crc();
@@ -1320,9 +1255,11 @@ using namespace ceph;
 
   void buffer::list::reserve(size_t prealloc)
   {
-    if (append_buffer.unused_tail_length() < prealloc) {
-      append_buffer = buffer::create_page_aligned(prealloc);
-      append_buffer.set_length(0);   // unused, so far.
+    if (get_append_buffer_unused_tail_length() < prealloc) {
+      auto ptr = ptr_node::create(buffer::create_page_aligned(prealloc));
+      ptr->set_length(0);   // unused, so far.
+      _carriage = ptr.get();
+      _buffers.push_back(*ptr.release());
     }
   }
 
@@ -1338,9 +1275,24 @@ using namespace ceph;
   {
     // steal the other guy's buffers
     _len += bl._len;
-    if (!(flags & CLAIM_ALLOW_NONSHAREABLE))
-      bl.make_shareable();
+    if (!(flags & CLAIM_ALLOW_NONSHAREABLE)) {
+      auto curbuf = bl._buffers.begin();
+      auto curbuf_prev = bl._buffers.before_begin();
+
+      while (curbuf != bl._buffers.end()) {
+	const auto* const raw = curbuf->get_raw();
+	if (unlikely(raw && !raw->is_shareable())) {
+	  auto* clone = ptr_node::copy_hypercombined(*curbuf);
+	  curbuf = bl._buffers.erase_after_and_dispose(curbuf_prev);
+	  bl._buffers.insert_after(curbuf_prev++, *clone);
+	} else {
+	  curbuf_prev = curbuf++;
+	}
+      }
+    }
     _buffers.splice_back(bl._buffers);
+    bl._carriage = &always_empty_bptr;
+    bl._buffers.clear_and_dispose();
     bl._len = 0;
     bl.last_p = bl.begin();
   }
@@ -1399,39 +1351,91 @@ using namespace ceph;
   void buffer::list::append(char c)
   {
     // put what we can into the existing append_buffer.
-    unsigned gap = append_buffer.unused_tail_length();
+    unsigned gap = get_append_buffer_unused_tail_length();
     if (!gap) {
-      // make a new append_buffer!
-      append_buffer = raw_combined::create(CEPH_BUFFER_APPEND_SIZE, 0,
-					   get_mempool());
-      append_buffer.set_length(0);   // unused, so far.
+      // make a new buffer!
+      auto buf = ptr_node::create(
+	raw_combined::create(CEPH_BUFFER_APPEND_SIZE, 0, get_mempool()));
+      buf->set_length(0);   // unused, so far.
+      _carriage = buf.get();
+      _buffers.push_back(*buf.release());
+    } else if (unlikely(_carriage != &_buffers.back())) {
+      auto bptr = ptr_node::create(*_carriage, _carriage->length(), 0);
+      _carriage = bptr.get();
+      _buffers.push_back(*bptr.release());
     }
-    append(append_buffer, append_buffer.append(c) - 1, 1);	// add segment to the list
+    _carriage->append(c);
+    _len++;
+  }
+
+  buffer::ptr buffer::list::always_empty_bptr;
+
+  buffer::ptr_node& buffer::list::refill_append_space(const unsigned len)
+  {
+    // make a new buffer.  fill out a complete page, factoring in the
+    // raw_combined overhead.
+    size_t need = round_up_to(len, sizeof(size_t)) + sizeof(raw_combined);
+    size_t alen = round_up_to(need, CEPH_BUFFER_ALLOC_UNIT) -
+      sizeof(raw_combined);
+    auto new_back = \
+      ptr_node::create(raw_combined::create(alen, 0, get_mempool()));
+    new_back->set_length(0);   // unused, so far.
+    _carriage = new_back.get();
+    _buffers.push_back(*new_back.release());
+    return _buffers.back();
   }
 
   void buffer::list::append(const char *data, unsigned len)
   {
-    while (len > 0) {
-      // put what we can into the existing append_buffer.
-      unsigned gap = append_buffer.unused_tail_length();
-      if (gap > 0) {
-        if (gap > len) gap = len;
-    //cout << "append first char is " << data[0] << ", last char is " << data[len-1] << std::endl;
-        append_buffer.append(data, gap);
-        append(append_buffer, append_buffer.length() - gap, gap);	// add segment to the list
-        len -= gap;
-        data += gap;
+    _len += len;
+
+    const unsigned free_in_last = get_append_buffer_unused_tail_length();
+    const unsigned first_round = std::min(len, free_in_last);
+    if (first_round) {
+      // _buffers and carriage can desynchronize when 1) a new ptr
+      // we don't own has been added into the _buffers 2) _buffers
+      // has been emptied as as a result of std::move or stolen by
+      // claim_append.
+      if (unlikely(_carriage != &_buffers.back())) {
+        auto bptr = ptr_node::create(*_carriage, _carriage->length(), 0);
+	_carriage = bptr.get();
+	_buffers.push_back(*bptr.release());
       }
-      if (len == 0)
-        break;  // done!
-      
-      // make a new append_buffer.  fill out a complete page, factoring in the
-      // raw_combined overhead.
-      size_t need = round_up_to(len, sizeof(size_t)) + sizeof(raw_combined);
-      size_t alen = round_up_to(need, CEPH_BUFFER_ALLOC_UNIT) -
-	sizeof(raw_combined);
-      append_buffer = raw_combined::create(alen, 0, get_mempool());
-      append_buffer.set_length(0);   // unused, so far.
+      _carriage->append(data, first_round);
+    }
+
+    const unsigned second_round = len - first_round;
+    if (second_round) {
+      auto& new_back = refill_append_space(second_round);
+      new_back.append(data + first_round, second_round);
+    }
+  }
+
+  buffer::list::reserve_t buffer::list::obtain_contiguous_space(
+    const unsigned len)
+  {
+    // note: if len < the normal append_buffer size it *might*
+    // be better to allocate a normal-sized append_buffer and
+    // use part of it.  however, that optimizes for the case of
+    // old-style types including new-style types.  and in most
+    // such cases, this won't be the very first thing encoded to
+    // the list, so append_buffer will already be allocated.
+    // OTOH if everything is new-style, we *should* allocate
+    // only what we need and conserve memory.
+    if (unlikely(get_append_buffer_unused_tail_length() < len)) {
+      auto new_back = \
+	buffer::ptr_node::create(buffer::create(len)).release();
+      new_back->set_length(0);   // unused, so far.
+      _buffers.push_back(*new_back);
+      _carriage = new_back;
+      return { new_back->c_str(), &new_back->_len, &_len };
+    } else {
+      if (unlikely(_carriage != &_buffers.back())) {
+        auto bptr = ptr_node::create(*_carriage, _carriage->length(), 0);
+	_carriage = bptr.get();
+	_buffers.push_back(*bptr.release());
+      }
+      return { _carriage->end_c_str(), &_carriage->_len, &_len };
     }
   }
 
@@ -1459,7 +1463,8 @@ using namespace ceph;
       }
     }
     // add new item to list
-    push_back(ptr_node::create(bp, off, len));
+    _buffers.push_back(*ptr_node::create(bp, off, len).release());
+    _len += len;
   }
 
   void buffer::list::append(const list& bl)
@@ -1483,21 +1488,21 @@ using namespace ceph;
 
   buffer::list::contiguous_filler buffer::list::append_hole(const unsigned len)
   {
-    if (unlikely(append_buffer.unused_tail_length() < len)) {
+    _len += len;
+
+    if (unlikely(get_append_buffer_unused_tail_length() < len)) {
       // make a new append_buffer.  fill out a complete page, factoring in
       // the raw_combined overhead.
-      const size_t need = \
-	round_up_to(len, sizeof(size_t)) + sizeof(raw_combined);
-      const size_t alen = \
-	round_up_to(need, CEPH_BUFFER_ALLOC_UNIT) - sizeof(raw_combined);
-      append_buffer = raw_combined::create(alen, 0, get_mempool());
-      append_buffer.set_length(0);
+      auto& new_back = refill_append_space(len);
+      new_back.set_length(len);
+      return { new_back.c_str() };
+    } else if (unlikely(_carriage != &_buffers.back())) {
+      auto bptr = ptr_node::create(*_carriage, _carriage->length(), 0);
+      _carriage = bptr.get();
+      _buffers.push_back(*bptr.release());
     }
-
-    append_buffer.set_length(append_buffer.length() + len);
-    append(append_buffer, append_buffer.length() - len, len);
-
-    return { _buffers.back().end_c_str() - len };
+    _carriage->set_length(_carriage->length() + len);
+    return { _carriage->end_c_str() - len };
   }
 
   void buffer::list::prepend_zero(unsigned len)
@@ -1510,16 +1515,24 @@ using namespace ceph;
   
   void buffer::list::append_zero(unsigned len)
   {
-    unsigned need = std::min(append_buffer.unused_tail_length(), len);
-    if (need) {
-      append_buffer.append_zeros(need);
-      append(append_buffer, append_buffer.length() - need, need);
-      len -= need;
+    _len += len;
+
+    const unsigned free_in_last = get_append_buffer_unused_tail_length();
+    const unsigned first_round = std::min(len, free_in_last);
+    if (first_round) {
+      if (unlikely(_carriage != &_buffers.back())) {
+        auto bptr = ptr_node::create(*_carriage, _carriage->length(), 0);
+	_carriage = bptr.get();
+	_buffers.push_back(*bptr.release());
+      }
+      _carriage->append_zeros(first_round);
     }
-    if (len) {
-      auto bp = ptr_node::create(buffer::create_page_aligned(len));
-      bp->zero(false);
-      push_back(std::move(bp));
+
+    const unsigned second_round = len - first_round;
+    if (second_round) {
+      auto& new_back = refill_append_space(second_round);
+      new_back.set_length(second_round);
+      new_back.zero(false);
     }
   }
 
@@ -1646,6 +1659,8 @@ using namespace ceph;
       ++curbuf_prev;
     }
     
+    _carriage = &always_empty_bptr;
+
     while (len > 0) {
       // partial?
       if (off + len < (*curbuf).length()) {
@@ -1709,7 +1724,64 @@ void buffer::list::decode_base64(buffer::list& e)
   push_back(std::move(bp));
 }
 
-  
+ssize_t buffer::list::pread_file(const char *fn, uint64_t off, uint64_t len, std::string *error)
+{
+  int fd = TEMP_FAILURE_RETRY(::open(fn, O_RDONLY|O_CLOEXEC));
+  if (fd < 0) {
+    int err = errno;
+    std::ostringstream oss;
+    oss << "can't open " << fn << ": " << cpp_strerror(err);
+    *error = oss.str();
+    return -err;
+  }
+
+  struct stat st;
+  memset(&st, 0, sizeof(st));
+  if (::fstat(fd, &st) < 0) {
+    int err = errno;
+    std::ostringstream oss;
+    oss << "bufferlist::read_file(" << fn << "): stat error: "
+        << cpp_strerror(err);
+    *error = oss.str();
+    VOID_TEMP_FAILURE_RETRY(::close(fd));
+    return -err;
+  }
+
+  if (off > st.st_size) {
+    std::ostringstream oss;
+    oss << "bufferlist::read_file(" << fn << "): read error: size < offset";
+    *error = oss.str();
+    VOID_TEMP_FAILURE_RETRY(::close(fd));
+    return 0;
+  }
+
+  if (len > st.st_size - off) {
+    len = st.st_size - off;
+  }
+  ssize_t ret = lseek64(fd, off, SEEK_SET);
+  if (ret != off) {
+    return -errno;
+  }
+
+  ret = read_fd(fd, len);
+  if (ret < 0) {
+    std::ostringstream oss;
+    oss << "bufferlist::read_file(" << fn << "): read error:"
+	<< cpp_strerror(ret);
+    *error = oss.str();
+    VOID_TEMP_FAILURE_RETRY(::close(fd));
+    return ret;
+  } else if (ret != len) {
+    // Premature EOF.
+    // Perhaps the file changed between stat() and read()?
+    std::ostringstream oss;
+    oss << "bufferlist::read_file(" << fn << "): warning: got premature EOF.";
+    *error = oss.str();
+    // not actually an error, but weird
+  }
+  VOID_TEMP_FAILURE_RETRY(::close(fd));
+  return 0;
+}
 
 int buffer::list::read_file(const char *fn, std::string *error)
 {
@@ -2092,20 +2164,56 @@ bool buffer::ptr_node::dispose_if_hypercombined(
   const bool is_hypercombined = static_cast<void*>(delete_this) == \
     static_cast<void*>(&delete_this->get_raw()->bptr_storage);
   if (is_hypercombined) {
+    ceph_assert_always("hypercombining is currently disabled" == nullptr);
     delete_this->~ptr_node();
   }
   return is_hypercombined;
 }
 
 std::unique_ptr<buffer::ptr_node, buffer::ptr_node::disposer>
+buffer::ptr_node::create_hypercombined(ceph::unique_leakable_ptr<buffer::raw> r)
+{
+  // FIXME: we don't currently hypercombine buffers due to crashes
+  // observed in the rados suite. After fixing we'll use placement
+  // new to create ptr_node on buffer::raw::bptr_storage.
+  return std::unique_ptr<buffer::ptr_node, buffer::ptr_node::disposer>(
+    new ptr_node(std::move(r)));
+}
+
+std::unique_ptr<buffer::ptr_node, buffer::ptr_node::disposer>
 buffer::ptr_node::create_hypercombined(buffer::raw* const r)
 {
   if (likely(r->nref == 0)) {
+    // FIXME: we don't currently hypercombine buffers due to crashes
+    // observed in the rados suite. After fixing we'll use placement
+    // new to create ptr_node on buffer::raw::bptr_storage.
     return std::unique_ptr<buffer::ptr_node, buffer::ptr_node::disposer>(
-      new (&r->bptr_storage) ptr_node(r));
+      new ptr_node(r));
   } else {
     return std::unique_ptr<buffer::ptr_node, buffer::ptr_node::disposer>(
       new ptr_node(r));
+  }
+}
+
+buffer::ptr_node* buffer::ptr_node::copy_hypercombined(
+  const buffer::ptr_node& copy_this)
+{
+  // FIXME: we don't currently hypercombine buffers due to crashes
+  // observed in the rados suite. After fixing we'll use placement
+  // new to create ptr_node on buffer::raw::bptr_storage.
+  auto raw_new = copy_this.get_raw()->clone();
+  return new ptr_node(copy_this, std::move(raw_new));
+}
+
+buffer::ptr_node* buffer::ptr_node::cloner::operator()(
+  const buffer::ptr_node& clone_this)
+{
+  const raw* const raw_this = clone_this.get_raw();
+  if (likely(!raw_this || raw_this->is_shareable())) {
+    return new ptr_node(clone_this);
+  } else {
+    // clone non-shareable buffers (make shareable)
+   return copy_hypercombined(clone_this);
   }
 }
 

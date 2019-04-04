@@ -18,6 +18,31 @@
 
 
 
+bool MultipartMetaFilter::filter(const string& name, string& key) {
+  // the length of the suffix so we can skip past it
+  static const size_t MP_META_SUFFIX_LEN = MP_META_SUFFIX.length();
+
+  size_t len = name.size();
+
+  // make sure there's room for suffix plus at least one more
+  // character
+  if (len <= MP_META_SUFFIX_LEN)
+    return false;
+
+  size_t pos = name.find(MP_META_SUFFIX, len - MP_META_SUFFIX_LEN);
+  if (pos == string::npos)
+    return false;
+
+  pos = name.rfind('.', pos - 1);
+  if (pos == string::npos)
+    return false;
+
+  key = name.substr(0, pos);
+
+  return true;
+}
+
+
 bool RGWMultiPart::xml_end(const char *el)
 {
   RGWMultiPartNumber *num_obj = static_cast<RGWMultiPartNumber *>(find_first("PartNumber"));
@@ -75,12 +100,13 @@ bool is_v2_upload_id(const string& upload_id)
          (strncmp(uid, MULTIPART_UPLOAD_ID_PREFIX_LEGACY, sizeof(MULTIPART_UPLOAD_ID_PREFIX_LEGACY) - 1) == 0);
 }
 
-int list_multipart_parts(RGWRados *store, RGWBucketInfo& bucket_info, CephContext *cct,
-                                const string& upload_id,
-                                string& meta_oid, int num_parts,
-                                int marker, map<uint32_t, RGWUploadPartInfo>& parts,
-                                int *next_marker, bool *truncated,
-                                bool assume_unsorted)
+int list_multipart_parts(RGWRados *store, RGWBucketInfo& bucket_info,
+			 CephContext *cct,
+			 const string& upload_id,
+			 const string& meta_oid, int num_parts,
+			 int marker, map<uint32_t, RGWUploadPartInfo>& parts,
+			 int *next_marker, bool *truncated,
+			 bool assume_unsorted)
 {
   map<string, bufferlist> parts_map;
   map<string, bufferlist>::iterator iter;
@@ -110,9 +136,10 @@ int list_multipart_parts(RGWRados *store, RGWBucketInfo& bucket_info, CephContex
     snprintf(buf, sizeof(buf), "%08d", marker);
     p.append(buf);
 
-    ret = sysobj.omap().get_vals(p, num_parts + 1, &parts_map, nullptr);
+    ret = sysobj.omap().get_vals(p, num_parts + 1, &parts_map,
+                                 nullptr, null_yield);
   } else {
-    ret = sysobj.omap().get_all(&parts_map);
+    ret = sysobj.omap().get_all(&parts_map, null_yield);
   }
   if (ret < 0)
     return ret;
@@ -178,11 +205,11 @@ int list_multipart_parts(RGWRados *store, RGWBucketInfo& bucket_info, CephContex
 }
 
 int list_multipart_parts(RGWRados *store, struct req_state *s,
-                                const string& upload_id,
-                                string& meta_oid, int num_parts,
-                                int marker, map<uint32_t, RGWUploadPartInfo>& parts,
-                                int *next_marker, bool *truncated,
-                                bool assume_unsorted)
+			 const string& upload_id,
+			 const string& meta_oid, int num_parts,
+			 int marker, map<uint32_t, RGWUploadPartInfo>& parts,
+			 int *next_marker, bool *truncated,
+			 bool assume_unsorted)
 {
   return list_multipart_parts(store, s->bucket_info, s->cct, upload_id, meta_oid, num_parts, marker, parts, next_marker, truncated, assume_unsorted);
 }

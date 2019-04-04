@@ -9,7 +9,6 @@ import json
 import os
 import pkgutil
 import sys
-from six import add_metaclass
 
 if sys.version_info >= (3, 0):
     from urllib.parse import unquote  # pylint: disable=no-name-in-module,import-error
@@ -24,6 +23,112 @@ from ..security import Scope, Permission
 from ..tools import wraps, getargspec, TaskManager, get_request_body_params
 from ..exceptions import ScopeNotValid, PermissionNotValid
 from ..services.auth import AuthManager, JwtManager
+from ..plugins import PLUGIN_MANAGER
+
+
+def EndpointDoc(description="", group="", parameters=None, responses=None):
+    if not isinstance(description, str):
+        raise Exception("%s has been called with a description that is not a string: %s"
+                        % (EndpointDoc.__name__, description))
+    elif not isinstance(group, str):
+        raise Exception("%s has been called with a groupname that is not a string: %s"
+                        % (EndpointDoc.__name__, group))
+    elif parameters and not isinstance(parameters, dict):
+        raise Exception("%s has been called with parameters that is not a dict: %s"
+                        % (EndpointDoc.__name__, parameters))
+    elif responses and not isinstance(responses, dict):
+        raise Exception("%s has been called with responses that is not a dict: %s"
+                        % (EndpointDoc.__name__, responses))
+
+    if not parameters:
+        parameters = {}
+
+    def _split_param(name, p_type, description, optional=False, default_value=None, nested=False):
+        param = {
+            'name': name,
+            'description': description,
+            'required': not optional,
+            'nested': nested,
+        }
+        if default_value:
+            param['default'] = default_value
+        if isinstance(p_type, type):
+            param['type'] = p_type
+        else:
+            nested_params = _split_parameters(p_type, nested=True)
+            if nested_params:
+                param['type'] = type(p_type)
+                param['nested_params'] = nested_params
+            else:
+                param['type'] = p_type
+        return param
+
+    #  Optional must be set to True in order to set default value and parameters format must be:
+    # 'name: (type or nested parameters, description, [optional], [default value])'
+    def _split_dict(data, nested):
+        splitted = []
+        for name, props in data.items():
+            if isinstance(name, str) and isinstance(props, tuple):
+                if len(props) == 2:
+                    param = _split_param(name, props[0], props[1], nested=nested)
+                elif len(props) == 3:
+                    param = _split_param(name, props[0], props[1], optional=props[2], nested=nested)
+                if len(props) == 4:
+                    param = _split_param(name, props[0], props[1], props[2], props[3], nested)
+                splitted.append(param)
+            else:
+                raise Exception(
+                    """Parameter %s in %s has not correct format. Valid formats are:
+                    <name>: (<type>, <description>, [optional], [default value])
+                    <name>: (<[type]>, <description>, [optional], [default value])
+                    <name>: (<[nested parameters]>, <description>, [optional], [default value])
+                    <name>: (<{nested parameters}>, <description>, [optional], [default value])"""
+                    % (name, EndpointDoc.__name__))
+        return splitted
+
+    def _split_list(data, nested):
+        splitted = []
+        for item in data:
+            splitted.extend(_split_parameters(item, nested))
+        return splitted
+
+    # nested = True means parameters are inside a dict or array
+    def _split_parameters(data, nested=False):
+        param_list = []
+        if isinstance(data, dict):
+            param_list.extend(_split_dict(data, nested))
+        elif isinstance(data, (list, tuple)):
+            param_list.extend(_split_list(data, True))
+        return param_list
+
+    resp = {}
+    if responses:
+        for status_code, response_body in responses.items():
+            resp[str(status_code)] = _split_parameters(response_body)
+
+    def _wrapper(func):
+        func.doc_info = {
+            'summary': description,
+            'tag': group,
+            'parameters': _split_parameters(parameters),
+            'response': resp
+        }
+        return func
+
+    return _wrapper
+
+
+class ControllerDoc(object):
+    def __init__(self, description="", group=""):
+        self.tag = group
+        self.tag_descr = description
+
+    def __call__(self, cls):
+        cls.doc_info = {
+            'tag': self.tag,
+            'tag_descr': self.tag_descr
+        }
+        return cls
 
 
 class Controller(object):
@@ -177,6 +282,9 @@ def load_controllers():
                     continue
                 controllers.append(cls)
 
+    for clist in PLUGIN_MANAGER.hook.get_controllers() or []:
+        controllers.extend(clist)
+
     return controllers
 
 
@@ -282,7 +390,7 @@ class Task(object):
     def __init__(self, name, metadata, wait_for=5.0, exception_handler=None):
         self.name = name
         if isinstance(metadata, list):
-            self.metadata = dict([(e[1:-1], e) for e in metadata])
+            self.metadata = {e[1:-1]: e for e in metadata}
         else:
             self.metadata = metadata
         self.wait_for = wait_for
@@ -300,7 +408,7 @@ class Task(object):
                 if param['name'] in kwargs:
                     arg_map[param['name']] = kwargs[param['name']]
                 else:
-                    assert not param['required']
+                    assert not param['required'], "{0} is required".format(param['name'])
                     arg_map[param['name']] = param['default']
 
             if param['name'] in arg_map:
@@ -313,18 +421,24 @@ class Task(object):
         @wraps(func)
         def wrapper(*args, **kwargs):
             arg_map = self._gen_arg_map(func, args, kwargs)
-            md = {}
+            metadata = {}
             for k, v in self.metadata.items():
                 if isinstance(v, str) and v and v[0] == '{' and v[-1] == '}':
                     param = v[1:-1]
                     try:
                         pos = int(param)
-                        md[k] = arg_map[pos]
+                        metadata[k] = arg_map[pos]
                     except ValueError:
-                        md[k] = arg_map[v[1:-1]]
+                        if param.find('.') == -1:
+                            metadata[k] = arg_map[param]
+                        else:
+                            path = param.split('.')
+                            metadata[k] = arg_map[path[0]]
+                            for i in range(1, len(path)):
+                                metadata[k] = metadata[k][path[i]]
                 else:
-                    md[k] = v
-            task = TaskManager.run(self.name, md, func, args, kwargs,
+                    metadata[k] = v
+            task = TaskManager.run(self.name, metadata, func, args, kwargs,
                                    exception_handler=self.exception_handler)
             try:
                 status, value = task.wait(self.wait_for)
@@ -340,7 +454,7 @@ class Task(object):
                 raise ex
             if status == TaskManager.VALUE_EXECUTING:
                 cherrypy.response.status = 202
-                return {'name': self.name, 'metadata': md}
+                return {'name': self.name, 'metadata': metadata}
             return value
         return wrapper
 

@@ -3,6 +3,7 @@ import { Component, OnInit, TemplateRef, ViewChild } from '@angular/core';
 import { I18n } from '@ngx-translate/i18n-polyfill';
 
 import { ConfigurationService } from '../../../shared/api/configuration.service';
+import { CellTemplate } from '../../../shared/enum/cell-template.enum';
 import { CdTableAction } from '../../../shared/models/cd-table-action';
 import { CdTableColumn } from '../../../shared/models/cd-table-column';
 import { CdTableFetchDataContext } from '../../../shared/models/cd-table-fetch-data-context';
@@ -25,6 +26,7 @@ export class ConfigurationComponent implements OnInit {
     {
       label: this.i18n('Level'),
       prop: 'level',
+      initValue: 'basic',
       value: 'basic',
       options: ['basic', 'advanced', 'dev'],
       applyFilter: (row, value) => {
@@ -42,6 +44,7 @@ export class ConfigurationComponent implements OnInit {
     {
       label: this.i18n('Service'),
       prop: 'services',
+      initValue: 'any',
       value: 'any',
       options: ['any', 'mon', 'mgr', 'osd', 'mds', 'common', 'mds_client', 'rgw'],
       applyFilter: (row, value) => {
@@ -55,6 +58,7 @@ export class ConfigurationComponent implements OnInit {
     {
       label: this.i18n('Source'),
       prop: 'source',
+      initValue: 'any',
       value: 'any',
       options: ['any', 'mon'],
       applyFilter: (row, value) => {
@@ -83,12 +87,13 @@ export class ConfigurationComponent implements OnInit {
   ) {
     this.permission = this.authStorageService.getPermissions().configOpt;
     const getConfigOptUri = () =>
-      this.selection.first() && `${encodeURI(this.selection.first().name)}`;
+      this.selection.first() && `${encodeURIComponent(this.selection.first().name)}`;
     const editAction: CdTableAction = {
       permission: 'update',
       icon: 'fa-pencil',
       routerLink: () => `/configuration/edit/${getConfigOptUri()}`,
-      name: this.i18n('Edit')
+      name: this.i18n('Edit'),
+      disable: () => !this.isEditable(this.selection)
     };
     this.tableActions = [editAction];
   }
@@ -103,7 +108,14 @@ export class ConfigurationComponent implements OnInit {
         cellClass: 'wrap',
         cellTemplate: this.confValTpl
       },
-      { prop: 'default', name: this.i18n('Default'), cellClass: 'wrap' }
+      { prop: 'default', name: this.i18n('Default'), cellClass: 'wrap' },
+      {
+        prop: 'can_update_at_runtime',
+        name: this.i18n('Editable'),
+        cellTransformation: CellTemplate.checkIcon,
+        flexGrow: 0.4,
+        cellClass: 'text-center'
+      }
     ];
   }
 
@@ -124,5 +136,20 @@ export class ConfigurationComponent implements OnInit {
 
   updateFilter() {
     this.data = [...this.data];
+  }
+
+  resetFilter() {
+    this.filters.forEach((item) => {
+      item.value = item.initValue;
+    });
+    this.data = [...this.data];
+  }
+
+  isEditable(selection: CdTableSelection): boolean {
+    if (selection.selected.length !== 1) {
+      return false;
+    }
+
+    return selection.selected[0].can_update_at_runtime;
   }
 }

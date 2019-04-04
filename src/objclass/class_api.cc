@@ -713,7 +713,8 @@ void cls_cxx_subop_version(cls_method_context_t hctx, string *s)
 
 int cls_get_snapset_seq(cls_method_context_t hctx, uint64_t *snap_seq) {
   PrimaryLogPG::OpContext *ctx = *(PrimaryLogPG::OpContext **)hctx;
-  if (!ctx->new_obs.exists) {
+  if (!ctx->new_obs.exists || (ctx->new_obs.oi.is_whiteout() &&
+                               ctx->obc->ssc->snapset.clones.empty())) {
     return -ENOENT;
   }
   *snap_seq = ctx->obc->ssc->snapset.seq;
@@ -762,4 +763,20 @@ int cls_cxx_chunk_write_and_set(cls_method_context_t hctx, int ofs, int len,
   ops[1].indata.append(*set_inbl);
 
   return (*pctx)->pg->do_osd_ops(*pctx, ops);
+}
+
+bool cls_has_chunk(cls_method_context_t hctx, string fp_oid)
+{
+  PrimaryLogPG::OpContext *ctx = *(PrimaryLogPG::OpContext **)hctx;
+  if (!ctx->obc->obs.oi.has_manifest()) {
+    return false;
+  }
+
+  for (auto &p : ctx->obc->obs.oi.manifest.chunk_map) {
+    if (p.second.oid.oid.name == fp_oid) {
+      return true;
+    }
+  }
+
+  return false;
 }

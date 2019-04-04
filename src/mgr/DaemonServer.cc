@@ -76,14 +76,6 @@ DaemonServer::DaemonServer(MonClient *monc_,
       py_modules(py_modules_),
       clog(clog_),
       audit_clog(audit_clog_),
-      auth_cluster_registry(g_ceph_context,
-                    g_conf()->auth_supported.empty() ?
-                      g_conf()->auth_cluster_required :
-                      g_conf()->auth_supported),
-      auth_service_registry(g_ceph_context,
-                   g_conf()->auth_supported.empty() ?
-                      g_conf()->auth_service_required :
-                      g_conf()->auth_supported),
       lock("DaemonServer"),
       pgmap_ready(false),
       timer(g_ceph_context, lock),
@@ -110,6 +102,8 @@ int DaemonServer::init(uint64_t gid, entity_addrvec_t client_addrs)
 			   "mgr",
 			   getpid(), 0);
   msgr->set_default_policy(Messenger::Policy::stateless_server(0));
+
+  msgr->set_auth_client(monc);
 
   // throttle clients
   msgr->set_policy_throttlers(entity_name_t::TYPE_CLIENT,
@@ -145,6 +139,9 @@ int DaemonServer::init(uint64_t gid, entity_addrvec_t client_addrs)
   msgr->start();
   msgr->add_dispatcher_tail(this);
 
+  msgr->set_auth_server(monc);
+  monc->set_handle_authentication_dispatcher(this);
+
   started_at = ceph_clock_now();
 
   std::lock_guard l(lock);
@@ -168,7 +165,6 @@ KeyStore *DaemonServer::ms_get_auth1_authorizer_keystore()
 
 int DaemonServer::ms_handle_authentication(Connection *con)
 {
-  int ret = 0;
   MgrSession *s = new MgrSession(cct);
   con->set_priv(s);
   s->inst.addr = con->get_peer_addr();
@@ -183,27 +179,24 @@ int DaemonServer::ms_handle_authentication(Connection *con)
     dout(10) << " session " << s << " " << s->entity_name
 	     << " allow_all" << dendl;
     s->caps.set_allow_all();
-  }
-
-  if (caps_info.caps.length() > 0) {
+  } else if (caps_info.caps.length() > 0) {
     auto p = caps_info.caps.cbegin();
     string str;
     try {
       decode(str, p);
     }
     catch (buffer::error& e) {
-      ret = -EPERM;
-    }
-    bool success = s->caps.parse(str);
-    if (success) {
       dout(10) << " session " << s << " " << s->entity_name
-	       << " has caps " << s->caps << " '" << str << "'" << dendl;
-      ret = 1;
-    } else {
+               << " failed to decode caps" << dendl;
+      return -EPERM;
+    }
+    if (!s->caps.parse(str)) {
       dout(10) << " session " << s << " " << s->entity_name
 	       << " failed to parse caps '" << str << "'" << dendl;
-      ret = -EPERM;
+      return -EPERM;
     }
+    dout(10) << " session " << s << " " << s->entity_name
+             << " has caps " << s->caps << " '" << str << "'" << dendl;
   }
 
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_OSD) {
@@ -214,22 +207,17 @@ int DaemonServer::ms_handle_authentication(Connection *con)
     osd_cons[s->osd_id].insert(con);
   }
 
-  return ret;
+  return 1;
 }
 
-bool DaemonServer::ms_get_authorizer(int dest_type,
-    AuthAuthorizer **authorizer, bool force_new)
+bool DaemonServer::ms_get_authorizer(
+  int dest_type,
+  AuthAuthorizer **authorizer)
 {
   dout(10) << "type=" << ceph_entity_type_name(dest_type) << dendl;
 
   if (dest_type == CEPH_ENTITY_TYPE_MON) {
     return true;
-  }
-
-  if (force_new) {
-    auto timeout = g_conf().get_val<int64_t>("rotating_keys_renewal_timeout");
-    if (monc->wait_auth_rotating(timeout) < 0)
-      return false;
   }
 
   *authorizer = monc->build_authorizer(dest_type);
@@ -554,7 +542,7 @@ bool DaemonServer::handle_report(MMgrReport *m)
 
     // issue metadata request in background
     if (!daemon_state.is_updating(key) && 
-	(key.first == "osd" || key.first == "mds")) {
+	(key.first == "osd" || key.first == "mds" || key.first == "mon")) {
 
       std::ostringstream oss;
       auto c = new MetadataUpdate(daemon_state, key);
@@ -567,6 +555,9 @@ bool DaemonServer::handle_report(MMgrReport *m)
         oss << "{\"prefix\": \"mds metadata\", \"who\": \""
             << key.second << "\"}";
  
+      } else if (key.first == "mon") {
+        oss << "{\"prefix\": \"mon metadata\", \"id\": \""
+            << key.second << "\"}";
       } else {
 	ceph_abort();
       }
@@ -1092,6 +1083,73 @@ bool DaemonServer::_handle_command(
     }
     cmdctx->reply(0, ss);
     return true;
+  } else if (prefix == "osd pool scrub" ||
+             prefix == "osd pool deep-scrub" ||
+             prefix == "osd pool repair") {
+    vector<string> pool_names;
+    cmd_getval(g_ceph_context, cmdctx->cmdmap, "who", pool_names);
+    if (pool_names.empty()) {
+      ss << "must specify one or more pool names";
+      cmdctx->reply(-EINVAL, ss);
+      return true;
+    }
+    epoch_t epoch;
+    map<int32_t, vector<pg_t>> pgs_by_primary; // legacy
+    map<int32_t, vector<spg_t>> spgs_by_primary;
+    cluster_state.with_osdmap([&](const OSDMap& osdmap) {
+      epoch = osdmap.get_epoch();
+      for (auto& pool_name : pool_names) {
+        auto pool_id = osdmap.lookup_pg_pool_name(pool_name);
+        if (pool_id < 0) {
+          ss << "unrecognized pool '" << pool_name << "'";
+          r = -ENOENT;
+          return;
+        }
+        auto pool_pg_num = osdmap.get_pg_num(pool_id);
+        for (int i = 0; i < pool_pg_num; i++) {
+          pg_t pg(i, pool_id);
+          int primary;
+          spg_t spg;
+          auto got = osdmap.get_primary_shard(pg, &primary, &spg);
+          if (!got)
+            continue;
+          pgs_by_primary[primary].push_back(pg);
+          spgs_by_primary[primary].push_back(spg);
+        }
+      }
+    });
+    if (r < 0) {
+      cmdctx->reply(r, ss);
+      return true;
+    }
+    for (auto& it : spgs_by_primary) {
+      auto primary = it.first;
+      auto p = osd_cons.find(primary);
+      if (p == osd_cons.end()) {
+        ss << "osd." << primary << " is not currently connected";
+        cmdctx->reply(-EAGAIN, ss);
+        return true;
+      }
+      for (auto& con : p->second) {
+        if (HAVE_FEATURE(con->get_features(), SERVER_MIMIC)) {
+          con->send_message(new MOSDScrub2(monc->get_fsid(),
+                                           epoch,
+                                           it.second,
+                                           prefix == "osd pool repair",
+                                           prefix == "osd pool deep-scrub"));
+        } else {
+          // legacy
+          auto q = pgs_by_primary.find(primary);
+          ceph_assert(q != pgs_by_primary.end());
+          con->send_message(new MOSDScrub(monc->get_fsid(),
+                                          q->second,
+                                          prefix == "osd pool repair",
+                                          prefix == "osd pool deep-scrub"));
+        }
+      }
+    }
+    cmdctx->reply(0, "");
+    return true;
   } else if (prefix == "osd reweight-by-pg" ||
 	     prefix == "osd reweight-by-utilization" ||
 	     prefix == "osd test-reweight-by-pg" ||
@@ -1188,14 +1246,41 @@ bool DaemonServer::_handle_command(
   } else if (prefix == "osd df") {
     string method;
     cmd_getval(g_ceph_context, cmdctx->cmdmap, "output_method", method);
+    string filter_by;
+    string filter;
+    cmd_getval(g_ceph_context, cmdctx->cmdmap, "filter_by", filter_by);
+    cmd_getval(g_ceph_context, cmdctx->cmdmap, "filter", filter);
+    if (filter_by.empty() != filter.empty()) {
+      cmdctx->reply(-EINVAL, "you must specify both 'filter_by' and 'filter'");
+      return true;
+    }
+    stringstream rs;
     r = cluster_state.with_osdmap_and_pgmap([&](const OSDMap& osdmap, const PGMap& pgmap) {
+        string class_name;
+        string item_name;
+        // sanity check filter(s)
+        if (filter_by == "class") {
+          if (!osdmap.crush->class_exists(filter)) {
+            rs << "specified class '" << filter << "' does not exist";
+            return -EINVAL;
+          }
+          class_name = filter;
+        }
+        if (filter_by == "name") {
+          if (!osdmap.crush->name_exists(filter)) {
+            rs << "specified name '" << filter << "' does not exist";
+            return -EINVAL;
+          }
+          item_name = filter;
+        }
 	print_osd_utilization(osdmap, pgmap, ss,
-			      f.get(), method == "tree");
+                              f.get(), method == "tree",
+                              class_name, item_name);
 	
 	cmdctx->odata.append(ss);
 	return 0;
       });
-    cmdctx->reply(r, "");
+    cmdctx->reply(r, rs);
     return true;
   } else if (prefix == "osd pool stats") {
     string pool_name;
@@ -1480,11 +1565,18 @@ bool DaemonServer::_handle_command(
     cmdctx->reply(0, ss);
     return true;
   } else if (prefix == "pg force-recovery" ||
-  	       prefix == "pg force-backfill" ||
-  	       prefix == "pg cancel-force-recovery" ||
-  	       prefix == "pg cancel-force-backfill") {
-    string forceop = prefix.substr(3, string::npos);
-    list<pg_t> parsed_pgs;
+  	     prefix == "pg force-backfill" ||
+  	     prefix == "pg cancel-force-recovery" ||
+  	     prefix == "pg cancel-force-backfill" ||
+             prefix == "osd pool force-recovery" ||
+             prefix == "osd pool force-backfill" ||
+             prefix == "osd pool cancel-force-recovery" ||
+             prefix == "osd pool cancel-force-backfill") {
+    vector<string> vs;
+    get_str_vec(prefix, vs);
+    auto& granularity = vs.front();
+    auto& forceop = vs.back();
+    vector<pg_t> pgs;
 
     // figure out actual op just once
     int actual_op = 0;
@@ -1498,89 +1590,109 @@ bool DaemonServer::_handle_command(
       actual_op = OFR_RECOVERY | OFR_CANCEL;
     }
 
-    // covnert pg names to pgs, discard any invalid ones while at it
-    {
-      // we don't want to keep pgidstr and pgidstr_nodup forever
-      vector<string> pgidstr;
-      // get pgids to process and prune duplicates
-      cmd_getval(g_ceph_context, cmdctx->cmdmap, "pgid", pgidstr);
-      set<string> pgidstr_nodup(pgidstr.begin(), pgidstr.end());
-      if (pgidstr.size() != pgidstr_nodup.size()) {
-	// move elements only when there were duplicates, as this
-	// reorders them
-	pgidstr.resize(pgidstr_nodup.size());
-	auto it = pgidstr_nodup.begin();
-	for (size_t i = 0 ; i < pgidstr_nodup.size(); i++) {
-	  pgidstr[i] = std::move(*it++);
-	}
+    set<pg_t> candidates; // deduped
+    if (granularity == "pg") {
+      // covnert pg names to pgs, discard any invalid ones while at it
+      vector<string> pgids;
+      cmd_getval(g_ceph_context, cmdctx->cmdmap, "pgid", pgids);
+      for (auto& i : pgids) {
+        pg_t pgid;
+        if (!pgid.parse(i.c_str())) {
+          ss << "invlaid pgid '" << i << "'; ";
+          r = -EINVAL;
+          continue;
+        }
+        candidates.insert(pgid);
       }
-
-      cluster_state.with_pgmap([&](const PGMap& pg_map) {
-	for (auto& pstr : pgidstr) {
-	  pg_t parsed_pg;
-	  if (!parsed_pg.parse(pstr.c_str())) {
-	    ss << "invalid pgid '" << pstr << "'; ";
-	    r = -EINVAL;
-	  } else {
-	    auto workit = pg_map.pg_stat.find(parsed_pg);
-	    if (workit == pg_map.pg_stat.end()) {
-	      ss << "pg " << pstr << " does not exist; ";
-	      r = -ENOENT;
-	    } else {
-	      pg_stat_t workpg = workit->second;
-
-	      // discard pgs for which user requests are pointless
-	      switch (actual_op)
-	      {
-		case OFR_RECOVERY:
-		  if ((workpg.state & (PG_STATE_DEGRADED | PG_STATE_RECOVERY_WAIT | PG_STATE_RECOVERING)) == 0) {
-		    // don't return error, user script may be racing with cluster. not fatal.
-		    ss << "pg " << pstr << " doesn't require recovery; ";
-		    continue;
-		  } else  if (workpg.state & PG_STATE_FORCED_RECOVERY) {
-		    ss << "pg " << pstr << " recovery already forced; ";
-		    // return error, as it may be a bug in user script
-		    r = -EINVAL;
-		    continue;
-		  }
-		  break;
-		case OFR_BACKFILL:
-		  if ((workpg.state & (PG_STATE_DEGRADED | PG_STATE_BACKFILL_WAIT | PG_STATE_BACKFILLING)) == 0) {
-		    ss << "pg " << pstr << " doesn't require backfilling; ";
-		    continue;
-		  } else  if (workpg.state & PG_STATE_FORCED_BACKFILL) {
-		    ss << "pg " << pstr << " backfill already forced; ";
-		    r = -EINVAL;
-		    continue;
-		  }
-		  break;
-		case OFR_BACKFILL | OFR_CANCEL:
-		  if ((workpg.state & PG_STATE_FORCED_BACKFILL) == 0) {
-		    ss << "pg " << pstr << " backfill not forced; ";
-		    continue;
-		  }
-		  break;
-		case OFR_RECOVERY | OFR_CANCEL:
-		  if ((workpg.state & PG_STATE_FORCED_RECOVERY) == 0) {
-		    ss << "pg " << pstr << " recovery not forced; ";
-		    continue;
-		  }
-		  break;
-		default:
-		  ceph_abort_msg("actual_op value is not supported");
-	      }
-
-	      parsed_pgs.push_back(std::move(parsed_pg));
-	    }
-	  }
-	}
+    } else {
+      // per pool
+      vector<string> pool_names;
+      cmd_getval(g_ceph_context, cmdctx->cmdmap, "who", pool_names);
+      if (pool_names.empty()) {
+        ss << "must specify one or more pool names";
+        cmdctx->reply(-EINVAL, ss);
+        return true;
+      }
+      cluster_state.with_osdmap([&](const OSDMap& osdmap) {
+        for (auto& pool_name : pool_names) {
+          auto pool_id = osdmap.lookup_pg_pool_name(pool_name);
+          if (pool_id < 0) {
+            ss << "unrecognized pool '" << pool_name << "'";
+            r = -ENOENT;
+            return;
+          }
+          auto pool_pg_num = osdmap.get_pg_num(pool_id);
+          for (int i = 0; i < pool_pg_num; i++)
+            candidates.insert({(unsigned int)i, (uint64_t)pool_id});
+        }
       });
+      if (r < 0) {
+        cmdctx->reply(r, ss);
+        return true;
+      }
     }
+
+    cluster_state.with_pgmap([&](const PGMap& pg_map) {
+      for (auto& i : candidates) {
+	auto it = pg_map.pg_stat.find(i);
+	if (it == pg_map.pg_stat.end()) {
+	  ss << "pg " << i << " does not exist; ";
+	  r = -ENOENT;
+          continue;
+	}
+        auto state = it->second.state;
+	// discard pgs for which user requests are pointless
+	switch (actual_op) {
+        case OFR_RECOVERY:
+          if ((state & (PG_STATE_DEGRADED |
+                        PG_STATE_RECOVERY_WAIT |
+                        PG_STATE_RECOVERING)) == 0) {
+            // don't return error, user script may be racing with cluster.
+            // not fatal.
+            ss << "pg " << i << " doesn't require recovery; ";
+            continue;
+          } else  if (state & PG_STATE_FORCED_RECOVERY) {
+            ss << "pg " << i << " recovery already forced; ";
+            // return error, as it may be a bug in user script
+            r = -EINVAL;
+            continue;
+          }
+          break;
+        case OFR_BACKFILL:
+          if ((state & (PG_STATE_DEGRADED |
+                        PG_STATE_BACKFILL_WAIT |
+                        PG_STATE_BACKFILLING)) == 0) {
+            ss << "pg " << i << " doesn't require backfilling; ";
+            continue;
+          } else if (state & PG_STATE_FORCED_BACKFILL) {
+            ss << "pg " << i << " backfill already forced; ";
+            r = -EINVAL;
+            continue;
+          }
+          break;
+        case OFR_BACKFILL | OFR_CANCEL:
+          if ((state & PG_STATE_FORCED_BACKFILL) == 0) {
+            ss << "pg " << i << " backfill not forced; ";
+            continue;
+          }
+          break;
+        case OFR_RECOVERY | OFR_CANCEL:
+          if ((state & PG_STATE_FORCED_RECOVERY) == 0) {
+            ss << "pg " << i << " recovery not forced; ";
+            continue;
+          }
+          break;
+        default:
+          ceph_abort_msg("actual_op value is not supported");
+        }
+	pgs.push_back(i);
+      } // for
+    });
 
     // respond with error only when no pgs are correct
     // yes, in case of mixed errors, only the last one will be emitted,
     // but the message presented will be fine
-    if (parsed_pgs.size() != 0) {
+    if (pgs.size() != 0) {
       // clear error to not confuse users/scripts
       r = 0;
     }
@@ -1590,7 +1702,7 @@ bool DaemonServer::_handle_command(
     cluster_state.with_osdmap([&](const OSDMap& osdmap) {
 	// group pgs to process by osd
 	map<int, vector<spg_t>> osdpgs;
-	for (auto& pgid : parsed_pgs) {
+	for (auto& pgid : pgs) {
 	  int primary;
 	  spg_t spg;
 	  if (osdmap.get_primary_shard(pgid, &primary, &spg)) {
@@ -2087,6 +2199,7 @@ bool DaemonServer::_handle_command(
 
     // Validate that the module is enabled
     PyModuleRef module = py_modules.get_module(handler_name);
+    ceph_assert(module);
     if (!module->is_enabled()) {
       ss << "Module '" << handler_name << "' is not enabled (required by "
             "command '" << prefix << "'): use `ceph mgr module enable "
@@ -2194,6 +2307,7 @@ void DaemonServer::send_report()
 
   auto m = new MMonMgrReport();
   py_modules.get_health_checks(&m->health_checks);
+  py_modules.get_progress_events(&m->progress_events);
 
   cluster_state.with_mutable_pgmap([&](PGMap& pg_map) {
       cluster_state.update_delta_stats();
@@ -2225,6 +2339,9 @@ void DaemonServer::send_report()
 	  jf.dump_object("health_checks", m->health_checks);
 	  jf.flush(*_dout);
 	  *_dout << dendl;
+          if (osdmap.require_osd_release >= CEPH_RELEASE_LUMINOUS) {
+              clog->debug() << "pgmap v" << pg_map.version << ": " << pg_map;
+          }
 	});
     });
 
@@ -2576,8 +2693,9 @@ void DaemonServer::got_mgr_map()
       auto md_update = [&] (DaemonKey key) {
         std::ostringstream oss;
         auto c = new MetadataUpdate(daemon_state, key);
+	// FIXME remove post-nautilus: include 'id' for luminous mons
         oss << "{\"prefix\": \"mgr metadata\", \"who\": \""
-              << key.second << "\"}";
+	    << key.second << "\", \"id\": \"" << key.second << "\"}";
         monc->start_mon_command({oss.str()}, {}, &c->outbl, &c->outs, c);
       };
       if (mgrmap.active_name.size()) {
@@ -2614,21 +2732,18 @@ const char** DaemonServer::get_tracked_conf_keys() const
 void DaemonServer::handle_conf_change(const ConfigProxy& conf,
 				      const std::set <std::string> &changed)
 {
-  // We may be called within lock (via MCommand `config set`) or outwith the
-  // lock (via admin socket `config set`), so handle either case.
-  const bool initially_locked = lock.is_locked_by_me();
-  if (!initially_locked) {
-    lock.Lock();
-  }
 
   if (changed.count("mgr_stats_threshold") || changed.count("mgr_stats_period")) {
     dout(4) << "Updating stats threshold/period on "
             << daemon_connections.size() << " clients" << dendl;
     // Send a fresh MMgrConfigure to all clients, so that they can follow
     // the new policy for transmitting stats
-    for (auto &c : daemon_connections) {
-      _send_configure(c);
-    }
+    finisher.queue(new FunctionContext([this](int r) {
+      std::lock_guard l(lock);
+      for (auto &c : daemon_connections) {
+        _send_configure(c);
+      }
+    }));
   }
 }
 

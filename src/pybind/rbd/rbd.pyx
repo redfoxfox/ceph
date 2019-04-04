@@ -188,6 +188,7 @@ cdef extern from "rbd/librbd.h" nogil:
         _RBD_TRASH_IMAGE_SOURCE_USER "RBD_TRASH_IMAGE_SOURCE_USER",
         _RBD_TRASH_IMAGE_SOURCE_MIRRORING "RBD_TRASH_IMAGE_SOURCE_MIRRORING",
         _RBD_TRASH_IMAGE_SOURCE_MIGRATION "RBD_TRASH_IMAGE_SOURCE_MIGRATION"
+        _RBD_TRASH_IMAGE_SOURCE_REMOVING "RBD_TRASH_IMAGE_SOURCE_REMOVING"
 
     ctypedef struct rbd_trash_image_info_t:
         char *id
@@ -451,10 +452,14 @@ cdef extern from "rbd/librbd.h" nogil:
                                      char *original_name, size_t max_length)
 
     int rbd_flatten(rbd_image_t image)
+    int rbd_sparsify(rbd_image_t image, size_t sparse_size)
     int rbd_rebuild_object_map(rbd_image_t image, librbd_progress_fn_t cb,
                                void *cbdata)
     int rbd_list_children3(rbd_image_t image, rbd_linked_image_spec_t *children,
                            size_t *max_children)
+    int rbd_list_descendants(rbd_image_t image,
+                             rbd_linked_image_spec_t *descendants,
+                             size_t *max_descendants)
 
     ssize_t rbd_list_lockers(rbd_image_t image, int *exclusive,
                              char *tag, size_t *tag_len,
@@ -1336,7 +1341,7 @@ class RBD(object):
         if ret != 0:
             raise make_ex(ret, 'error retrieving image from trash')
 
-        __source_string = ['USER', 'MIRRORING', 'MIGRATION']
+        __source_string = ['USER', 'MIRRORING', 'MIGRATION', 'REMOVING']
         info = {
             'id'          : decode_cstr(c_info.id),
             'name'        : decode_cstr(c_info.name),
@@ -2525,6 +2530,12 @@ cdef class Group(object):
 
         self._ioctx = convert_ioctx(ioctx)
         self._name = name
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type_, value, traceback):
+        return False
 
     def add_image(self, image_ioctx, image_name):
         """
@@ -3721,6 +3732,17 @@ written." % (self.name, ret, length))
         if ret < 0:
             raise make_ex(ret, "error flattening %s" % self.name)
 
+    def sparsify(self, sparse_size):
+        """
+        Reclaim space for zeroed image extents
+        """
+        cdef:
+            size_t _sparse_size = sparse_size
+        with nogil:
+            ret = rbd_sparsify(self.image, _sparse_size)
+        if ret < 0:
+            raise make_ex(ret, "error sparsifying %s" % self.name)
+
     def rebuild_object_map(self):
         """
         Rebuild the object map for the image HEAD or currently set snapshot
@@ -3762,11 +3784,19 @@ written." % (self.name, ret, length))
 
     def list_children2(self):
         """
-        Iterate over the children of a snapshot.
+        Iterate over the children of the image or its snapshot.
 
         :returns: :class:`ChildIterator`
         """
         return ChildIterator(self)
+
+    def list_descendants(self):
+        """
+        Iterate over the descendants of the image.
+
+        :returns: :class:`ChildIterator`
+        """
+        return ChildIterator(self, True)
 
     def list_lockers(self):
         """
@@ -4225,7 +4255,7 @@ written." % (self.name, ret, length))
 
         :param key: metadata key
         :type key: str
-        :returns: str - image id
+        :returns: str - metadata value
         """
         key = cstr(key, 'key')
         cdef:
@@ -4682,7 +4712,7 @@ cdef class TrashIterator(object):
 
 cdef class ChildIterator(object):
     """
-    Iterator over child info for a snapshot.
+    Iterator over child info for the image or its snapshot.
 
     Yields a dictionary containing information about a child.
 
@@ -4703,15 +4733,21 @@ cdef class ChildIterator(object):
     cdef size_t num_children
     cdef object image
 
-    def __init__(self, Image image):
+    def __init__(self, Image image, descendants=False):
         self.image = image
         self.children = NULL
         self.num_children = 10
         while True:
             self.children = <rbd_linked_image_spec_t*>realloc_chk(
                 self.children, self.num_children * sizeof(rbd_linked_image_spec_t))
-            with nogil:
-                ret = rbd_list_children3(image.image, self.children, &self.num_children)
+            if descendants:
+                with nogil:
+                    ret = rbd_list_descendants(image.image, self.children,
+                                               &self.num_children)
+            else:
+                with nogil:
+                    ret = rbd_list_children3(image.image, self.children,
+                                             &self.num_children)
             if ret >= 0:
                 break
             elif ret != -errno.ERANGE:

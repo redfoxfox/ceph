@@ -17,6 +17,8 @@
 
 #include <string_view>
 
+#include <common/DecayCounter.h>
+
 #include "messages/MClientReconnect.h"
 #include "messages/MClientReply.h"
 #include "messages/MClientRequest.h"
@@ -92,7 +94,7 @@ private:
   bool is_full;
 
   // State for while in reconnect
-  MDSInternalContext *reconnect_done;
+  MDSContext *reconnect_done;
   int failed_reconnects;
   bool reconnect_evicting;  // true if I am waiting for evictions to complete
                             // before proceeding to reconnect_gather_finish
@@ -130,6 +132,10 @@ public:
   bool waiting_for_reconnect(client_t c) const;
   void dump_reconnect_status(Formatter *f) const;
 
+  time last_recalled() const {
+    return last_recall_state;
+  }
+
   void handle_client_session(const MClientSession::const_ref &m);
   void _session_logged(Session *session, uint64_t state_seq, 
 		       bool open, version_t pv, interval_set<inodeno_t>& inos,version_t piv);
@@ -153,7 +159,7 @@ public:
   void finish_reclaim_session(Session *session, const MClientReclaimReply::ref &reply=nullptr);
   void handle_client_reclaim(const MClientReclaim::const_ref &m);
 
-  void reconnect_clients(MDSInternalContext *reconnect_done_);
+  void reconnect_clients(MDSContext *reconnect_done_);
   void handle_client_reconnect(const MClientReconnect::const_ref &m);
   void infer_supported_features(Session *session, client_metadata_t& client_metadata);
   void update_required_client_features();
@@ -163,8 +169,12 @@ public:
   void reconnect_tick();
   void recover_filelocks(CInode *in, bufferlist locks, int64_t client);
 
-  void recall_client_state(double ratio, bool flush_client_session,
-                           MDSGatherBuilder *gather);
+  enum RecallFlags {
+    NONE = 0,
+    STEADY = (1<<0),
+    ENFORCE_MAX = (1<<1),
+  };
+  std::pair<bool, uint64_t> recall_client_state(MDSGatherBuilder* gather, enum RecallFlags=RecallFlags::NONE);
   void force_clients_readonly();
 
   // -- requests --
@@ -339,6 +349,9 @@ public:
 private:
   void reply_client_request(MDRequestRef& mdr, const MClientReply::ref &reply);
   void flush_session(Session *session, MDSGatherBuilder *gather);
+
+  DecayCounter recall_throttle;
+  time last_recall_state;
 };
 
 #endif

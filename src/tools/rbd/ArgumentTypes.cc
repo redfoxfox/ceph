@@ -27,6 +27,7 @@ const std::map<uint64_t, std::string> ImageFeatures::FEATURE_MAPPING = {
   {RBD_FEATURE_JOURNALING, RBD_FEATURE_NAME_JOURNALING},
   {RBD_FEATURE_DATA_POOL, RBD_FEATURE_NAME_DATA_POOL},
   {RBD_FEATURE_OPERATIONS, RBD_FEATURE_NAME_OPERATIONS},
+  {RBD_FEATURE_MIGRATING, RBD_FEATURE_NAME_MIGRATING},
 };
 
 Format::Formatter Format::create_formatter(bool pretty) const {
@@ -166,20 +167,19 @@ void add_snap_id_option(po::options_description *opt) {
 }
 
 void add_pool_options(boost::program_options::options_description *pos,
-                      boost::program_options::options_description *opt) {
-  pos->add_options()
-    ("pool-name", "pool name");
+                      boost::program_options::options_description *opt,
+                      bool namespaces_supported) {
   opt->add_options()
     ((POOL_NAME + ",p").c_str(), po::value<std::string>(), "pool name");
-}
-
-void add_namespace_options(boost::program_options::options_description *pos,
-                           boost::program_options::options_description *opt) {
-  if (pos != nullptr) {
+  if (namespaces_supported) {
+    add_namespace_option(opt, ARGUMENT_MODIFIER_NONE);
     pos->add_options()
-      ("namespace-name", "namespace name");
+      ("pool-spec", "pool specification\n"
+       "(example: <pool-name>[/<namespace>]");
+  } else {
+    pos->add_options()
+      ("pool-name", "pool name");
   }
-  add_namespace_option(opt, ARGUMENT_MODIFIER_NONE);
 }
 
 void add_image_spec_options(po::options_description *pos,
@@ -188,7 +188,7 @@ void add_image_spec_options(po::options_description *pos,
   pos->add_options()
     ((get_name_prefix(modifier) + IMAGE_SPEC).c_str(),
      (get_description_prefix(modifier) + "image specification\n" +
-      "(example: [<pool-name>/[<namespace-name>/]]<image-name>)").c_str());
+      "(example: [<pool-name>/[<namespace>/]]<image-name>)").c_str());
   add_pool_option(opt, modifier);
   add_namespace_option(opt, modifier);
   add_image_option(opt, modifier);
@@ -200,7 +200,7 @@ void add_snap_spec_options(po::options_description *pos,
   pos->add_options()
     ((get_name_prefix(modifier) + SNAPSHOT_SPEC).c_str(),
      (get_description_prefix(modifier) + "snapshot specification\n" +
-      "(example: [<pool-name>/[<namespace-name>/]]<image-name>@<snapshot-name>)").c_str());
+      "(example: [<pool-name>/[<namespace>/]]<image-name>@<snapshot-name>)").c_str());
   add_pool_option(opt, modifier);
   add_namespace_option(opt, modifier);
   add_image_option(opt, modifier);
@@ -213,7 +213,7 @@ void add_image_or_snap_spec_options(po::options_description *pos,
   pos->add_options()
     ((get_name_prefix(modifier) + IMAGE_OR_SNAPSHOT_SPEC).c_str(),
      (get_description_prefix(modifier) + "image or snapshot specification\n" +
-      "(example: [<pool-name>/[<namespace-name>/]]<image-name>[@<snap-name>])").c_str());
+      "(example: [<pool-name>/[<namespace>/]]<image-name>[@<snap-name>])").c_str());
   add_pool_option(opt, modifier);
   add_namespace_option(opt, modifier);
   add_image_option(opt, modifier);

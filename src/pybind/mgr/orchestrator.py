@@ -4,14 +4,44 @@ ceph-mgr orchestrator interface
 
 Please see the ceph-mgr module developer's guide for more information.
 """
+import sys
 import time
+import fnmatch
 
 try:
-    from typing import TypeVar, Generic, List
+    from typing import TypeVar, Generic, List, Optional, Union, Tuple
     T = TypeVar('T')
     G = Generic[T]
 except ImportError:
     T, G = object, object
+
+import six
+
+from mgr_util import format_bytes
+
+
+class OrchestratorError(Exception):
+    """
+    General orchestrator specific error.
+
+    Used for deployment, configuration or user errors.
+
+    It's not intended for programming errors or orchestrator internal errors.
+    """
+
+
+class NoOrchestrator(OrchestratorError):
+    """
+    No orchestrator in configured.
+    """
+    def __init__(self, msg="No orchestrator configured (try `ceph orchestrator set backend`)"):
+        super(NoOrchestrator, self).__init__(msg)
+
+
+class OrchestratorValidationError(OrchestratorError):
+    """
+    Raised when an orchestrator doesn't support a specific feature.
+    """
 
 
 class _Completion(G):
@@ -26,6 +56,21 @@ class _Completion(G):
         raise NotImplementedError()
 
     @property
+    def exception(self):
+        # type: () -> Optional[Exception]
+        """
+        Holds an exception object.
+        """
+        try:
+            return self.__exception
+        except AttributeError:
+            return None
+
+    @exception.setter
+    def exception(self, value):
+        self.__exception = value
+
+    @property
     def is_read(self):
         # type: () -> bool
         raise NotImplementedError()
@@ -38,7 +83,11 @@ class _Completion(G):
     @property
     def is_errored(self):
         # type: () -> bool
-        raise NotImplementedError()
+        """
+        Has the completion failed. Default implementation looks for
+        self.exception. Can be overwritten.
+        """
+        return self.exception is not None
 
     @property
     def should_wait(self):
@@ -46,13 +95,35 @@ class _Completion(G):
         raise NotImplementedError()
 
 
+def raise_if_exception(c):
+    # type: (_Completion) -> None
+    """
+    :raises OrchestratorError: Some user error or a config error.
+    :raises Exception: Some internal error
+    """
+    def copy_to_this_subinterpreter(r_obj):
+        # This is something like `return pickle.loads(pickle.dumps(r_obj))`
+        # Without importing anything.
+        r_cls = r_obj.__class__
+        if r_cls.__module__ == '__builtin__':
+            return r_obj
+        my_cls = getattr(sys.modules[r_cls.__module__], r_cls.__name__)
+        if id(my_cls) == id(r_cls):
+            return r_obj
+        my_obj = my_cls.__new__(my_cls)
+        for k,v in r_obj.__dict__.items():
+            setattr(my_obj, k, copy_to_this_subinterpreter(v))
+        return my_obj
+
+    if c.exception is not None:
+        raise copy_to_this_subinterpreter(c.exception)
+
+
 class ReadCompletion(_Completion):
     """
     ``Orchestrator`` implementations should inherit from this
     class to implement their own handles to operations in progress, and
     return an instance of their subclass from calls into methods.
-
-    Read operations are
     """
 
     def __init__(self):
@@ -148,6 +219,7 @@ class Orchestrator(object):
         return True
 
     def available(self):
+        # type: () -> Tuple[Optional[bool], Optional[str]]
         """
         Report whether we can talk to the orchestrator.  This is the
         place to give the user a meaningful message if the orchestrator
@@ -183,8 +255,37 @@ class Orchestrator(object):
         """
         raise NotImplementedError()
 
-    def get_inventory(self, node_filter=None):
-        # type: (InventoryFilter) -> ReadCompletion[List[InventoryNode]]
+    def add_host(self, host):
+        # type: (str) -> WriteCompletion
+        """
+        Add a host to the orchestrator inventory.
+
+        :param host: hostname
+        """
+        raise NotImplementedError()
+
+    def remove_host(self, host):
+        # type: (str) -> WriteCompletion
+        """
+        Remove a host from the orchestrator inventory.
+
+        :param host: hostname
+        """
+        raise NotImplementedError()
+
+    def get_hosts(self):
+        # type: () -> ReadCompletion[List[InventoryNode]]
+        """
+        Report the hosts in the cluster.
+
+        The default implementation is extra slow.
+
+        :return: list of InventoryNodes
+        """
+        return self.get_inventory()
+
+    def get_inventory(self, node_filter=None, refresh=False):
+        # type: (InventoryFilter, bool) -> ReadCompletion[List[InventoryNode]]
         """
         Returns something that was created by `ceph-volume inventory`.
 
@@ -203,7 +304,7 @@ class Orchestrator(object):
         When viewing a CephFS filesystem in the dashboard, we would use this
         to display the pods being currently run for MDS daemons.
 
-        Returns a list of ServiceDescription objects.
+        :return: list of ServiceDescription objects.
         """
         raise NotImplementedError()
 
@@ -213,9 +314,10 @@ class Orchestrator(object):
         Perform an action (start/stop/reload) on a service.
 
         Either service_name or service_id must be specified:
-        - If using service_name, perform the action on that entire logical
+
+        * If using service_name, perform the action on that entire logical
           service (i.e. all daemons providing that named service).
-        - If using service_id, perform the action on a single specific daemon
+        * If using service_id, perform the action on a single specific daemon
           instance.
 
         :param action: one of "start", "stop", "reload"
@@ -229,8 +331,8 @@ class Orchestrator(object):
         assert not (service_name and service_id)
         raise NotImplementedError()
 
-    def create_osds(self, osd_spec):
-        # type: (OsdCreationSpec) -> WriteCompletion
+    def create_osds(self, drive_group, all_hosts):
+        # type: (DriveGroupSpec, List[str]) -> WriteCompletion
         """
         Create one or more OSDs within a single Drive Group.
 
@@ -239,26 +341,49 @@ class Orchestrator(object):
         finer-grained OSD feature enablement (choice of backing store,
         compression/encryption, etc).
 
-        :param osd_spec: OsdCreationSpec
+        :param drive_group: DriveGroupSpec
+        :param all_hosts: TODO, this is required because the orchestrator methods are not composable
+                Probably this parameter can be easily removed because each orchestrator can use
+                the "get_inventory" method and the "drive_group.host_pattern" attribute
+                to obtain the list of hosts where to apply the operation
         """
         raise NotImplementedError()
 
-    def replace_osds(self, osd_spec):
-        # type: (OsdCreationSpec) -> WriteCompletion
+    def replace_osds(self, drive_group):
+        # type: (DriveGroupSpec) -> WriteCompletion
         """
         Like create_osds, but the osd_id_claims must be fully
         populated.
         """
         raise NotImplementedError()
 
-    def remove_osds(self, node, osd_ids):
-        # type: (str, List[str]) -> WriteCompletion
+    def remove_osds(self, osd_ids):
+        # type: (List[str]) -> WriteCompletion
         """
-        :param node: A node name, must exist.
         :param osd_ids: list of OSD IDs
 
         Note that this can only remove OSDs that were successfully
         created (i.e. got an OSD ID).
+        """
+        raise NotImplementedError()
+
+    def update_mgrs(self, num, hosts):
+        # type: (int, List[str]) -> WriteCompletion
+        """
+        Update the number of cluster managers.
+
+        :param num: requested number of managers.
+        :param hosts: list of hosts (optional)
+        """
+        raise NotImplementedError()
+
+    def update_mons(self, num, hosts):
+        # type: (int, List[Tuple[str,str]]) -> WriteCompletion
+        """
+        Update the number of cluster monitors.
+
+        :param num: requested number of monitors.
+        :param hosts: list of hosts + network (optional)
         """
         raise NotImplementedError()
 
@@ -271,8 +396,8 @@ class Orchestrator(object):
         """
         raise NotImplementedError()
 
-    def update_stateless_service(self, service_type, id_, spec):
-        # type: (str, str, StatelessServiceSpec) -> WriteCompletion
+    def update_stateless_service(self, service_type, spec):
+        # type: (str, StatelessServiceSpec) -> WriteCompletion
         """
         This is about changing / redeploying existing services. Like for
         example changing the number of service instances.
@@ -287,24 +412,6 @@ class Orchestrator(object):
         Uninstalls an existing service from the cluster.
 
         This is not about stopping services.
-        """
-        raise NotImplementedError()
-
-    def add_mon(self, node_name):
-        # type: (str) -> WriteCompletion
-        """
-        We operate on a node rather than a particular device: it is
-        assumed/expected that proper SSD storage is already available
-        and accessible in /var.
-
-        :param node_name:
-        """
-        raise NotImplementedError()
-
-    def remove_mon(self, node_name):
-        # type: (str) -> WriteCompletion
-        """
-        :param node_name: Remove MON from that host.
         """
         raise NotImplementedError()
 
@@ -328,37 +435,6 @@ class Orchestrator(object):
         Report on what versions are available to upgrade to
 
         :return: List of strings
-        """
-        raise NotImplementedError()
-
-    def add_stateful_service_rule(self, service_type, stateful_service_spec,
-                                  placement_spec):
-        """
-        Stateful service rules serve two purposes:
-         - Optionally delegate device selection to the orchestrator
-         - Enable the orchestrator to auto-assimilate new hardware if it
-           matches the placement spec, without any further calls from ceph-mgr.
-
-        To create a confidence-inspiring UI workflow, use test_stateful_service_rule
-        beforehand to show the user where stateful services will be placed
-        if they proceed.
-        """
-        raise NotImplementedError()
-
-    def test_stateful_service_rule(self, service_type, stateful_service_spec,
-                                   placement_spec):
-        """
-        See add_stateful_service_rule.
-        """
-        raise NotImplementedError()
-
-    def remove_stateful_service_rule(self, service_type, id_):
-        """
-        This will remove the *rule* but not the services that were
-        created as a result.  Those should be converted into statically
-        placed services as if they had been created with add_stateful_service,
-        so that they can be removed with remove_stateless_service
-        if desired.
         """
         raise NotImplementedError()
 
@@ -406,11 +482,22 @@ class ServiceDescription(object):
         # justify having this field here.
         self.container_id = None
 
+        # Some services can be deployed in groups. For example, mds's can
+        # have an active and standby daemons, and nfs-ganesha can run daemons
+        # in parallel. This tag refers to a group of daemons as a whole.
+        #
+        # For instance, a cluster of mds' all service the same fs, and they
+        # will all have the same service value (which may be the
+        # Filesystem name in the FSMap).
+        #
+        # Single-instance services should leave this set to None
+        self.service = None
+
         # The orchestrator will have picked some names for daemons,
         # typically either based on hostnames or on pod names.
         # This is the <foo> in mds.<foo>, the ID that will appear
         # in the FSMap/ServiceMap.
-        self.daemon_name = None
+        self.service_instance = None
 
         # The type of service (osd, mon, mgr, etc.)
         self.service_type = None
@@ -436,7 +523,8 @@ class ServiceDescription(object):
         out = {
             'nodename': self.nodename,
             'container_id': self.container_id,
-            'daemon_name': self.daemon_name,
+            'service': self.service,
+            'service_instance': self.service_instance,
             'service_type': self.service_type,
             'version': self.version,
             'rados_config_location': self.rados_config_location,
@@ -447,38 +535,144 @@ class ServiceDescription(object):
         return {k: v for (k, v) in out.items() if v is not None}
 
 
+class DeviceSelection(object):
+    """
+    Used within :class:`myclass.DriveGroupSpec` to specify the devices
+    used by the Drive Group.
+
+    Any attributes (even none) can be included in the device
+    specification structure.
+    """
+
+    def __init__(self, paths=None, id_model=None, size=None, rotates=None, count=None):
+        # type: (List[str], str, str, bool, int) -> None
+        """
+        ephemeral drive group device specification
+
+        TODO: translate from the user interface (Drive Groups) to an actual list of devices.
+        """
+        if paths is None:
+            paths = []
+
+        #: List of absolute paths to the devices.
+        self.paths = paths  # type: List[str]
+
+        #: A wildcard string. e.g: "SDD*"
+        self.id_model = id_model
+
+        #: Size specification of format LOW:HIGH.
+        #: Can also take the the form :HIGH, LOW:
+        #: or an exact value (as ceph-volume inventory reports)
+        self.size = size
+
+        #: is the drive rotating or not
+        self.rotates = rotates
+
+        #: if this is present limit the number of drives to this number.
+        self.count = count
+        self.validate()
+
+    def validate(self):
+        props = [self.id_model, self.size, self.rotates, self.count]
+        if self.paths and any(p is not None for p in props):
+            raise DriveGroupValidationError('DeviceSelection: `paths` and other parameters are mutually exclusive')
+        if not any(p is not None for p in [self.paths] + props):
+            raise DriveGroupValidationError('DeviceSelection cannot be empty')
+
+    @classmethod
+    def from_json(cls, device_spec):
+        return cls(**device_spec)
+
+
+class DriveGroupValidationError(Exception):
+    """
+    Defining an exception here is a bit problematic, cause you cannot properly catch it,
+    if it was raised in a different mgr module.
+    """
+
+    def __init__(self, msg):
+        super(DriveGroupValidationError, self).__init__('Failed to validate Drive Group: ' + msg)
+
 class DriveGroupSpec(object):
     """
     Describe a drive group in the same form that ceph-volume
     understands.
     """
-    def __init__(self, devices):
-        self.devices = devices
+    def __init__(self, host_pattern, data_devices=None, db_devices=None, wal_devices=None, journal_devices=None,
+                 data_directories=None, osds_per_device=None, objectstore='bluestore', encrypted=False,
+                 db_slots=None, wal_slots=None):
+        # type: (str, Optional[DeviceSelection], Optional[DeviceSelection], Optional[DeviceSelection], Optional[DeviceSelection], Optional[List[str]], int, str, bool, int, int) -> ()
 
+        # concept of applying a drive group to a (set) of hosts is tightly
+        # linked to the drive group itself
+        #
+        #: An fnmatch pattern to select hosts. Can also be a single host.
+        self.host_pattern = host_pattern
 
-class OsdCreationSpec(object):
-    """
-    Used during OSD creation.
+        #: A :class:`orchestrator.DeviceSelection`
+        self.data_devices = data_devices
 
-    The drive names used here may be ephemeral.
-    """
-    def __init__(self):
-        self.format = None  # filestore, bluestore
+        #: A :class:`orchestrator.DeviceSelection`
+        self.db_devices = db_devices
 
-        self.node = None  # name of a node
+        #: A :class:`orchestrator.DeviceSelection`
+        self.wal_devices = wal_devices
 
-        # List of device names
-        self.drive_group = None
+        #: A :class:`orchestrator.DeviceSelection`
+        self.journal_devices = journal_devices
 
-        # Optional: mapping of drive to OSD ID, used when the
-        # created OSDs are meant to replace previous OSDs on
-        # the same node.
+        #: Number of osd daemons per "DATA" device.
+        #: To fully utilize nvme devices multiple osds are required.
+        self.osds_per_device = osds_per_device
+
+        #: A list of strings, containing paths which should back OSDs
+        self.data_directories = data_directories
+
+        #: ``filestore`` or ``bluestore``
+        self.objectstore = objectstore
+
+        #: ``true`` or ``false``
+        self.encrypted = encrypted
+
+        #: How many OSDs per DB device
+        self.db_slots = db_slots
+
+        #: How many OSDs per WAL device
+        self.wal_slots = wal_slots
+
+        # FIXME: needs ceph-volume support
+        #: Optional: mapping of drive to OSD ID, used when the
+        #: created OSDs are meant to replace previous OSDs on
+        #: the same node.
         self.osd_id_claims = {}
 
-        # Arbitrary JSON-serializable object.
-        # Maybe your orchestrator knows how to do something
-        # special like encrypting drives
-        self.extended = {}
+    @classmethod
+    def from_json(self, json_drive_group):
+        """
+        Initialize 'Drive group' structure
+
+        :param json_drive_group: A valid json string with a Drive Group
+               specification
+        """
+        args = {k: (DeviceSelection.from_json(v) if k.endswith('_devices') else v) for k, v in
+                json_drive_group.items()}
+        return DriveGroupSpec(**args)
+
+    def hosts(self, all_hosts):
+        return fnmatch.filter(all_hosts, self.host_pattern)
+
+    def validate(self, all_hosts):
+        if not isinstance(self.host_pattern, six.string_types):
+            raise DriveGroupValidationError('host_pattern must be of type string')
+
+        specs = [self.data_devices, self.db_devices, self.wal_devices, self.journal_devices]
+        for s in filter(None, specs):
+            s.validate()
+        if self.objectstore not in ('filestore', 'bluestore'):
+            raise DriveGroupValidationError("objectstore not in ('filestore', 'bluestore')")
+        if not self.hosts(all_hosts):
+            raise DriveGroupValidationError(
+                "host_pattern '{}' does not match any hosts".format(self.host_pattern))
 
 
 class StatelessServiceSpec(object):
@@ -500,9 +694,8 @@ class StatelessServiceSpec(object):
         # within one ceph cluster.
         self.name = ""
 
-        # Minimum and maximum number of service instances
-        self.min_size = 1
-        self.max_size = 1
+        # Count of service instances
+        self.count = 1
 
         # Arbitrary JSON-serializable object.
         # Maybe you're using e.g. kubenetes and you want to pass through
@@ -523,9 +716,10 @@ class InventoryFilter(object):
                  in e.g. OSD servers.
 
     """
-    def __init__(self):
-        self.labels = None  # Optional: get info about nodes matching labels
-        self.nodes = None  # Optional: get info about certain named nodes only
+    def __init__(self, labels=None, nodes=None):
+        # type: (List[str], List[str]) -> None
+        self.labels = labels  # Optional: get info about nodes matching labels
+        self.nodes = nodes  # Optional: get info about certain named nodes only
 
 
 class InventoryDevice(object):
@@ -545,20 +739,81 @@ class InventoryDevice(object):
     is permitted to support no extended properties (only normal block
     devices)
     """
-    def __init__(self):
-        self.blank = False
-        self.type = None  # 'ssd', 'hdd', 'nvme'
-        self.id = None  # unique within a node (or globally if you like).
-        self.size = None  # byte integer.
-        self.extended = None  # arbitrary JSON-serializable object
+    def __init__(self, blank=False, type=None, id=None, size=None,
+                 rotates=False, available=False, dev_id=None, extended=None,
+                 metadata_space_free=None):
+        # type: (bool, str, str, int, bool, bool, str, dict, bool) -> None
+
+        self.blank = blank
+
+        #: 'ssd', 'hdd', 'nvme'
+        self.type = type
+
+        #: unique within a node (or globally if you like).
+        self.id = id
+
+        #: byte integer.
+        self.size = size
+
+        #: indicates if it is a spinning disk
+        self.rotates = rotates
+
+        #: can be used to create a new OSD?
+        self.available = available
+
+        #: vendor/model
+        self.dev_id = dev_id
+
+        #: arbitrary JSON-serializable object
+        self.extended = extended if extended is not None else extended
 
         # If this drive is not empty, but is suitable for appending
         # additional journals, wals, or bluestore dbs, then report
         # how much space is available.
-        self.metadata_space_free = None
+        self.metadata_space_free = metadata_space_free
 
     def to_json(self):
-        return dict(type=self.type, blank=self.blank, id=self.id, size=self.size, **self.extended)
+        return dict(type=self.type, blank=self.blank, id=self.id,
+                    size=self.size, rotates=self.rotates,
+                    available=self.available, dev_id=self.dev_id,
+                    extended=self.extended)
+
+    @classmethod
+    def from_ceph_volume_inventory(cls, data):
+        # TODO: change InventoryDevice itself to mirror c-v inventory closely!
+
+        dev = InventoryDevice()
+        dev.id = data["path"]
+        dev.type = 'hdd' if data["sys_api"]["rotational"] == "1" else 'sdd/nvme'
+        dev.size = data["sys_api"]["size"]
+        dev.rotates = data["sys_api"]["rotational"] == "1"
+        dev.available = data["available"]
+        dev.dev_id = "%s/%s" % (data["sys_api"]["vendor"],
+                                data["sys_api"]["model"])
+        dev.extended = data
+        return dev
+
+    def pretty_print(self, only_header=False):
+        """Print a human friendly line with the information of the device
+
+        :param only_header: Print only the name of the device attributes
+
+        Ex::
+
+            Device Path           Type       Size    Rotates  Available Model
+            /dev/sdc            hdd   50.00 GB       True       True ATA/QEMU
+
+        """
+        row_format = "  {0:<15} {1:>10} {2:>10} {3:>10} {4:>10} {5:<15}\n"
+        if only_header:
+            return row_format.format("Device Path", "Type", "Size", "Rotates",
+                                     "Available", "Model")
+        else:
+            return row_format.format(str(self.id), self.type if self.type is not None else "",
+                                     format_bytes(self.size if self.size is not None else 0, 5,
+                                                  colored=False),
+                                     str(self.rotates), str(self.available),
+                                     self.dev_id if self.dev_id is not None else "")
 
 
 class InventoryNode(object):
@@ -567,9 +822,10 @@ class InventoryNode(object):
     InventoryNode.
     """
     def __init__(self, name, devices):
+        # type: (str, List[InventoryDevice]) -> None
         assert isinstance(devices, list)
         self.name = name  # unique within cluster.  For example a hostname.
-        self.devices = devices  # type: List[InventoryDevice]
+        self.devices = devices
 
     def to_json(self):
         return {'name': self.name, 'devices': [d.to_json() for d in self.devices]}
@@ -584,35 +840,60 @@ def _mk_orch_methods(cls):
         return inner
 
     for meth in Orchestrator.__dict__:
-        if not meth.startswith('_') and meth not in ['is_orchestrator_module', 'available']:
+        if not meth.startswith('_') and meth not in ['is_orchestrator_module']:
             setattr(cls, meth, shim(meth))
     return cls
 
 
 @_mk_orch_methods
 class OrchestratorClientMixin(Orchestrator):
+    """
+    A module that inherents from `OrchestratorClientMixin` can directly call
+    all :class:`Orchestrator` methods without manually calling remote.
+
+    Every interface method from ``Orchestrator`` is converted into a stub method that internally
+    calls :func:`OrchestratorClientMixin._oremote`
+
+    >>> class MyModule(OrchestratorClientMixin):
+    ...    def func(self):
+    ...        completion = self.add_host('somehost')  # calls `_oremote()`
+    ...        self._orchestrator_wait([completion])
+    ...        self.log.debug(completion.result)
+
+    """
     def _oremote(self, meth, args, kwargs):
         """
         Helper for invoking `remote` on whichever orchestrator is enabled
+
+        :raises RuntimeError: If the remote method failed.
+        :raises NoOrchestrator:
+        :raises ImportError: no `orchestrator_cli` module or backend not found.
         """
         try:
             o = self._select_orchestrator()
         except AttributeError:
             o = self.remote('orchestrator_cli', '_select_orchestrator')
+
+        if o is None:
+            raise NoOrchestrator()
+
+        self.log.debug("_oremote {} -> {}.{}(*{}, **{})".format(self.module_name, o, meth, args, kwargs))
         return self.remote(o, meth, *args, **kwargs)
 
     def _orchestrator_wait(self, completions):
+        # type: (List[_Completion]) -> None
         """
-        Helper to wait for completions to complete (reads) or
+        Wait for completions to complete (reads) or
         become persistent (writes).
 
         Waits for writes to be *persistent* but not *effective*.
+
+        :param completions: List of Completions
+        :raises NoOrchestrator:
+        :raises ImportError: no `orchestrator_cli` module or backend not found.
         """
         while not self.wait(completions):
             if any(c.should_wait for c in completions):
                 time.sleep(5)
             else:
                 break
-
-        if all(hasattr(c, 'error') and getattr(c, 'error') for c in completions):
-            raise Exception([getattr(c, 'error') for c in completions])

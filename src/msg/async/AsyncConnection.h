@@ -132,9 +132,11 @@ class AsyncConnection : public Connection {
     policy.lossy = true;
   }
 
- entity_addr_t get_peer_socket_addr() const override {
-   return target_addr;
- }
+  entity_addr_t get_peer_socket_addr() const override {
+    return target_addr;
+  }
+
+  int get_con_mode() const override;
 
  private:
   enum {
@@ -194,7 +196,9 @@ class AsyncConnection : public Connection {
   // Accepting state
   bool msgr2 = false;
   entity_addr_t socket_addr;  ///< local socket addr
-  entity_addr_t target_addr;  ///< which of the peer_addrs we're using
+  entity_addr_t target_addr;  ///< which of the peer_addrs we're connecting to (as clienet) or should reconnect to (as peer)
+
+  entity_addr_t _infer_target_addr(const entity_addrvec_t& av);
 
   // used only by "read_until"
   uint64_t state_offset;

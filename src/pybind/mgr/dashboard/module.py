@@ -7,17 +7,14 @@ from __future__ import absolute_import
 import collections
 import errno
 from distutils.version import StrictVersion
-from distutils.util import strtobool
 import os
 import socket
 import tempfile
 import threading
 import time
 from uuid import uuid4
-
 from OpenSSL import crypto
-
-from mgr_module import MgrModule, MgrStandbyModule
+from mgr_module import MgrModule, MgrStandbyModule, Option
 
 try:
     import cherrypy
@@ -35,7 +32,7 @@ if cherrypy is not None:
     v = StrictVersion(cherrypy.__version__)
     # It was fixed in 3.7.0.  Exact lower bound version is probably earlier,
     # but 3.5.0 is what this monkey patch is tested on.
-    if v >= StrictVersion("3.5.0") and v < StrictVersion("3.7.0"):
+    if StrictVersion("3.5.0") <= v < StrictVersion("3.7.0"):
         from cherrypy.wsgiserver.wsgiserver2 import HTTPConnection,\
                                                     CP_fileobject
 
@@ -48,11 +45,28 @@ if cherrypy is not None:
 
         HTTPConnection.__init__ = fixed_init
 
+# When the CherryPy server in 3.2.2 (and later) starts it attempts to verify
+# that the ports its listening on are in fact bound. When using the any address
+# "::" it tries both ipv4 and ipv6, and in some environments (e.g. kubernetes)
+# ipv6 isn't yet configured / supported and CherryPy throws an uncaught
+# exception.
+if cherrypy is not None:
+    v = StrictVersion(cherrypy.__version__)
+    # the issue was fixed in 3.2.3. it's present in 3.2.2 (current version on
+    # centos:7) and back to at least 3.0.0.
+    if StrictVersion("3.1.2") <= v < StrictVersion("3.2.3"):
+        # https://github.com/cherrypy/cherrypy/issues/1100
+        from cherrypy.process import servers
+        servers.wait_for_occupied_port = lambda host, port: None
 
 if 'COVERAGE_ENABLED' in os.environ:
     import coverage
-    _cov = coverage.Coverage(config_file="{}/.coveragerc".format(os.path.dirname(__file__)))
-    _cov.start()
+    __cov = coverage.Coverage(config_file="{}/.coveragerc".format(os.path.dirname(__file__)),
+                              data_suffix=True)
+
+    cherrypy.engine.subscribe('start', __cov.start)
+    cherrypy.engine.subscribe('after_request', __cov.save)
+    cherrypy.engine.subscribe('stop', __cov.stop)
 
 # pylint: disable=wrong-import-position
 from . import logger, mgr
@@ -65,6 +79,9 @@ from .services.sso import SSO_COMMANDS, \
 from .services.exception import dashboard_exception_handler
 from .settings import options_command_list, options_schema_list, \
                       handle_option_command
+
+from .plugins import PLUGIN_MANAGER
+from .plugins import feature_toggles  # noqa # pylint: disable=unused-import
 
 
 # cherrypy likes to sys.exit on error.  don't let it take us down too!
@@ -107,22 +124,26 @@ class CherryPyConfig(object):
         :returns our URI
         """
         server_addr = self.get_localized_module_option('server_addr', '::')
-        ssl = strtobool(self.get_localized_module_option('ssl', 'True'))
-        def_server_port = 8443
+        ssl = self.get_localized_module_option('ssl', True)
         if not ssl:
-            def_server_port = 8080
+            server_port = self.get_localized_module_option('server_port', 8080)
+        else:
+            server_port = self.get_localized_module_option('ssl_server_port', 8443)
 
-        server_port = self.get_localized_module_option('server_port', def_server_port)
         if server_addr is None:
             raise ServerConfigException(
                 'no server_addr configured; '
                 'try "ceph config set mgr mgr/{}/{}/server_addr <ip>"'
                 .format(self.module_name, self.get_mgr_id()))
-        self.log.info('server_addr: %s server_port: %s', server_addr,
-                      server_port)
+        self.log.info('server: ssl=%s host=%s port=%d', 'yes' if ssl else 'no',
+                      server_addr, server_port)
 
         # Initialize custom handlers.
         cherrypy.tools.authenticate = AuthManagerTool()
+        cherrypy.tools.plugin_hooks = cherrypy.Tool(
+            'before_handler',
+            lambda: PLUGIN_MANAGER.hook.filter_request_before_handler(request=cherrypy.request),
+            priority=10)
         cherrypy.tools.request_logging = RequestLoggingTool()
         cherrypy.tools.dashboard_exception_handler = HandlerWrapperTool(dashboard_exception_handler,
                                                                         priority=31)
@@ -143,7 +164,8 @@ class CherryPyConfig(object):
                 'application/javascript',
             ],
             'tools.json_in.on': True,
-            'tools.json_in.force': False
+            'tools.json_in.force': False,
+            'tools.plugin_hooks.on': True,
         }
 
         if ssl:
@@ -237,19 +259,23 @@ class Module(MgrModule, CherryPyConfig):
     ]
     COMMANDS.extend(options_command_list())
     COMMANDS.extend(SSO_COMMANDS)
+    PLUGIN_MANAGER.hook.register_commands()
 
     MODULE_OPTIONS = [
-        {'name': 'server_addr'},
-        {'name': 'server_port'},
-        {'name': 'jwt_token_ttl'},
-        {'name': 'password'},
-        {'name': 'url_prefix'},
-        {'name': 'username'},
-        {'name': 'key_file'},
-        {'name': 'crt_file'},
-        {'name': 'ssl'}
+        Option(name='server_addr', type='str', default='::'),
+        Option(name='server_port', type='int', default=8080),
+        Option(name='ssl_server_port', type='int', default=8443),
+        Option(name='jwt_token_ttl', type='int', default=28800),
+        Option(name='password', type='str', default=''),
+        Option(name='url_prefix', type='str', default=''),
+        Option(name='username', type='str', default=''),
+        Option(name='key_file', type='str', default=''),
+        Option(name='crt_file', type='str', default=''),
+        Option(name='ssl', type='bool', default=True)
     ]
     MODULE_OPTIONS.extend(options_schema_list())
+    for options in PLUGIN_MANAGER.hook.get_options() or []:
+        MODULE_OPTIONS.extend(options)
 
     __pool_stats = collections.defaultdict(lambda: collections.defaultdict(
         lambda: collections.deque(maxlen=10)))
@@ -262,6 +288,9 @@ class Module(MgrModule, CherryPyConfig):
 
         self._stopping = threading.Event()
         self.shutdown_event = threading.Event()
+
+        self.ACCESS_CTRL_DB = None
+        self.SSO_DB = None
 
     @classmethod
     def can_run(cls):
@@ -279,9 +308,6 @@ class Module(MgrModule, CherryPyConfig):
         return os.path.join(current_dir, 'frontend/dist')
 
     def serve(self):
-        if 'COVERAGE_ENABLED' in os.environ:
-            _cov.start()
-
         AuthManager.initialize()
         load_sso_db()
 
@@ -309,6 +335,8 @@ class Module(MgrModule, CherryPyConfig):
             }
         cherrypy.tree.mount(None, config=config)
 
+        PLUGIN_MANAGER.hook.setup()
+
         cherrypy.engine.start()
         NotificationQueue.start_queue()
         TaskManager.init()
@@ -318,9 +346,6 @@ class Module(MgrModule, CherryPyConfig):
         self.shutdown_event.clear()
         NotificationQueue.stop()
         cherrypy.engine.stop()
-        if 'COVERAGE_ENABLED' in os.environ:
-            _cov.stop()
-            _cov.save()
         logger.info('Engine stopped')
 
     def shutdown(self):
@@ -337,13 +362,13 @@ class Module(MgrModule, CherryPyConfig):
         res = handle_sso_command(cmd)
         if res[0] != -errno.ENOSYS:
             return res
-        elif cmd['prefix'] == 'dashboard set-jwt-token-ttl':
+        if cmd['prefix'] == 'dashboard set-jwt-token-ttl':
             self.set_module_option('jwt_token_ttl', str(cmd['seconds']))
             return 0, 'JWT token TTL updated', ''
-        elif cmd['prefix'] == 'dashboard get-jwt-token-ttl':
+        if cmd['prefix'] == 'dashboard get-jwt-token-ttl':
             ttl = self.get_module_option('jwt_token_ttl', JwtManager.JWT_TOKEN_TTL)
             return 0, str(ttl), ''
-        elif cmd['prefix'] == 'dashboard create-self-signed-cert':
+        if cmd['prefix'] == 'dashboard create-self-signed-cert':
             self.create_self_signed_cert()
             return 0, 'Self-signed certificate created', ''
 
@@ -377,7 +402,7 @@ class Module(MgrModule, CherryPyConfig):
 
     def get_updated_pool_stats(self):
         df = self.get('df')
-        pool_stats = dict([(p['id'], p['stats']) for p in df['pools']])
+        pool_stats = {p['id']: p['stats'] for p in df['pools']}
         now = time.time()
         for pool_id, stats in pool_stats.items():
             for stat_name, stat_val in stats.items():
@@ -423,7 +448,7 @@ class StandbyModule(MgrStandbyModule, CherryPyConfig):
                     </head>
                     <body>
                         No active ceph-mgr instance is currently running
-                        the dashboard.  A failover may be in progress.
+                        the dashboard. A failover may be in progress.
                         Retrying in {delay} seconds...
                     </body>
                 </html>

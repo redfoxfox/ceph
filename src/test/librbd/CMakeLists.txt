@@ -18,6 +18,7 @@ set(librbd_test
   test_MirroringWatcher.cc
   test_ObjectMap.cc
   test_Operations.cc
+  test_Trash.cc
   journal/test_Entries.cc
   journal/test_Replay.cc)
 add_library(rbd_test STATIC ${librbd_test})
@@ -58,16 +59,20 @@ set(unittest_librbd_srcs
   exclusive_lock/test_mock_PreAcquireRequest.cc
   exclusive_lock/test_mock_PostAcquireRequest.cc
   exclusive_lock/test_mock_PreReleaseRequest.cc
+  image/test_mock_AttachChildRequest.cc
   image/test_mock_AttachParentRequest.cc
   image/test_mock_CloneRequest.cc
   image/test_mock_DetachChildRequest.cc
   image/test_mock_DetachParentRequest.cc
   image/test_mock_ListWatchersRequest.cc
+  image/test_mock_PreRemoveRequest.cc
   image/test_mock_RefreshRequest.cc
   image/test_mock_RemoveRequest.cc
+  image/test_mock_ValidatePoolRequest.cc
   io/test_mock_ImageRequest.cc
   io/test_mock_ImageRequestWQ.cc
   io/test_mock_ObjectRequest.cc
+  io/test_mock_SimpleSchedulerObjectDispatch.cc
   journal/test_mock_OpenRequest.cc
   journal/test_mock_PromoteRequest.cc
   journal/test_mock_Replay.cc
@@ -137,7 +142,6 @@ target_link_libraries(ceph_test_librbd
   cls_journal_client
   cls_rbd_client
   librados
-  librados-cxx
   ${UNITTEST_LIBS}
   radostest)
 target_compile_definitions(ceph_test_librbd PRIVATE "TEST_LIBRBD_INTERNALS")
@@ -153,7 +157,6 @@ target_link_libraries(ceph_test_librbd_api
   radostest-cxx
   librbd
   librados
-  librados-cxx
   ${UNITTEST_LIBS})
 
 add_executable(ceph_test_librbd_fsx
@@ -163,7 +166,6 @@ add_executable(ceph_test_librbd_fsx
 target_link_libraries(ceph_test_librbd_fsx
   librbd
   librados
-  librados-cxx
   journal
   global
   m

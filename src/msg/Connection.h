@@ -38,20 +38,26 @@
 
 class Messenger;
 
+#ifdef UNIT_TESTS_BUILT
+class Interceptor;
+#endif
+
 struct Connection : public RefCountedObject {
   mutable Mutex lock;
   Messenger *msgr;
   RefCountedPtr priv;
   int peer_type;
+  int64_t peer_id = -1;  // [msgr2 only] the 0 of osd.0, 4567 or client.4567
   safe_item_history<entity_addrvec_t> peer_addrs;
   utime_t last_keepalive, last_keepalive_ack;
 private:
   uint64_t features;
 public:
+  bool is_loopback;
   bool failed; // true if we are a lossy connection that has failed.
 
   int rx_buffers_version;
-  map<ceph_tid_t,pair<bufferlist,int> > rx_buffers;
+  std::map<ceph_tid_t,std::pair<ceph::buffer::list, int>> rx_buffers;
 
   // authentication state
   // FIXME make these private after ms_handle_authorizer is removed
@@ -59,6 +65,10 @@ public:
   AuthCapsInfo peer_caps_info;
   EntityName peer_name;
   uint64_t peer_global_id = 0;
+
+#ifdef UNIT_TESTS_BUILT
+  Interceptor *interceptor;
+#endif
 
   friend class boost::intrusive_ptr<Connection>;
   friend class PipeConnection;
@@ -72,6 +82,7 @@ public:
       msgr(m),
       peer_type(-1),
       features(0),
+      is_loopback(false),
       failed(false),
       rx_buffers_version(0) {
   }
@@ -168,6 +179,10 @@ public:
   int get_peer_type() const { return peer_type; }
   void set_peer_type(int t) { peer_type = t; }
 
+  // peer_id is only defined for msgr2
+  int64_t get_peer_id() const { return peer_id; }
+  void set_peer_id(int64_t t) { peer_id = t; }
+
   bool peer_is_mon() const { return peer_type == CEPH_ENTITY_TYPE_MON; }
   bool peer_is_mgr() const { return peer_type == CEPH_ENTITY_TYPE_MGR; }
   bool peer_is_mds() const { return peer_type == CEPH_ENTITY_TYPE_MDS; }
@@ -196,15 +211,23 @@ public:
   void set_features(uint64_t f) { features = f; }
   void set_feature(uint64_t f) { features |= f; }
 
-  void post_rx_buffer(ceph_tid_t tid, bufferlist& bl) {
+  virtual int get_con_mode() const {
+    return CEPH_CON_MODE_CRC;
+  }
+
+  void post_rx_buffer(ceph_tid_t tid, ceph::buffer::list& bl) {
+#if 0
     Mutex::Locker l(lock);
     ++rx_buffers_version;
     rx_buffers[tid] = pair<bufferlist,int>(bl, rx_buffers_version);
+#endif
   }
 
   void revoke_rx_buffer(ceph_tid_t tid) {
+#if 0
     Mutex::Locker l(lock);
     rx_buffers.erase(tid);
+#endif
   }
 
   utime_t get_last_keepalive() const {

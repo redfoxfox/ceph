@@ -263,13 +263,14 @@ setup_pools()
     else
       mon_map_file=${TEMPDIR}/${remote_cluster}.monmap
       ceph --cluster ${remote_cluster} mon getmap > ${mon_map_file}
-      mon_addr=$(monmaptool --print ${mon_map_file} | grep -E 'mon\.' | head -n 1 | sed -E 's/^[0-9]+: ([^/]+).+$/\1/')
+      mon_addr=$(monmaptool --print ${mon_map_file} | grep -E 'mon\.' |
+        head -n 1 | sed -E 's/^[0-9]+: ([^ ]+).+$/\1/' | sed -E 's/\/[0-9]+//g')
 
       admin_key_file=${TEMPDIR}/${remote_cluster}.client.${CEPH_ID}.key
       CEPH_ARGS='' ceph --cluster ${remote_cluster} auth get-key client.${CEPH_ID} > ${admin_key_file}
 
       rbd --cluster ${cluster} mirror pool peer add ${POOL} client.${CEPH_ID}@${remote_cluster}-DNE \
-          --remote-mon-host ${mon_addr} --remote-key-file ${admin_key_file}
+          --remote-mon-host "${mon_addr}" --remote-key-file ${admin_key_file}
 
       uuid=$(rbd --cluster ${cluster} mirror pool peer add ${PARENT_POOL} client.${CEPH_ID}@${remote_cluster}-DNE)
       rbd --cluster ${cluster} mirror pool peer set ${PARENT_POOL} ${uuid} mon-host ${mon_addr}
@@ -322,6 +323,11 @@ cleanup()
     if [ -z "${RBD_MIRROR_NOCLEANUP}" ]; then
         local cluster instance
 
+        CEPH_ARGS='' ceph --cluster ${CLUSTER1} osd pool rm ${POOL} ${POOL} --yes-i-really-really-mean-it
+        CEPH_ARGS='' ceph --cluster ${CLUSTER2} osd pool rm ${POOL} ${POOL} --yes-i-really-really-mean-it
+        CEPH_ARGS='' ceph --cluster ${CLUSTER1} osd pool rm ${PARENT_POOL} ${PARENT_POOL} --yes-i-really-really-mean-it
+        CEPH_ARGS='' ceph --cluster ${CLUSTER2} osd pool rm ${PARENT_POOL} ${PARENT_POOL} --yes-i-really-really-mean-it
+
         for cluster in "${CLUSTER1}" "${CLUSTER2}"; do
 	    stop_mirrors "${cluster}"
         done
@@ -330,11 +336,6 @@ cleanup()
             cd ${CEPH_ROOT}
             CEPH_ARGS='' ${CEPH_SRC}/mstop.sh ${CLUSTER1}
             CEPH_ARGS='' ${CEPH_SRC}/mstop.sh ${CLUSTER2}
-        else
-            CEPH_ARGS='' ceph --cluster ${CLUSTER1} osd pool rm ${POOL} ${POOL} --yes-i-really-really-mean-it
-            CEPH_ARGS='' ceph --cluster ${CLUSTER2} osd pool rm ${POOL} ${POOL} --yes-i-really-really-mean-it
-            CEPH_ARGS='' ceph --cluster ${CLUSTER1} osd pool rm ${PARENT_POOL} ${PARENT_POOL} --yes-i-really-really-mean-it
-            CEPH_ARGS='' ceph --cluster ${CLUSTER2} osd pool rm ${PARENT_POOL} ${PARENT_POOL} --yes-i-really-really-mean-it
         fi
         test "${RBD_MIRROR_TEMDIR}" = "${TEMPDIR}" || rm -Rf ${TEMPDIR}
     fi

@@ -8,8 +8,9 @@
 
 #include "auth/AuthClientHandler.h"
 #include "auth/AuthMethodList.h"
-#include "auth/KeyRing.h"
 #include "auth/RotatingKeyRing.h"
+
+#include "common/hostname.h"
 
 #include "crimson/auth/KeyRing.h"
 #include "crimson/common/config_proxy.h"
@@ -27,6 +28,7 @@
 #include "messages/MMonGetVersion.h"
 #include "messages/MMonGetVersionReply.h"
 #include "messages/MMonMap.h"
+#include "messages/MMonSubscribe.h"
 #include "messages/MMonSubscribeAck.h"
 
 namespace {
@@ -56,7 +58,7 @@ public:
 				 uint32_t want_keys);
   seastar::future<> close();
   bool is_my_peer(const entity_addr_t& addr) const;
-
+  AuthAuthorizer* get_authorizer(peer_type_t peer) const;
   seastar::future<> renew_tickets();
   ceph::net::ConnectionRef get_conn();
 
@@ -101,6 +103,15 @@ seastar::future<> Connection::renew_tickets()
     });
   }
   return seastar::now();
+}
+
+AuthAuthorizer* Connection::get_authorizer(peer_type_t peer) const
+{
+  if (auth) {
+    return auth->build_authorizer(peer);
+  } else {
+    return nullptr;
+  }
 }
 
 std::unique_ptr<AuthClientHandler>
@@ -167,7 +178,9 @@ seastar::future<bool> Connection::do_auth()
                    conn->get_peer_addr(), *m, m->result);
     reply = decltype(reply){};
     auto p = m->result_bl.cbegin();
-    auto ret = auth->handle_response(m->result, p);
+    auto ret = auth->handle_response(m->result, p,
+#warning fix crimson: session_key, connection_secret
+				     nullptr, nullptr);
     if (ret != 0 && ret != -EAGAIN) {
       throw std::system_error(make_error_code(
         ceph::net::error::negotiation_failure));
@@ -191,7 +204,9 @@ Connection::authenticate(epoch_t epoch,
     auth = create_auth(m, name, want_keys);
     global_id = m->global_id;
     switch (auto p = m->result_bl.cbegin();
-            auth->handle_response(m->result, p)) {
+            auth->handle_response(m->result, p,
+#warning fix crimson: session_key, connection_secret
+				  nullptr, nullptr)) {
     case 0:
       // none
       return seastar::now();
@@ -228,8 +243,9 @@ bool Connection::is_my_peer(const entity_addr_t& addr) const
 ceph::net::ConnectionRef Connection::get_conn() {
   return conn;
 }
+
 namespace {
-AuthMethodList create_auth_methods(uint32_t entity_type)
+auto create_auth_methods(uint32_t entity_type)
 {
   auto& conf = ceph::common::local_conf();
   std::string method;
@@ -244,15 +260,13 @@ AuthMethodList create_auth_methods(uint32_t entity_type)
   } else {
     method = conf.get_val<std::string>("auth_client_required");
   }
-  return AuthMethodList(nullptr, method);
+  return std::make_unique<AuthMethodList>(nullptr, method);
 }
 }
 
-Client::Client(const EntityName& name,
-               ceph::net::Messenger& messenger)
-  : entity_name{name},
-    auth_methods{create_auth_methods(entity_name.get_type())},
-    want_keys{CEPH_ENTITY_TYPE_MON |
+Client::Client(ceph::net::Messenger& messenger)
+  // currently, crimson is OSD-only
+  : want_keys{CEPH_ENTITY_TYPE_MON |
               CEPH_ENTITY_TYPE_OSD |
               CEPH_ENTITY_TYPE_MGR},
     timer{[this] { tick(); }},
@@ -262,9 +276,20 @@ Client::Client(const EntityName& name,
 Client::Client(Client&&) = default;
 Client::~Client() = default;
 
+seastar::future<> Client::start() {
+  entity_name = ceph::common::local_conf()->name;
+  // should always be OSD, though
+  auth_methods = create_auth_methods(entity_name.get_type());
+  return load_keyring().then([this] {
+    return monmap.build_initial(ceph::common::local_conf(), false);
+  }).then([this] {
+    return authenticate();
+  });
+}
+
 seastar::future<> Client::load_keyring()
 {
-  if (!auth_methods.is_supported_auth(CEPH_AUTH_CEPHX)) {
+  if (!auth_methods->is_supported_auth(CEPH_AUTH_CEPHX)) {
     return seastar::now();
   } else {
     return ceph::auth::load_from_keyring(&keyring).then([](KeyRing* keyring) {
@@ -291,7 +316,6 @@ bool Client::is_hunting() const {
 seastar::future<>
 Client::ms_dispatch(ceph::net::ConnectionRef conn, MessageRef m)
 {
-  logger().info("ms_dispatch {}", *m);
   // we only care about these message types
   switch (m->get_type()) {
   case CEPH_MSG_MON_MAP:
@@ -336,6 +360,20 @@ seastar::future<> Client::ms_handle_reset(ceph::net::ConnectionRef conn)
     logger().error("unknown reset from {}", conn->get_peer_addr());
     return seastar::now();
   }
+}
+
+AuthAuthorizer* Client::ms_get_authorizer(peer_type_t peer) const
+{
+  if (active_con) {
+    return active_con->get_authorizer(peer);
+  } else {
+    return nullptr;
+  }
+}
+
+AuthAuthorizer* Client::get_authorizer(peer_type_t peer) const
+{
+  return ms_get_authorizer(peer);
 }
 
 seastar::future<> Client::handle_monmap(ceph::net::ConnectionRef conn,
@@ -446,9 +484,13 @@ std::vector<unsigned> Client::get_random_mons(unsigned n) const
     }
   }
   vector<unsigned> ranks;
-  for (const auto& m : monmap.mon_info) {
-    if (m.second.priority == min_priority) {
-      ranks.push_back(monmap.get_rank(m.first));
+  for (auto [name, info] : monmap.mon_info) {
+    // TODO: #msgr-v2
+    if (info.public_addrs.legacy_addr().is_blank_ip()) {
+      continue;
+    }
+    if (info.priority == min_priority) {
+      ranks.push_back(monmap.get_rank(name));
     }
   }
   std::random_device rd;
@@ -461,11 +503,6 @@ std::vector<unsigned> Client::get_random_mons(unsigned n) const
   }
 }
 
-seastar::future<> Client::build_initial_map()
-{
-  return monmap.build_initial(ceph::common::local_conf(), false);
-}
-
 seastar::future<> Client::authenticate()
 {
   return reopen_session(-1);
@@ -473,9 +510,7 @@ seastar::future<> Client::authenticate()
 
 seastar::future<> Client::stop()
 {
-  return tick_gate.close().finally([this] {
-    return timer.cancel();
-  }).then([this] {
+  return tick_gate.close().then([this] {
     if (active_con) {
       return active_con->close();
     } else {
@@ -499,13 +534,19 @@ seastar::future<> Client::reopen_session(int rank)
 #warning fixme
     auto peer = monmap.get_addrs(rank).legacy_addr();
     logger().info("connecting to mon.{}", rank);
-    auto conn = msgr.connect(peer, CEPH_ENTITY_TYPE_MON);
-    auto& mc = pending_conns.emplace_back(conn, &keyring);
-    return mc.authenticate(
-      monmap.get_epoch(), entity_name,
-      auth_methods, want_keys).handle_exception([conn](auto ep) {
-      return conn->close().then([ep = std::move(ep)] {
-        std::rethrow_exception(ep);
+    return msgr.connect(peer, CEPH_ENTITY_TYPE_MON)
+    .then([this] (auto xconn) {
+      // sharded-messenger compatible mode assumes all connections running
+      // in one shard.
+      ceph_assert((*xconn)->shard_id() == seastar::engine().cpu_id());
+      ceph::net::ConnectionRef conn = xconn->release();
+      auto& mc = pending_conns.emplace_back(conn, &keyring);
+      return mc.authenticate(
+        monmap.get_epoch(), entity_name,
+        *auth_methods, want_keys).handle_exception([conn](auto ep) {
+        return conn->close().then([ep = std::move(ep)] {
+          std::rethrow_exception(ep);
+        });
       });
     }).then([peer, this] {
       if (!is_hunting()) {
@@ -538,6 +579,49 @@ Client::run_command(const std::vector<std::string>& cmd,
   auto& req = mon_commands[tid];
   return active_con->get_conn()->send(m).then([&req] {
     return req.get_future();
+  });
+}
+
+seastar::future<> Client::send_message(MessageRef m)
+{
+  return active_con->get_conn()->send(m);
+}
+
+bool Client::sub_want(const std::string& what, version_t start, unsigned flags)
+{
+  return sub.want(what, start, flags);
+}
+
+void Client::sub_got(const std::string& what, version_t have)
+{
+  sub.got(what, have);
+}
+
+void Client::sub_unwant(const std::string& what)
+{
+  sub.unwant(what);
+}
+
+bool Client::sub_want_increment(const std::string& what,
+                                version_t start,
+                                unsigned flags)
+{
+  return sub.inc_want(what, start, flags);
+}
+
+seastar::future<> Client::renew_subs()
+{
+  if (!sub.have_new()) {
+    logger().warn("{} - empty", __func__);
+    return seastar::now();
+  }
+  logger().trace("{}", __func__);
+
+  auto m = make_message<MMonSubscribe>();
+  m->what = sub.get_subs();
+  m->hostname = ceph_get_short_hostname();
+  return active_con->get_conn()->send(m).then([this] {
+    sub.renewed();
   });
 }
 

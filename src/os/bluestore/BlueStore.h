@@ -42,11 +42,11 @@
 
 #include "bluestore_types.h"
 #include "BlockDevice.h"
+#include "BlueFS.h"
 #include "common/EventTrace.h"
 
 class Allocator;
 class FreelistManager;
-class BlueFS;
 class BlueStoreRepairer;
 
 //#define DEBUG_CACHE
@@ -123,12 +123,17 @@ enum {
   l_bluestore_read_eio,
   l_bluestore_reads_with_retries,
   l_bluestore_fragmentation,
+  l_bluestore_omap_seek_to_first_lat,
+  l_bluestore_omap_upper_bound_lat,
+  l_bluestore_omap_lower_bound_lat,
+  l_bluestore_omap_next_lat,
   l_bluestore_last
 };
 
 #define META_POOL_ID ((uint64_t)-1ull)
 
 class BlueStore : public ObjectStore,
+		  public BlueFSDeviceExpander,
 		  public md_config_obs_t {
   // -----------------------------------------------------
   // types
@@ -1430,6 +1435,9 @@ public:
     OnodeRef o;
     KeyValueDB::Iterator it;
     string head, tail;
+
+    string _stringify() const;
+
   public:
     OmapIteratorImpl(CollectionRef c, OnodeRef o, KeyValueDB::Iterator it);
     int seek_to_first() override;
@@ -1588,7 +1596,7 @@ public:
     }
 #endif
 
-    void log_state_latency(PerfCounters *logger, int state) {
+    utime_t log_state_latency(PerfCounters *logger, int state) {
       utime_t lat, now = ceph_clock_now();
       lat = now - last_stamp;
       logger->tinc(state, lat);
@@ -1599,6 +1607,7 @@ public:
       }
 #endif
       last_stamp = now;
+      return lat;
     }
 
     CollectionRef ch;
@@ -1881,7 +1890,7 @@ private:
   unsigned bluefs_shared_bdev = 0;  ///< which bluefs bdev we are sharing
   bool bluefs_single_shared_device = true;
   mono_time bluefs_last_balance;
-  utime_t next_dump_on_bluefs_balance_failure;
+  utime_t next_dump_on_bluefs_alloc_failure;
 
   KeyValueDB *db = nullptr;
   BlockDevice *bdev = nullptr;
@@ -2184,13 +2193,27 @@ private:
   void _umount_for_bluefs();
 
 
+  int _is_bluefs(bool create, bool* ret);
+  /*
+  * opens both DB and dependant super_meta, FreelistManager and allocator
+  * in the proper order
+  */
+  int _open_db_and_around(bool read_only);
+  void _close_db_and_around();
+
+  // updates legacy bluefs related recs in DB to a state valid for
+  // downgrades from nautilus.
+  void _sync_bluefs_and_fm();
+
   /*
    * @warning to_repair_db means that we open this db to repair it, will not
    * hold the rocksdb's file lock.
    */
-  int _open_db(bool create, bool to_repair_db=false);
+  int _open_db(bool create,
+	       bool to_repair_db=false,
+	       bool read_only = false);
   void _close_db();
-  int _open_fm(bool create);
+  int _open_fm(KeyValueDB::Transaction t);
   void _close_fm();
   int _open_alloc();
   void _close_alloc();
@@ -2214,10 +2237,10 @@ private:
   void _open_statfs();
   void _get_statfs_overall(struct store_statfs_t *buf);
 
-  void _dump_alloc_on_rebalance_failure();
-  int _reconcile_bluefs_freespace();
-  int _balance_bluefs_freespace(PExtentVector *extents);
-  void _commit_bluefs_freespace(const PExtentVector& extents);
+  void _dump_alloc_on_failure();
+
+  int64_t _get_bluefs_size_delta(uint64_t bluefs_free, uint64_t bluefs_total);
+  int _balance_bluefs_freespace();
 
   CollectionRef _get_collection(const coll_t& cid);
   void _queue_reap_collection(CollectionRef& c);
@@ -2459,7 +2482,8 @@ public:
   string get_device_path(unsigned id);
 
 public:
-  int statfs(struct store_statfs_t *buf) override;
+  int statfs(struct store_statfs_t *buf,
+             osd_alert_list_t* alerts = nullptr) override;
   int pool_statfs(uint64_t pool_id, struct store_statfs_t *buf) override;
 
   void collect_metadata(map<string,string> *pm) override;
@@ -2632,7 +2656,19 @@ public:
     return true;
   }
 
-  int allocate_bluefs_freespace(uint64_t size);
+  /*
+  Allocate space for BlueFS from slow device.
+  Either automatically applies allocated extents to underlying 
+  BlueFS (extents == nullptr) or just return them (non-null extents) provided
+  */
+  int allocate_bluefs_freespace(
+    uint64_t min_size,
+    uint64_t size,
+    PExtentVector* extents);
+
+  void log_latency_fn(int idx,
+		      const ceph::timespan& lat,
+		      std::function<string (const ceph::timespan& lat)> fn);
 
 private:
   bool _debug_data_eio(const ghobject_t& o) {
@@ -2655,6 +2691,36 @@ private:
       debug_data_error_objects.erase(o);
       debug_mdata_error_objects.erase(o);
     }
+  }
+private:
+  ceph::mutex qlock = ceph::make_mutex("BlueStore::Alerts::qlock");
+  string failed_cmode;
+  set<string> failed_compressors;
+  string spillover_alert;
+
+  void _log_alerts(osd_alert_list_t& alerts);
+  bool _set_compression_alert(bool cmode, const char* s) {
+    std::lock_guard l(qlock);
+    if (cmode) {
+      bool ret = failed_cmode.empty();
+      failed_cmode = s;
+      return ret;
+    }
+    return failed_compressors.emplace(s).second;
+  }
+  void _clear_compression_alert() {
+    std::lock_guard l(qlock);
+    failed_compressors.clear();
+    failed_cmode.clear();
+  }
+
+  void _set_spillover_alert(const string& s) {
+    std::lock_guard l(qlock);
+    spillover_alert = s;
+  }
+  void _clear_spillover_alert() {
+    std::lock_guard l(qlock);
+    spillover_alert.clear();
   }
 
 private:
@@ -2918,6 +2984,22 @@ private:
 			CollectionRef *c,
 			CollectionRef& d,
 			unsigned bits);
+
+private:
+  std::atomic<uint64_t> out_of_sync_fm = {0};
+  // --------------------------------------------------------
+  // BlueFSDeviceExpander implementation
+  uint64_t get_recommended_expansion_delta(uint64_t bluefs_free,
+    uint64_t bluefs_total) override {
+    auto delta = _get_bluefs_size_delta(bluefs_free, bluefs_total);
+    return delta > 0 ? delta : 0;
+  }
+  int allocate_freespace(
+    uint64_t min_size,
+    uint64_t size,
+    PExtentVector& extents) override {
+    return allocate_bluefs_freespace(min_size, size, &extents);
+  };
 };
 
 inline ostream& operator<<(ostream& out, const BlueStore::volatile_statfs& s) {
@@ -3091,6 +3173,7 @@ public:
   bool fix_false_free(KeyValueDB *db,
 		      FreelistManager* fm,
 		      uint64_t offset, uint64_t len);
+  bool fix_bluefs_extents(std::atomic<uint64_t>& out_of_sync_flag);
 
   void init(uint64_t total_space, uint64_t lres_tracking_unit_size);
 
@@ -3131,5 +3214,4 @@ private:
   fsck_interval misreferenced_extents;
 
 };
-
 #endif

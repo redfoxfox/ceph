@@ -119,12 +119,14 @@ struct rgw_bucket_dir_entry_meta {
   string content_type;
   uint64_t accounted_size;
   string user_data;
+  string storage_class;
+  bool appendable;
 
   rgw_bucket_dir_entry_meta() :
-    category(RGWObjCategory::None), size(0), accounted_size(0) { }
+    category(RGWObjCategory::None), size(0), accounted_size(0), appendable(false) { }
 
   void encode(bufferlist &bl) const {
-    ENCODE_START(5, 3, bl);
+    ENCODE_START(7, 3, bl);
     encode(category, bl);
     encode(size, bl);
     encode(mtime, bl);
@@ -134,10 +136,13 @@ struct rgw_bucket_dir_entry_meta {
     encode(content_type, bl);
     encode(accounted_size, bl);
     encode(user_data, bl);
+    encode(storage_class, bl);
+    encode(appendable, bl);
     ENCODE_FINISH(bl);
   }
+
   void decode(bufferlist::const_iterator &bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(5, 3, 3, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(6, 3, 3, bl);
     decode(category, bl);
     decode(size, bl);
     decode(mtime, bl);
@@ -152,6 +157,10 @@ struct rgw_bucket_dir_entry_meta {
       accounted_size = size;
     if (struct_v >= 5)
       decode(user_data, bl);
+    if (struct_v >= 6)
+      decode(storage_class, bl);
+    if (struct_v >= 7)
+      decode(appendable, bl);
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
@@ -286,7 +295,7 @@ struct cls_rgw_obj_key {
   bool operator<=(const cls_rgw_obj_key& k) const {
     return !(k < *this);
   }
-  bool empty() {
+  bool empty() const {
     return name.empty();
   }
   void encode(bufferlist &bl) const {

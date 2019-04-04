@@ -8,11 +8,7 @@
 
 #include "Messenger.h"
 
-#include "msg/simple/SimpleMessenger.h"
 #include "msg/async/AsyncMessenger.h"
-#ifdef HAVE_XIO
-#include "msg/xio/XioMessenger.h"
-#endif
 
 Messenger *Messenger::create_client_messenger(CephContext *cct, string lname)
 {
@@ -28,17 +24,11 @@ Messenger *Messenger::create(CephContext *cct, const string &type,
 {
   int r = -1;
   if (type == "random") {
-    r = ceph::util::generate_random_number(0, 1);
+    r = 0;
+    //r = ceph::util::generate_random_number(0, 1);
   }
-  if (r == 0 || type == "simple")
-    return new SimpleMessenger(cct, name, std::move(lname), nonce);
-  else if (r == 1 || type.find("async") != std::string::npos)
+  if (r == 0 || type.find("async") != std::string::npos)
     return new AsyncMessenger(cct, name, type, std::move(lname), nonce);
-#ifdef HAVE_XIO
-  else if ((type == "xio") &&
-	   cct->check_experimental_feature_enabled("ms-type-xio"))
-    return new XioMessenger(cct, name, std::move(lname), nonce, cflags);
-#endif
   lderr(cct) << "unrecognized ms_type '" << type << "'" << dendl;
   return nullptr;
 }
@@ -58,19 +48,10 @@ Messenger::Messenger(CephContext *cct_, entity_name_t w)
     socket_priority(-1),
     cct(cct_),
     crcflags(get_default_crc_flags(cct->_conf)),
-    auth_ah_service_registry(
-      new AuthAuthorizeHandlerRegistry(
-	cct,
-	cct->_conf->auth_supported.empty() ?
-	cct->_conf->auth_service_required :
-	cct->_conf->auth_supported)),
-    auth_ah_cluster_registry(
-      new AuthAuthorizeHandlerRegistry(
-	cct,
-	cct->_conf->auth_supported.empty() ?
-	cct->_conf->auth_cluster_required :
-	cct->_conf->auth_supported))
-{}
+    auth_registry(cct)
+{
+  auth_registry.refresh_config();
+}
 
 void Messenger::set_endpoint_addr(const entity_addr_t& a,
                                   const entity_name_t &name)
@@ -113,8 +94,6 @@ int get_default_crc_flags(const ConfigProxy& conf)
 
 int Messenger::bindv(const entity_addrvec_t& addrs)
 {
-  lderr(cct) << __func__ << " " << addrs << " fallback to legacy "
-	     << addrs.legacy_addr() << dendl;
   return bind(addrs.legacy_addr());
 }
 
@@ -126,6 +105,7 @@ bool Messenger::ms_deliver_verify_authorizer(
   bufferlist& authorizer_reply,
   bool& isvalid,
   CryptoKey& session_key,
+  std::string *connection_secret,
   std::unique_ptr<AuthAuthorizerChallenge> *challenge)
 {
   if (authorizer.length() == 0) {
@@ -137,16 +117,7 @@ bool Messenger::ms_deliver_verify_authorizer(
       }
     }
   }
-  AuthAuthorizeHandler *ah = 0;
-  switch (peer_type) {
-  case CEPH_ENTITY_TYPE_MDS:
-  case CEPH_ENTITY_TYPE_MON:
-  case CEPH_ENTITY_TYPE_OSD:
-    ah = auth_ah_cluster_registry->get_handler(protocol);
-    break;
-  default:
-    ah = auth_ah_service_registry->get_handler(protocol);
-  }
+  AuthAuthorizeHandler *ah = auth_registry.get_handler(peer_type, protocol);
   if (get_mytype() == CEPH_ENTITY_TYPE_MON &&
       peer_type != CEPH_ENTITY_TYPE_MON) {
     // the monitor doesn't do authenticators for msgr1.
@@ -167,14 +138,16 @@ bool Messenger::ms_deliver_verify_authorizer(
 	cct,
 	ks,
 	authorizer,
-	authorizer_reply,
-	con->peer_name,
-	con->peer_global_id,
-	con->peer_caps_info,
-	session_key,
+	0,
+	&authorizer_reply,
+	&con->peer_name,
+	&con->peer_global_id,
+	&con->peer_caps_info,
+	&session_key,
+	connection_secret,
 	challenge);
       if (isvalid) {
-	dis->ms_handle_authentication(con);
+	return dis->ms_handle_authentication(con)>=0;
       }
       return true;
     }

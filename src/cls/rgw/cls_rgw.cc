@@ -756,7 +756,8 @@ static void log_entry(const char *func, const char *str, rgw_bucket_olh_entry *e
 }
 
 template <class T>
-static int read_index_entry(cls_method_context_t hctx, string& name, T *entry)
+static int read_omap_entry(cls_method_context_t hctx, const std::string& name,
+                           T* entry)
 {
   bufferlist current_entry;
   int rc = cls_cxx_map_get_val(hctx, name, &current_entry);
@@ -768,8 +769,18 @@ static int read_index_entry(cls_method_context_t hctx, string& name, T *entry)
   try {
     decode(*entry, cur_iter);
   } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: read_index_entry(): failed to decode entry\n");
+    CLS_LOG(1, "ERROR: %s(): failed to decode entry\n", __func__);
     return -EIO;
+  }
+  return 0;
+}
+
+template <class T>
+static int read_index_entry(cls_method_context_t hctx, string& name, T* entry)
+{
+  int ret = read_omap_entry(hctx, name, entry);
+  if (ret < 0) {
+    return ret;
   }
 
   log_entry(__func__, "existing entry", entry);
@@ -2626,7 +2637,7 @@ static int bi_log_iterate_entries(cls_method_context_t hctx, const string& marke
     end_key.append(end_marker);
   }
 
-  CLS_LOG(0, "bi_log_iterate_entries start_key=%s end_key=%s\n", start_key.c_str(), end_key.c_str());
+  CLS_LOG(10, "bi_log_iterate_entries start_key=%s end_key=%s\n", start_key.c_str(), end_key.c_str());
 
   string filter;
 
@@ -2644,7 +2655,7 @@ static int bi_log_iterate_entries(cls_method_context_t hctx, const string& marke
     const string& key = iter->first;
     rgw_bi_log_entry e;
 
-    CLS_LOG(0, "bi_log_iterate_entries key=%s bl.length=%d\n", key.c_str(), (int)iter->second.length());
+    CLS_LOG(10, "bi_log_iterate_entries key=%s bl.length=%d\n", key.c_str(), (int)iter->second.length());
 
     if (key.compare(end_key) > 0) {
       key_iter = key;
@@ -3168,17 +3179,9 @@ static int gc_omap_get(cls_method_context_t hctx, int type, const string& key, c
   string index;
   prepend_index_prefix(key, type, &index);
 
-  bufferlist bl;
-  int ret = cls_cxx_map_get_val(hctx, index, &bl);
+  int ret = read_omap_entry(hctx, index, info);
   if (ret < 0)
     return ret;
-
-  try {
-    auto iter = bl.cbegin();
-    decode(*info, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(0, "ERROR: rgw_cls_gc_omap_get(): failed to decode index=%s\n", index.c_str());
-  }
 
   return 0;
 }
@@ -3231,23 +3234,36 @@ static int gc_update_entry(cls_method_context_t hctx, uint32_t expiration_secs,
       return ret;
     }
   }
+
+  // calculate time and time key
   info.time = ceph::real_clock::now();
   info.time += make_timespan(expiration_secs);
+  string time_key;
+  get_time_key(info.time, &time_key);
+
+  if (info.chain.objs.empty()) {
+    CLS_LOG(0,
+	    "WARNING: %s setting GC log entry with zero-length chain, "
+	    "tag='%s', timekey='%s'",
+	    __func__, info.tag.c_str(), time_key.c_str());
+  }
+
   ret = gc_omap_set(hctx, GC_OBJ_NAME_INDEX, info.tag, &info);
   if (ret < 0)
     return ret;
 
-  string key;
-  get_time_key(info.time, &key);
-  ret = gc_omap_set(hctx, GC_OBJ_TIME_INDEX, key, &info);
+  ret = gc_omap_set(hctx, GC_OBJ_TIME_INDEX, time_key, &info);
   if (ret < 0)
     goto done_err;
 
   return 0;
 
 done_err:
-  CLS_LOG(0, "ERROR: gc_set_entry error info.tag=%s, ret=%d\n", info.tag.c_str(), ret);
+
+  CLS_LOG(0, "ERROR: gc_set_entry error info.tag=%s, ret=%d\n",
+	  info.tag.c_str(), ret);
   gc_omap_remove(hctx, GC_OBJ_NAME_INDEX, info.tag);
+
   return ret;
 }
 
@@ -3304,16 +3320,22 @@ static int rgw_cls_gc_defer_entry(cls_method_context_t hctx, bufferlist *in, buf
   return gc_defer_entry(hctx, op.tag, op.expiration_secs);
 }
 
-static int gc_iterate_entries(cls_method_context_t hctx, const string& marker, bool expired_only,
-                              string& key_iter, uint32_t max_entries, bool *truncated,
-                              int (*cb)(cls_method_context_t, const string&, cls_rgw_gc_obj_info&, void *),
+static int gc_iterate_entries(cls_method_context_t hctx,
+			      const string& marker,
+			      bool expired_only,
+                              string& out_marker,
+			      uint32_t max_entries,
+			      bool *truncated,
+                              int (*cb)(cls_method_context_t,
+					const string&,
+					cls_rgw_gc_obj_info&,
+					void *),
                               void *param)
 {
-  CLS_LOG(10, "gc_iterate_range");
+  CLS_LOG(10, "gc_iterate_entries");
 
   map<string, bufferlist> keys;
   string filter_prefix, end_key;
-  uint32_t i = 0;
   string key;
 
   if (truncated)
@@ -3337,18 +3359,20 @@ static int gc_iterate_entries(cls_method_context_t hctx, const string& marker, b
 
   string filter;
 
-  int ret = cls_cxx_map_get_vals(hctx, start_key, filter, max_entries, &keys, truncated);
+  int ret = cls_cxx_map_get_vals(hctx, start_key, filter, max_entries,
+				 &keys, truncated);
   if (ret < 0)
     return ret;
 
-
   map<string, bufferlist>::iterator iter = keys.begin();
-  if (iter == keys.end())
+  if (iter == keys.end()) {
+    // if keys empty must not come back as truncated
+    ceph_assert(!truncated || !(*truncated));
     return 0;
+  }
 
-  uint32_t num_keys = keys.size();
-
-  for (; iter != keys.end(); ++iter, ++i) {
+  const string* last_key = nullptr; // last key processed, for end-marker
+  for (; iter != keys.end(); ++iter) {
     const string& key = iter->first;
     cls_rgw_gc_obj_info e;
 
@@ -3360,8 +3384,11 @@ static int gc_iterate_entries(cls_method_context_t hctx, const string& marker, b
       return 0;
     }
 
-    if (!key_in_index(key, GC_OBJ_TIME_INDEX))
+    if (!key_in_index(key, GC_OBJ_TIME_INDEX)) {
+      if (truncated)
+	*truncated = false;
       return 0;
+    }
 
     ret = gc_record_decode(iter->second, e);
     if (ret < 0)
@@ -3370,10 +3397,14 @@ static int gc_iterate_entries(cls_method_context_t hctx, const string& marker, b
     ret = cb(hctx, key, e, param);
     if (ret < 0)
       return ret;
+    last_key = &(iter->first); // update when callback successful
+  }
 
-    if (i == num_keys - 1) {
-      key_iter = key;
-    }
+  // set the out marker if either caller does not capture truncated or
+  // if they do capture and we are truncated
+  if (!truncated || *truncated) {
+    assert(last_key);
+    out_marker = *last_key;
   }
 
   return 0;
@@ -3465,6 +3496,29 @@ static int rgw_cls_gc_remove(cls_method_context_t hctx, bufferlist *in, bufferli
 
   return gc_remove(hctx, op.tags);
 }
+
+static int rgw_cls_lc_get_entry(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  auto in_iter = in->cbegin();
+
+  cls_rgw_lc_get_entry_op op;
+  try {
+    decode(op, in_iter);
+  } catch (buffer::error& err) {
+    CLS_LOG(1, "ERROR: rgw_cls_lc_set_entry(): failed to decode entry\n");
+    return -EINVAL;
+  }
+
+  rgw_lc_entry_t lc_entry;
+  int ret = read_omap_entry(hctx, op.marker, &lc_entry);
+  if (ret < 0)
+    return ret;
+
+  cls_rgw_lc_get_entry_ret op_ret(std::move(lc_entry));
+  encode(op_ret, *out);
+  return 0;
+}
+
 
 static int rgw_cls_lc_set_entry(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
@@ -3677,22 +3731,6 @@ static int rgw_reshard_list(cls_method_context_t hctx, bufferlist *in, bufferlis
   return 0;
 }
 
-static int get_reshard_entry(cls_method_context_t hctx, const string& key, cls_rgw_reshard_entry *entry)
-{
-  bufferlist bl;
-  int ret = cls_cxx_map_get_val(hctx, key, &bl);
-  if (ret < 0)
-    return ret;
-  auto iter = bl.cbegin();
-  try {
-    decode(*entry, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(0, "ERROR: %s : failed to decode entry %s\n", __func__, err.what());
-    return -EIO;
-  }
-  return 0;
-}
-
 static int rgw_reshard_get(cls_method_context_t hctx, bufferlist *in,  bufferlist *out)
 {
   auto in_iter = in->cbegin();
@@ -3708,7 +3746,7 @@ static int rgw_reshard_get(cls_method_context_t hctx, bufferlist *in,  bufferlis
   string key;
   cls_rgw_reshard_entry  entry;
   op.entry.get_key(&key);
-  int ret = get_reshard_entry(hctx, key, &entry);
+  int ret = read_omap_entry(hctx, key, &entry);
   if (ret < 0) {
     return ret;
   }
@@ -3734,7 +3772,7 @@ static int rgw_reshard_remove(cls_method_context_t hctx, bufferlist *in, bufferl
   string key;
   cls_rgw_reshard_entry  entry;
   cls_rgw_reshard_entry::generate_key(op.tenant, op.bucket_name, &key);
-  int ret = get_reshard_entry(hctx, key, &entry);
+  int ret = read_omap_entry(hctx, key, &entry);
   if (ret < 0) {
     return ret;
   }
@@ -3889,6 +3927,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_gc_set_entry;
   cls_method_handle_t h_rgw_gc_list;
   cls_method_handle_t h_rgw_gc_remove;
+  cls_method_handle_t h_rgw_lc_get_entry;
   cls_method_handle_t h_rgw_lc_set_entry;
   cls_method_handle_t h_rgw_lc_rm_entry;
   cls_method_handle_t h_rgw_lc_get_next_entry;
@@ -3951,6 +3990,7 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_GC_REMOVE, CLS_METHOD_RD | CLS_METHOD_WR, rgw_cls_gc_remove, &h_rgw_gc_remove);
 
   /* lifecycle bucket list */
+  cls_register_cxx_method(h_class, RGW_LC_GET_ENTRY, CLS_METHOD_RD, rgw_cls_lc_get_entry, &h_rgw_lc_get_entry);
   cls_register_cxx_method(h_class, RGW_LC_SET_ENTRY, CLS_METHOD_RD | CLS_METHOD_WR, rgw_cls_lc_set_entry, &h_rgw_lc_set_entry);
   cls_register_cxx_method(h_class, RGW_LC_RM_ENTRY, CLS_METHOD_RD | CLS_METHOD_WR, rgw_cls_lc_rm_entry, &h_rgw_lc_rm_entry);
   cls_register_cxx_method(h_class, RGW_LC_GET_NEXT_ENTRY, CLS_METHOD_RD, rgw_cls_lc_get_next_entry, &h_rgw_lc_get_next_entry);

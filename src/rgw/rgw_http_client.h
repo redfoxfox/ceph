@@ -4,6 +4,7 @@
 #ifndef CEPH_RGW_HTTP_CLIENT_H
 #define CEPH_RGW_HTTP_CLIENT_H
 
+#include "common/async/yield_context.h"
 #include "common/RWLock.h"
 #include "common/Cond.h"
 #include "rgw_common.h"
@@ -76,6 +77,7 @@ class RGWHTTPClient : public RGWIOProvider
   bufferlist::iterator send_iter;
   bool has_send_len;
   long http_status;
+  bool send_data_hint{false};
   size_t receive_pause_skip{0}; /* how many bytes to skip next time receive_data is called
                                    due to being paused */
 
@@ -86,6 +88,7 @@ class RGWHTTPClient : public RGWIOProvider
   bool verify_ssl; // Do not validate self signed certificates, default to false
 
   std::atomic<unsigned> stopped { 0 };
+
 
 protected:
   CephContext *cct;
@@ -99,8 +102,7 @@ protected:
 
   RGWHTTPManager *get_manager();
 
-  int init_request(rgw_http_req_data *req_data,
-                   bool send_data_hint = false);
+  int init_request(rgw_http_req_data *req_data);
 
   virtual int receive_header(void *ptr, size_t len) {
     return 0;
@@ -165,6 +167,9 @@ public:
     has_send_len = true;
   }
 
+  void set_send_data_hint(bool hint) {
+    send_data_hint = hint;
+  }
 
   long get_http_status() const {
     return http_status;
@@ -174,9 +179,9 @@ public:
     verify_ssl = flag;
   }
 
-  int process();
+  int process(optional_yield y);
 
-  int wait();
+  int wait(optional_yield y);
   void cancel();
   bool is_done();
 
@@ -347,7 +352,7 @@ public:
   int start();
   void stop();
 
-  int add_request(RGWHTTPClient *client, bool send_data_hint = false);
+  int add_request(RGWHTTPClient *client);
   int remove_request(RGWHTTPClient *client);
   int set_request_state(RGWHTTPClient *client, RGWHTTPRequestSetState state);
 };
@@ -356,6 +361,6 @@ class RGWHTTP
 {
 public:
   static int send(RGWHTTPClient *req);
-  static int process(RGWHTTPClient *req);
+  static int process(RGWHTTPClient *req, optional_yield y);
 };
 #endif

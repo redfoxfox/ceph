@@ -12,6 +12,8 @@
  *
  */
 
+#include "include/compat.h"
+
 #ifdef __FreeBSD__
 #include <sys/param.h>
 #include <geom/geom_disk.h>
@@ -26,6 +28,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <boost/algorithm/string/replace.hpp>
 //#include "common/debug.h"
 #include "include/scope_guard.h"
 #include "include/uuid.h"
@@ -92,7 +95,7 @@ int BlkDev::get_devid(dev_t *id) const
   } else {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "/dev/%s", devname.c_str());
-    stat(path, &st);
+    r = stat(path, &st);
   }
   if (r < 0) {
     return -errno;
@@ -431,6 +434,16 @@ bool get_vdo_utilization(int fd, uint64_t *total, uint64_t *avail)
   return true;
 }
 
+std::string _decode_model_enc(const std::string& in)
+{
+  auto v = boost::replace_all_copy(in, "\\x20", " ");
+  if (auto found = v.find_last_not_of(" "); found != v.npos) {
+    v.erase(found + 1);
+  }
+  std::replace(v.begin(), v.end(), ' ', '_');
+  return v;
+}
+
 // trying to use udev first, and if it doesn't work, we fall back to 
 // reading /sys/block/$devname/device/(vendor/model/serial).
 std::string get_device_id(const std::string& devname,
@@ -470,6 +483,17 @@ std::string get_device_id(const std::string& devname,
   data = udev_device_get_property_value(dev, "ID_MODEL");
   if (data) {
     id_model = data;
+    // sometimes, ID_MODEL is "LVM ..." but ID_MODEL_ENC is correct (but
+    // encoded with \x20 for space).
+    if (id_model.substr(0, 7) == "LVM PV ") {
+      const char *enc = udev_device_get_property_value(dev, "ID_MODEL_ENC");
+      if (enc) {
+	id_model = _decode_model_enc(enc);
+      } else {
+	// ignore ID_MODEL then
+	id_model.clear();
+      }
+    }
   }
   data = udev_device_get_property_value(dev, "ID_SERIAL_SHORT");
   if (data) {
@@ -765,6 +789,11 @@ int BlkDev::get_size(int64_t *psize) const
   return ret;
 }
 
+int64_t BlkDev::get_int_property(blkdev_prop_t prop) const
+{
+  return 0;
+}
+
 bool BlkDev::support_discard() const
 {
   return false;
@@ -783,6 +812,11 @@ bool BlkDev::is_nvme() const
 bool BlkDev::is_rotational() const
 {
   return false;
+}
+
+int BlkDev::get_numa_node(int *node) const
+{
+  return -1;
 }
 
 int BlkDev::model(char *model, size_t max) const
@@ -866,6 +900,11 @@ int BlkDev::get_size(int64_t *psize) const
   return ret;
 }
 
+int64_t BlkDev::get_int_property(blkdev_prop_t prop) const
+{
+  return 0;
+}
+
 bool BlkDev::support_discard() const
 {
 #ifdef FREEBSD_WITH_TRIM
@@ -932,6 +971,15 @@ bool BlkDev::is_rotational() const
 #else
   return true;      // When in doubt, it's probably spinny
 #endif
+}
+
+int BlkDev::get_numa_node(int *node) const
+{
+  int numa = get_int_property(BLKDEV_PROP_NUMA_NODE);
+  if (numa < 0)
+    return -1;
+  *node = numa;
+  return 0;
 }
 
 int BlkDev::model(char *model, size_t max) const

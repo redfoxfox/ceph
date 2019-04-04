@@ -1261,7 +1261,7 @@ static int do_lock_cmd(std::vector<const char*> &nargs,
       formatter->dump_string("cookie", id.cookie);
       formatter->dump_string("description", info.description);
       formatter->dump_stream("expiration") << info.expiration;
-      formatter->dump_stream("addr") << info.addr;
+      formatter->dump_stream("addr") << info.addr.get_legacy_str();
       formatter->close_section();
     }
     formatter->close_section();
@@ -3087,6 +3087,12 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
   else if (strcmp(nargs[0], "mksnap") == 0) {
     if (!pool_name || nargs.size() < 2) {
       usage(cerr);
+      return 1;
+    }
+
+    if (rados.get_pool_is_selfmanaged_snaps_mode(pool_name)) {
+      cerr << "can't create snapshot: pool " << pool_name
+           << " is in selfmanaged snaps mode" << std::endl;
       return 1;
     }
 

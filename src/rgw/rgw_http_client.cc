@@ -13,9 +13,11 @@
 #include "rgw_common.h"
 #include "rgw_http_client.h"
 #include "rgw_http_errors.h"
+#include "common/async/completion.h"
 #include "common/RefCountedObj.h"
 
 #include "rgw_coroutine.h"
+#include "rgw_tools.h"
 
 #include <atomic>
 
@@ -46,15 +48,40 @@ struct rgw_http_req_data : public RefCountedObject {
   Mutex lock;
   Cond cond;
 
+  using Signature = void(boost::system::error_code);
+  using Completion = ceph::async::Completion<Signature>;
+  std::unique_ptr<Completion> completion;
+
   rgw_http_req_data() : id(-1), lock("rgw_http_req_data::lock") {
     memset(error_buf, 0, sizeof(error_buf));
   }
 
-  int wait() {
+  template <typename ExecutionContext, typename CompletionToken>
+  auto async_wait(ExecutionContext& ctx, CompletionToken&& token) {
+    boost::asio::async_completion<CompletionToken, Signature> init(token);
+    auto& handler = init.completion_handler;
+    completion = Completion::create(ctx.get_executor(), std::move(handler));
+    return init.result.get();
+  }
+
+  int wait(optional_yield y) {
     Mutex::Locker l(lock);
     if (done) {
       return ret;
     }
+#ifdef HAVE_BOOST_CONTEXT
+    if (y) {
+      auto& context = y.get_io_context();
+      auto& yield = y.get_yield_context();
+      boost::system::error_code ec;
+      async_wait(context, yield[ec]);
+      return -ec.value();
+    }
+    // work on asio threads should be asynchronous, so warn when they block
+    if (is_asio_thread) {
+      dout(20) << "WARNING: blocking http request" << dendl;
+    }
+#endif
     cond.Wait(lock);
     return ret;
   }
@@ -73,7 +100,12 @@ struct rgw_http_req_data : public RefCountedObject {
     curl_handle = NULL;
     h = NULL;
     done = true;
-    cond.Signal();
+    if (completion) {
+      boost::system::error_code ec(-ret, boost::system::system_category());
+      Completion::post(std::move(completion), ec);
+    } else {
+      cond.Signal();
+    }
   }
 
   bool _is_done() {
@@ -448,9 +480,9 @@ static bool is_upload_request(const string& method)
 /*
  * process a single simple one off request
  */
-int RGWHTTPClient::process()
+int RGWHTTPClient::process(optional_yield y)
 {
-  return RGWHTTP::process(this);
+  return RGWHTTP::process(this, y);
 }
 
 string RGWHTTPClient::to_str()
@@ -472,7 +504,7 @@ int RGWHTTPClient::get_req_retcode()
 /*
  * init request, will be used later with RGWHTTPManager
  */
-int RGWHTTPClient::init_request(rgw_http_req_data *_req_data, bool send_data_hint)
+int RGWHTTPClient::init_request(rgw_http_req_data *_req_data)
 {
   ceph_assert(!req_data);
   _req_data->get();
@@ -528,9 +560,9 @@ bool RGWHTTPClient::is_done()
 /*
  * wait for async request to complete
  */
-int RGWHTTPClient::wait()
+int RGWHTTPClient::wait(optional_yield y)
 {
-  return req_data->wait();
+  return req_data->wait(y);
 }
 
 void RGWHTTPClient::cancel()
@@ -930,11 +962,11 @@ void RGWHTTPManager::manage_pending_requests()
   }
 }
 
-int RGWHTTPManager::add_request(RGWHTTPClient *client, bool send_data_hint)
+int RGWHTTPManager::add_request(RGWHTTPClient *client)
 {
   rgw_http_req_data *req_data = new rgw_http_req_data;
 
-  int ret = client->init_request(req_data, send_data_hint);
+  int ret = client->init_request(req_data);
   if (ret < 0) {
     req_data->put();
     req_data = NULL;
@@ -1210,7 +1242,7 @@ int RGWHTTP::send(RGWHTTPClient *req) {
   return 0;
 }
 
-int RGWHTTP::process(RGWHTTPClient *req) {
+int RGWHTTP::process(RGWHTTPClient *req, optional_yield y) {
   if (!req) {
     return 0;
   }
@@ -1219,6 +1251,6 @@ int RGWHTTP::process(RGWHTTPClient *req) {
     return r;
   }
 
-  return req->wait();
+  return req->wait(y);
 }
 

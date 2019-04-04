@@ -38,7 +38,6 @@ endif()
 if(WITH_RBD)
   add_subdirectory(librbd)
 endif(WITH_RBD)
-add_subdirectory(messenger)
 if (WITH_CEPHFS)
   add_subdirectory(mds)
 endif()
@@ -51,9 +50,14 @@ add_subdirectory(os)
 add_subdirectory(osd)
 add_subdirectory(osdc)
 add_subdirectory(pybind)
-if(${WITH_RADOSGW})
+add_subdirectory(immutable_object_cache)
+if(WITH_RADOSGW)
+  set(rgw_libs rgw_a)
+  if(WITH_RADOSGW_AMQP_ENDPOINT)
+    list(APPEND rgw_libs amqp_mock)
+  endif()
   add_subdirectory(rgw)
-endif(${WITH_RADOSGW})
+endif(WITH_RADOSGW)
 if(WITH_RBD)
   add_subdirectory(rbd_mirror)
 endif(WITH_RBD)
@@ -133,7 +137,7 @@ target_link_libraries(ceph_bench_log global pthread rt ${BLKID_LIBRARIES} ${CMAK
 add_executable(ceph_test_mutate
   test_mutate.cc
   )
-target_link_libraries(ceph_test_mutate global librados-cxx ${BLKID_LIBRARIES} 
+target_link_libraries(ceph_test_mutate global librados ${BLKID_LIBRARIES} 
   ${CMAKE_DL_LIBS})
 
 # test_trans
@@ -153,7 +157,7 @@ add_executable(ceph_omapbench
   ${omapbench_srcs}
   )
 target_link_libraries(ceph_omapbench
-  librados-cxx
+  librados
   Boost::program_options
   global
   ${BLKID_LIBRARIES}
@@ -167,7 +171,7 @@ if(WITH_KVS)
     ${CMAKE_SOURCE_DIR}/src/key_value_store/kv_flat_btree_async.cc
     )
   add_executable(ceph_kvstorebench ${kvstorebench_srcs})
-  target_link_libraries(ceph_kvstorebench librados-cxx global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
+  target_link_libraries(ceph_kvstorebench librados global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
   install(TARGETS ceph_kvstorebench DESTINATION bin)
 endif(WITH_KVS)
 
@@ -183,7 +187,7 @@ if(${WITH_RADOSGW})
     )
   target_link_libraries(test_cors
     librados
-    rgw_a
+    ${rgw_libs}
     global
     ${BLKID_LIBRARIES}
     ${CURL_LIBRARIES}
@@ -197,7 +201,7 @@ if(${WITH_RADOSGW})
     )
   target_link_libraries(ceph_test_cls_rgw_meta
     librados
-    rgw_a
+    ${rgw_libs}
     global
     cls_version_client
     cls_log_client
@@ -223,7 +227,7 @@ if(${WITH_RADOSGW})
     )
   target_link_libraries(ceph_test_cls_rgw_log
     librados
-    rgw_a
+    ${rgw_libs}
     global
     cls_version_client
     cls_log_client
@@ -359,7 +363,7 @@ endif(${WITH_RADOSGW})
 add_executable(ceph_multi_stress_watch
   multi_stress_watch.cc
   )
-target_link_libraries(ceph_multi_stress_watch librados-cxx global radostest-cxx
+target_link_libraries(ceph_multi_stress_watch librados global radostest-cxx
   ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
 
 #ceph_perf_local
@@ -421,7 +425,7 @@ add_executable(ceph_test_stress_watch
   test_stress_watch.cc
   )
 target_link_libraries(ceph_test_stress_watch
-  librados-cxx
+  librados
   ${UNITTEST_LIBS}
   radostest-cxx
   ${EXTRALIBS}
@@ -465,7 +469,6 @@ endif(HAVE_BLKID OR FREEBSD)
 
 # ceph_test_admin_socket_output
 
-find_package(StdFilesystem)
 if(StdFilesystem_FOUND)
   add_executable(ceph_test_admin_socket_output
     test_admin_socket_output.cc
@@ -564,6 +567,11 @@ if(WITH_MGR)
   list(APPEND tox_tests run-tox-mgr-ansible)
   set(MGR_ANSIBLE_VIRTUALENV ${CEPH_BUILD_VIRTUALENV}/mgr-ansible-virtualenv)
   list(APPEND env_vars_for_tox_tests MGR_ANSIBLE_VIRTUALENV=${MGR_ANSIBLE_VIRTUALENV})
+
+  add_test(NAME run-tox-mgr-orchestrator_cli COMMAND bash ${CMAKE_SOURCE_DIR}/src/pybind/mgr/orchestrator_cli/run-tox.sh)
+  list(APPEND tox_tests run-tox-mgr-orchestrator_cli)
+  set(MGR_ORCHESTRATOR_CLI_VIRTUALENV ${CEPH_BUILD_VIRTUALENV}/mgr-orchestrator_cli-virtualenv)
+  list(APPEND env_vars_for_tox_tests MGR_ORCHESTRATOR_CLI_VIRTUALENV=${MGR_ORCHESTRATOR_CLI_VIRTUALENV})
 endif()
 
 set_property(
@@ -591,6 +599,14 @@ add_executable(unittest_addrs
   )
 add_ceph_unittest(unittest_addrs)
 target_link_libraries(unittest_addrs ceph-common)
+
+# unittest_auth
+add_executable(unittest_auth
+  test_auth.cc
+  $<TARGET_OBJECTS:unit-main>
+  )
+add_ceph_unittest(unittest_auth)
+target_link_libraries(unittest_auth global)
 
 # unittest_workqueue
 add_executable(unittest_workqueue
@@ -875,5 +891,9 @@ target_link_libraries(unittest_pageset global)
 add_executable(unittest_any test_any.cc)
 add_ceph_unittest(unittest_any)
 target_link_libraries(unittest_any)
+
+# unittest_weighted_shuffle
+add_executable(unittest_weighted_shuffle test_weighted_shuffle.cc)
+add_ceph_unittest(unittest_weighted_shuffle)
 
 #make check ends here

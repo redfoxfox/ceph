@@ -47,6 +47,18 @@ const static std::map<uint32_t, std::set<std::string>> always_on_modules = {
       "progress",
       "balancer",
       "devicehealth",
+      "orchestrator_cli",
+      "volumes",
+    }
+  },
+  {
+    CEPH_RELEASE_OCTOPUS, {
+      "crash",
+      "status",
+      "progress",
+      "balancer",
+      "devicehealth",
+      "orchestrator_cli",
       "volumes",
     }
   }
@@ -213,7 +225,15 @@ void MgrMonitor::update_from_paxos(bool *need_bootstrap)
   // pointers into our mgr_module_options (which we just rebuilt).
   mon->configmon()->load_config();
 
-  // feed our pet MgrClient
+  if (!mon->is_init()) {
+    // feed our pet MgrClient, unless we are in Monitor::[pre]init()
+    prime_mgr_client();
+  }
+}
+
+void MgrMonitor::prime_mgr_client()
+{
+  dout(10) << __func__ << dendl;
   mon->mgr_client.ms_dispatch(new MMgrMap(map));
 }
 
@@ -642,10 +662,12 @@ void MgrMonitor::on_active()
   if (mon->is_leader()) {
     mon->clog->debug() << "mgrmap e" << map.epoch << ": " << map;
 
-    if (pending_map.always_on_modules != always_on_modules) {
+    if (HAVE_FEATURE(mon->get_quorum_con_features(), SERVER_NAUTILUS) &&
+	pending_map.always_on_modules != always_on_modules) {
       pending_map.always_on_modules = always_on_modules;
-      dout(4) << "always on modules changed "
-        << pending_map.get_always_on_modules() << dendl;
+      dout(4) << "always on modules changed, pending "
+	      << pending_map.get_always_on_modules()
+	      << " != wanted " << always_on_modules << dendl;
       propose_pending();
     }
   }

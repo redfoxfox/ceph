@@ -110,7 +110,7 @@ class DashboardTestCase(MgrTestCase):
     @classmethod
     def setUpClass(cls):
         super(DashboardTestCase, cls).setUpClass()
-        cls._assign_ports("dashboard", "server_port")
+        cls._assign_ports("dashboard", "ssl_server_port")
         cls._load_module("dashboard")
         cls._base_uri = cls._get_uri("dashboard").rstrip('/')
 
@@ -391,10 +391,31 @@ class DashboardTestCase(MgrTestCase):
         cls.mgr_cluster.admin_remote.run(args=args)
 
     @classmethod
+    def _rados_cmd(cls, cmd):
+        args = ['rados']
+        args.extend(cmd)
+        cls.mgr_cluster.admin_remote.run(args=args)
+
+    @classmethod
     def mons(cls):
         out = cls.ceph_cluster.mon_manager.raw_cluster_cmd('mon_status')
         j = json.loads(out)
         return [mon['name'] for mon in j['monmap']['mons']]
+
+    @classmethod
+    def find_object_in_list(cls, key, value, iterable):
+        """
+        Get the first occurrence of an object within a list with
+        the specified key/value.
+        :param key: The name of the key.
+        :param value: The value to search for.
+        :param iterable: The list to process.
+        :return: Returns the found object or None.
+        """
+        for obj in iterable:
+            if key in obj and obj[key] == value:
+                return obj
+        return None
 
 
 class JLeaf(namedtuple('JLeaf', ['typ', 'none'])):

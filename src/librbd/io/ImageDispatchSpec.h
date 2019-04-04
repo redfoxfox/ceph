@@ -30,10 +30,10 @@ public:
   };
 
   struct Discard {
-    bool skip_partial_discard;
+    uint32_t discard_granularity_bytes;
 
-    Discard(bool skip_partial_discard)
-      : skip_partial_discard(skip_partial_discard) {
+    Discard(uint32_t discard_granularity_bytes)
+      : discard_granularity_bytes(discard_granularity_bytes) {
     }
   };
 
@@ -82,10 +82,10 @@ public:
 
   static ImageDispatchSpec* create_discard_request(
       ImageCtxT &image_ctx, AioCompletion *aio_comp, uint64_t off, uint64_t len,
-      bool skip_partial_discard, const ZTracer::Trace &parent_trace) {
+      uint32_t discard_granularity_bytes, const ZTracer::Trace &parent_trace) {
     return new ImageDispatchSpec(image_ctx, aio_comp, {{off, len}},
-                                 Discard{skip_partial_discard}, 0,
-                                 parent_trace);
+                                 Discard{discard_granularity_bytes},
+                                 0, parent_trace);
   }
 
   static ImageDispatchSpec* create_write_request(
@@ -129,7 +129,7 @@ public:
 
   void start_op();
 
-  uint64_t tokens_requested(uint64_t flag);
+  bool tokens_requested(uint64_t flag, uint64_t *tokens);
 
   bool was_throttled(uint64_t flag) {
     return m_throttled_flag & flag;
@@ -140,7 +140,7 @@ public:
   }
 
   bool were_all_throttled() {
-    return m_throttled_flag & RBD_QOS_MASK;
+    return (m_throttled_flag & RBD_QOS_MASK) == RBD_QOS_MASK;
   }
 
 private:

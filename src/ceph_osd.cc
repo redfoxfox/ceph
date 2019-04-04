@@ -267,7 +267,7 @@ int main(int argc, const char **argv)
   }
 
   // the store
-  std::string store_type = g_conf().get_val<std::string>("osd_objectstore");
+  std::string store_type;
   {
     char fn[PATH_MAX];
     snprintf(fn, sizeof(fn), "%s/type", data_path.c_str());
@@ -280,6 +280,29 @@ int main(int argc, const char **argv)
 	dout(5) << "object store type is " << store_type << dendl;
       }
       ::close(fd);
+    } else if (mkfs) {
+      store_type = g_conf().get_val<std::string>("osd_objectstore");
+    } else {
+      // hrm, infer the type
+      snprintf(fn, sizeof(fn), "%s/current", data_path.c_str());
+      struct stat st;
+      if (::stat(fn, &st) == 0 &&
+	  S_ISDIR(st.st_mode)) {
+	derr << "missing 'type' file, inferring filestore from current/ dir"
+	     << dendl;
+	store_type = "filestore";
+      } else {
+	snprintf(fn, sizeof(fn), "%s/block", data_path.c_str());
+	if (::stat(fn, &st) == 0 &&
+	    S_ISLNK(st.st_mode)) {
+	  derr << "missing 'type' file, inferring bluestore from block symlink"
+	       << dendl;
+	  store_type = "bluestore";
+	} else {
+	  derr << "missing 'type' file and unable to infer osd type" << dendl;
+	  forker.exit(1);
+	}
+      }
     }
   }
 
@@ -441,8 +464,10 @@ flushjournal_out:
   
   string magic;
   uuid_d cluster_fsid, osd_fsid;
+  int require_osd_release = 0;
   int w;
-  int r = OSD::peek_meta(store, magic, cluster_fsid, osd_fsid, w);
+  int r = OSD::peek_meta(store, &magic, &cluster_fsid, &osd_fsid, &w,
+			 &require_osd_release);
   if (r < 0) {
     derr << TEXT_RED << " ** ERROR: unable to open OSD superblock on "
 	 << data_path << ": " << cpp_strerror(-r)
@@ -470,6 +495,21 @@ flushjournal_out:
   if (get_osd_fsid) {
     cout << osd_fsid << std::endl;
     forker.exit(0);
+  }
+
+  if (require_osd_release > 0 &&
+      require_osd_release + 2 < (int)ceph_release()) {
+    derr << "OSD's recorded require_osd_release " << require_osd_release
+	 << " (" << ceph_release_name(require_osd_release)
+	 << ") is >2 releases older than installed " << ceph_release()
+	 << " (" << ceph_release_name(ceph_release())
+	 << "); you can only upgrade 2 releases at a time" << dendl;
+    derr << "you should first upgrade to "
+	 << (require_osd_release + 1)
+	 << " (" << ceph_release_name(require_osd_release + 1) << ") or "
+	 << (require_osd_release + 2)
+	 << " (" << ceph_release_name(require_osd_release + 2) << ")" << dendl;
+    forker.exit(1);
   }
 
   // consider objectstore numa node

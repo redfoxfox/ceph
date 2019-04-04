@@ -73,6 +73,13 @@ struct ceph_dir_layout {
 #define CEPH_AUTH_NONE	 	0x1
 #define CEPH_AUTH_CEPHX	 	0x2
 
+/* msgr2 protocol modes */
+#define CEPH_CON_MODE_UNKNOWN 0x0
+#define CEPH_CON_MODE_CRC     0x1
+#define CEPH_CON_MODE_SECURE  0x2
+
+extern const char *ceph_con_mode_name(int con_mode);
+
 /*  For options with "_", like: GSS_GSS
     which means: Mode/Protocol to validate "authentication_authorization",
     where:
@@ -248,8 +255,9 @@ struct ceph_mon_subscribe_ack {
 #define CEPH_MDSMAP_ALLOW_SNAPS                  (1<<1)  /* cluster allowed to create snapshots */
 /* deprecated #define CEPH_MDSMAP_ALLOW_MULTIMDS (1<<2) cluster allowed to have >1 active MDS */
 /* deprecated #define CEPH_MDSMAP_ALLOW_DIRFRAGS (1<<3) cluster allowed to fragment directories */
-#define CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS	 (1<<4)  /* cluster alllowed to enable MULTIMDS
-							    and SNAPS at the same time */
+#define CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS	     (1<<4)  /* cluster alllowed to enable MULTIMDS
+                                                            and SNAPS at the same time */
+#define CEPH_MDSMAP_ALLOW_STANDBY_REPLAY         (1<<5)  /* cluster alllowed to enable MULTIMDS */
 
 #define CEPH_MDSMAP_DEFAULTS (CEPH_MDSMAP_ALLOW_SNAPS | \
 			      CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS)

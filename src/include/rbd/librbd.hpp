@@ -469,6 +469,9 @@ public:
 
   int flatten();
   int flatten_with_progress(ProgressContext &prog_ctx);
+
+  int sparsify(size_t sparse_size);
+  int sparsify_with_progress(size_t sparse_size, ProgressContext &prog_ctx);
   /**
    * Returns a pair of poolname, imagename for each clone
    * of this image at the currently set snapshot.
@@ -482,6 +485,7 @@ public:
   int list_children2(std::vector<librbd::child_info_t> *children)
       __attribute__((deprecated));
   int list_children3(std::vector<linked_image_spec_t> *images);
+  int list_descendants(std::vector<linked_image_spec_t> *images);
 
   /* advisory locking (see librbd.h for details) */
   int list_lockers(std::list<locker_t> *lockers,

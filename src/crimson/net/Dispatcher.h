@@ -15,6 +15,7 @@
 #pragma once
 
 #include <seastar/core/future.hh>
+#include <seastar/core/sharded.hh>
 
 #include "Fwd.h"
 
@@ -52,8 +53,14 @@ class Dispatcher {
 		       bufferlist&) {
     return seastar::make_ready_future<msgr_tag_t, bufferlist>(0, bufferlist{});
   }
-  virtual seastar::future<std::unique_ptr<AuthAuthorizer>>
-  ms_get_authorizer(peer_type_t, bool force_new);
+  virtual AuthAuthorizer* ms_get_authorizer(peer_type_t) const {
+    return nullptr;
+  }
+
+  // get the local dispatcher shard if it is accessed by another core
+  virtual Dispatcher* get_local_shard() {
+    return this;
+  }
 };
 
 } // namespace ceph::net

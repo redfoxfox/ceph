@@ -43,6 +43,8 @@
 
 #include "common/config_obs.h"
 #include "common/LogClient.h"
+#include "auth/AuthClient.h"
+#include "auth/AuthServer.h"
 #include "auth/cephx/CephxKeyServer.h"
 #include "auth/AuthMethodList.h"
 #include "auth/KeyRing.h"
@@ -100,18 +102,6 @@ class PaxosService;
 class PerfCounters;
 class AdminSocketHook;
 
-class MMonGetMap;
-class MMonGetVersion;
-class MMonMetadata;
-class MMonSync;
-class MMonScrub;
-class MMonProbe;
-struct MMonSubscribe;
-struct MRoute;
-struct MForward;
-struct MTimeCheck2;
-struct MMonHealth;
-
 #define COMPAT_SET_LOC "feature_set"
 
 class C_MonContext final : public FunctionContext {
@@ -123,8 +113,13 @@ public:
 };
 
 class Monitor : public Dispatcher,
+		public AuthClient,
+		public AuthServer,
                 public md_config_obs_t {
 public:
+  int orig_argc = 0;
+  const char **orig_argv = nullptr;
+
   // me
   string name;
   int rank;
@@ -134,7 +129,9 @@ public:
   SafeTimer timer;
   Finisher finisher;
   ThreadPool cpu_tp;  ///< threadpool for CPU intensive work
-  
+
+  ceph::mutex auth_lock = ceph::make_mutex("Monitor::auth_lock");
+
   /// true if we have ever joined a quorum.  if false, we are either a
   /// new cluster, a newly joining monitor, or a just-upgraded
   /// monitor.
@@ -186,14 +183,15 @@ public:
   // -- monitor state --
 private:
   enum {
-    STATE_PROBING = 1,
+    STATE_INIT = 1,
+    STATE_PROBING,
     STATE_SYNCHRONIZING,
     STATE_ELECTING,
     STATE_LEADER,
     STATE_PEON,
     STATE_SHUTDOWN
   };
-  int state;
+  int state = STATE_INIT;
 
 public:
   static const char *get_state_name(int s) {
@@ -211,6 +209,7 @@ public:
     return get_state_name(state);
   }
 
+  bool is_init() const { return state == STATE_INIT; }
   bool is_shutdown() const { return state == STATE_SHUTDOWN; }
   bool is_probing() const { return state == STATE_PROBING; }
   bool is_synchronizing() const { return state == STATE_SYNCHRONIZING; }
@@ -251,6 +250,8 @@ private:
    * Intersection of quorum members mon-specific feature bits
    */
   mon_feature_t quorum_mon_features;
+
+  int quorum_min_mon_release = -1;
 
   set<string> outside_quorum;
 
@@ -593,6 +594,7 @@ private:
   void _reset();   ///< called from bootstrap, start_, or join_election
   void wait_for_paxos_write();
   void _finish_svc_election(); ///< called by {win,lose}_election
+  void respawn();
 public:
   void bootstrap();
   void join_election();
@@ -602,10 +604,12 @@ public:
   void win_election(epoch_t epoch, set<int>& q,
 		    uint64_t features,
                     const mon_feature_t& mon_features,
+		    int min_mon_release,
 		    const map<int,Metadata>& metadata);
   void lose_election(epoch_t epoch, set<int>& q, int l,
 		     uint64_t features,
-                     const mon_feature_t& mon_features);
+                     const mon_feature_t& mon_features,
+		     int min_mon_release);
   // end election (called by Elector)
   void finish_election();
 
@@ -888,14 +892,53 @@ public:
   void dispatch_op(MonOpRequestRef op);
   //mon_caps is used for un-connected messages from monitors
   MonCap mon_caps;
-  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new) override;
+  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer) override;
   KeyStore *ms_get_auth1_authorizer_keystore();
 public: // for AuthMonitor msgr1:
   int ms_handle_authentication(Connection *con) override;
 private:
+  void ms_handle_accept(Connection *con) override;
   bool ms_handle_reset(Connection *con) override;
   void ms_handle_remote_reset(Connection *con) override {}
   bool ms_handle_refused(Connection *con) override;
+
+  // AuthClient
+  int get_auth_request(
+    Connection *con,
+    AuthConnectionMeta *auth_meta,
+    uint32_t *method,
+    vector<uint32_t> *preferred_modes,
+    bufferlist *out) override;
+  int handle_auth_reply_more(
+    Connection *con,
+    AuthConnectionMeta *auth_meta,
+   const bufferlist& bl,
+    bufferlist *reply) override;
+  int handle_auth_done(
+    Connection *con,
+    AuthConnectionMeta *auth_meta,
+    uint64_t global_id,
+    uint32_t con_mode,
+    const bufferlist& bl,
+    CryptoKey *session_key,
+    std::string *connection_secret) override;
+  int handle_auth_bad_method(
+    Connection *con,
+    AuthConnectionMeta *auth_meta,
+    uint32_t old_auth_method,
+    int result,
+    const std::vector<uint32_t>& allowed_methods,
+    const std::vector<uint32_t>& allowed_modes) override;
+  // /AuthClient
+  // AuthServer
+  int handle_auth_request(
+    Connection *con,
+    AuthConnectionMeta *auth_meta,
+    bool more,
+    uint32_t auth_method,
+    const bufferlist& bl,
+    bufferlist *reply) override;
+  // /AuthServer
 
   int write_default_keyring(bufferlist& bl);
   void extract_save_mon_key(KeyRing& keyring);
@@ -1003,6 +1046,7 @@ public:
 #define CEPH_MON_FEATURE_INCOMPAT_LUMINOUS CompatSet::Feature(9, "luminous ondisk layout")
 #define CEPH_MON_FEATURE_INCOMPAT_MIMIC CompatSet::Feature(10, "mimic ondisk layout")
 #define CEPH_MON_FEATURE_INCOMPAT_NAUTILUS CompatSet::Feature(11, "nautilus ondisk layout")
+#define CEPH_MON_FEATURE_INCOMPAT_OCTOPUS CompatSet::Feature(11, "octopus ondisk layout")
 // make sure you add your feature to Monitor::get_supported_features
 
 

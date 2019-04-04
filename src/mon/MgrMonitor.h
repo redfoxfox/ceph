@@ -81,11 +81,16 @@ public:
 
   const MgrMap &get_map() const { return map; }
 
+  const std::map<std::string,Option>& get_mgr_module_options() {
+    return mgr_module_options;
+  }
   const Option *find_module_option(const string& name);
 
   bool in_use() const { return map.epoch > 0; }
 
   version_t get_trim_to() const override;
+
+  void prime_mgr_client();
 
   void create_initial() override;
   void get_store_prefixes(std::set<string>& s) const override;
@@ -124,8 +129,6 @@ public:
   void print_nodes(Formatter *f) const;
   void count_metadata(const string& field, Formatter *f);
   void count_metadata(const string& field, std::map<string,int> *out);
-
-  friend class C_Updated;
 
   // When did the mon last call into our tick() method?  Used for detecting
   // when the mon was not updating us for some period (e.g. during slow

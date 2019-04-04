@@ -9,13 +9,15 @@ import { of } from 'rxjs';
 
 import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
 import { PoolService } from '../../../shared/api/pool.service';
-import { DeletionModalComponent } from '../../../shared/components/deletion-modal/deletion-modal.component';
+import { CriticalConfirmationModalComponent } from '../../../shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
 import { ExecutingTask } from '../../../shared/models/executing-task';
 import { SummaryService } from '../../../shared/services/summary.service';
 import { TaskWrapperService } from '../../../shared/services/task-wrapper.service';
 import { SharedModule } from '../../../shared/shared.module';
+import { RbdConfigurationListComponent } from '../../block/rbd-configuration-list/rbd-configuration-list.component';
 import { PgCategoryService } from '../../shared/pg-category.service';
 import { Pool } from '../pool';
+import { PoolDetailsComponent } from '../pool-details/pool-details.component';
 import { PoolListComponent } from './pool-list.component';
 
 describe('PoolListComponent', () => {
@@ -23,8 +25,22 @@ describe('PoolListComponent', () => {
   let fixture: ComponentFixture<PoolListComponent>;
   let poolService: PoolService;
 
+  const addPool = (pools, name, id) => {
+    const pool = new Pool(name);
+    pool.pool = id;
+    pool.pg_num = 256;
+    pools.push(pool);
+  };
+
+  const setUpPools = (pools) => {
+    addPool(pools, 'a', 0);
+    addPool(pools, 'b', 1);
+    addPool(pools, 'c', 2);
+    component.pools = pools;
+  };
+
   configureTestBed({
-    declarations: [PoolListComponent],
+    declarations: [PoolListComponent, PoolDetailsComponent, RbdConfigurationListComponent],
     imports: [
       SharedModule,
       ToastModule.forRoot(),
@@ -57,7 +73,7 @@ describe('PoolListComponent', () => {
 
     const callDeletion = () => {
       component.deletePoolModal();
-      const deletion: DeletionModalComponent = component.modalRef.content;
+      const deletion: CriticalConfirmationModalComponent = component.modalRef.content;
       deletion.submitActionObservable();
     };
 
@@ -97,12 +113,6 @@ describe('PoolListComponent', () => {
     let pools: Pool[];
     let summaryService: SummaryService;
 
-    const addPool = (name) => {
-      const pool = new Pool(name);
-      pool.pg_num = 256;
-      pools.push(pool);
-    };
-
     const addTask = (name: string, pool: string) => {
       const task = new ExecutingTask();
       task.name = name;
@@ -114,10 +124,7 @@ describe('PoolListComponent', () => {
       summaryService = TestBed.get(SummaryService);
       summaryService['summaryDataSource'].next({ executing_tasks: [], finished_tasks: [] });
       pools = [];
-      addPool('a');
-      addPool('b');
-      addPool('c');
-      component.pools = pools;
+      setUpPools(pools);
       spyOn(poolService, 'getList').and.callFake(() => of(pools));
       fixture.detectChanges();
     });
@@ -154,7 +161,7 @@ describe('PoolListComponent', () => {
       expect(component.pools[2].cdExecuting).toBe('Deleting');
     });
 
-    it('gets all pools with multiple executing tasks (not only pool tasks', () => {
+    it('gets all pools with multiple executing tasks (not only pool tasks)', () => {
       addTask('rbd/create', 'a');
       addTask('rbd/edit', 'a');
       addTask('pool/delete', 'a');
@@ -170,7 +177,7 @@ describe('PoolListComponent', () => {
 
   describe('getPgStatusCellClass', () => {
     const testMethod = (value, expected) =>
-      expect(component.getPgStatusCellClass({ row: '', column: '', value: value })).toEqual({
+      expect(component.getPgStatusCellClass('', '', value)).toEqual({
         'text-right': true,
         [expected]: true
       });
@@ -265,6 +272,53 @@ describe('PoolListComponent', () => {
       const expected = { prop1: 1, prop2: 2, prop3: 3 };
 
       expect(component.getPoolDetails(pool)).toEqual(expected);
+    });
+  });
+
+  describe('getSelectionTiers', () => {
+    let pools: Pool[];
+    const setSelectionTiers = (tiers: number[]) => {
+      component.selection.selected = [
+        {
+          tiers
+        }
+      ];
+      component.selection.update();
+      component.getSelectionTiers();
+    };
+
+    beforeEach(() => {
+      pools = [];
+      setUpPools(pools);
+    });
+
+    it('should select multiple existing cache tiers', () => {
+      setSelectionTiers([0, 1, 2]);
+      expect(component.selectionCacheTiers).toEqual(pools);
+    });
+
+    it('should select correct existing cache tier', () => {
+      setSelectionTiers([0]);
+      expect(component.selectionCacheTiers).toEqual([{ pg_num: 256, pool: 0, pool_name: 'a' }]);
+    });
+
+    it('should not select cache tier if id is invalid', () => {
+      setSelectionTiers([-1]);
+      expect(component.selectionCacheTiers).toEqual([]);
+    });
+
+    it('should not select cache tier if empty', () => {
+      setSelectionTiers([]);
+      expect(component.selectionCacheTiers).toEqual([]);
+    });
+
+    it('should be able to selected one pool with multiple tiers, than with a single tier, than with no tiers', () => {
+      setSelectionTiers([0, 1, 2]);
+      expect(component.selectionCacheTiers).toEqual(pools);
+      setSelectionTiers([0]);
+      expect(component.selectionCacheTiers).toEqual([{ pg_num: 256, pool: 0, pool_name: 'a' }]);
+      setSelectionTiers([]);
+      expect(component.selectionCacheTiers).toEqual([]);
     });
   });
 });

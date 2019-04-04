@@ -2,15 +2,19 @@ import { Component, OnInit } from '@angular/core';
 import { AbstractControl, ValidationErrors, Validators } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 
+import { I18n } from '@ngx-translate/i18n-polyfill';
 import * as _ from 'lodash';
 import { BsModalService } from 'ngx-bootstrap/modal';
 import { forkJoin as observableForkJoin, Observable } from 'rxjs';
 
 import { RgwUserService } from '../../../shared/api/rgw-user.service';
+import { ActionLabelsI18n, URLVerbs } from '../../../shared/constants/app.constants';
+import { NotificationType } from '../../../shared/enum/notification-type.enum';
 import { CdFormBuilder } from '../../../shared/forms/cd-form-builder';
 import { CdFormGroup } from '../../../shared/forms/cd-form-group';
 import { CdValidators, isEmptyInputValue } from '../../../shared/forms/cd-validators';
 import { FormatterService } from '../../../shared/services/formatter.service';
+import { NotificationService } from '../../../shared/services/notification.service';
 import { RgwUserCapability } from '../models/rgw-user-capability';
 import { RgwUserS3Key } from '../models/rgw-user-s3-key';
 import { RgwUserSubuser } from '../models/rgw-user-subuser';
@@ -37,13 +41,26 @@ export class RgwUserFormComponent implements OnInit {
   swiftKeys: RgwUserSwiftKey[] = [];
   capabilities: RgwUserCapability[] = [];
 
+  action: string;
+  resource: string;
+  subuserLabel: string;
+  s3keyLabel: string;
+  capabilityLabel: string;
+
   constructor(
     private formBuilder: CdFormBuilder,
     private route: ActivatedRoute,
     private router: Router,
     private rgwUserService: RgwUserService,
-    private bsModalService: BsModalService
+    private bsModalService: BsModalService,
+    private notificationService: NotificationService,
+    private i18n: I18n,
+    public actionLabels: ActionLabelsI18n
   ) {
+    this.resource = this.i18n('user');
+    this.subuserLabel = this.i18n('subuser');
+    this.s3keyLabel = this.i18n('S3 Key');
+    this.capabilityLabel = this.i18n('capability');
     this.createForm();
     this.listenToChanges();
   }
@@ -153,6 +170,8 @@ export class RgwUserFormComponent implements OnInit {
   }
 
   ngOnInit() {
+    this.editing = this.router.url.startsWith(`/rgw/user/${URLVerbs.EDIT}`);
+    this.action = this.editing ? this.actionLabels.EDIT : this.actionLabels.CREATE;
     // Process route parameters.
     this.route.params.subscribe((params: { uid: string }) => {
       if (!params.hasOwnProperty('uid')) {
@@ -160,8 +179,6 @@ export class RgwUserFormComponent implements OnInit {
       }
       const uid = decodeURIComponent(params.uid);
       this.loading = true;
-      // Load the user data in 'edit' mode.
-      this.editing = true;
       // Load the user and quota information.
       const observables = [];
       observables.push(this.rgwUserService.get(uid));
@@ -225,9 +242,11 @@ export class RgwUserFormComponent implements OnInit {
   }
 
   onSubmit() {
+    let notificationTitle: string;
     // Exit immediately if the form isn't dirty.
     if (this.userForm.pristine) {
       this.goToListView();
+      return;
     }
     const uid = this.userForm.getValue('uid');
     if (this.editing) {
@@ -236,10 +255,12 @@ export class RgwUserFormComponent implements OnInit {
         const args = this._getUpdateArgs();
         this.submitObservables.push(this.rgwUserService.update(uid, args));
       }
+      notificationTitle = this.i18n('Updated Object Gateway user "{{uid}}"', { uid: uid });
     } else {
       // Add
       const args = this._getCreateArgs();
       this.submitObservables.push(this.rgwUserService.create(args));
+      notificationTitle = this.i18n('Created Object Gateway user "{{uid}}"', { uid: uid });
     }
     // Check if user quota has been modified.
     if (this._isUserQuotaDirty()) {
@@ -254,6 +275,7 @@ export class RgwUserFormComponent implements OnInit {
     // Finally execute all observables.
     observableForkJoin(this.submitObservables).subscribe(
       () => {
+        this.notificationService.show(NotificationType.success, notificationTitle);
         this.goToListView();
       },
       () => {

@@ -7,6 +7,7 @@
 #include "include/encoding.h"
 #include "include/rbd_types.h"
 #include "include/rados/librados.hpp"
+#include "common/bit_vector.hpp"
 
 #include <errno.h>
 
@@ -445,18 +446,19 @@ int parent_overlap_get(librados::IoCtx* ioctx, const std::string &oid,
 
 void parent_attach(librados::ObjectWriteOperation* op,
                    const cls::rbd::ParentImageSpec& parent_image_spec,
-                   uint64_t parent_overlap) {
+                   uint64_t parent_overlap, bool reattach) {
   bufferlist in_bl;
   encode(parent_image_spec, in_bl);
   encode(parent_overlap, in_bl);
+  encode(reattach, in_bl);
   op->exec("rbd", "parent_attach", in_bl);
 }
 
 int parent_attach(librados::IoCtx *ioctx, const std::string &oid,
                   const cls::rbd::ParentImageSpec& parent_image_spec,
-                  uint64_t parent_overlap) {
+                  uint64_t parent_overlap, bool reattach) {
   librados::ObjectWriteOperation op;
-  parent_attach(&op, parent_image_spec, parent_overlap);
+  parent_attach(&op, parent_image_spec, parent_overlap, reattach);
   return ioctx->operate(oid, &op);
 }
 
@@ -2781,6 +2783,24 @@ int namespace_list(librados::IoCtx *ioctx,
 
   auto iter = out_bl.cbegin();
   return namespace_list_finish(&iter, entries);
+}
+
+void sparsify(librados::ObjectWriteOperation *op, size_t sparse_size,
+              bool remove_empty)
+{
+  bufferlist bl;
+  encode(sparse_size, bl);
+  encode(remove_empty, bl);
+  op->exec("rbd", "sparsify", bl);
+}
+
+int sparsify(librados::IoCtx *ioctx, const std::string &oid, size_t sparse_size,
+             bool remove_empty)
+{
+  librados::ObjectWriteOperation op;
+  sparsify(&op, sparse_size, remove_empty);
+
+  return ioctx->operate(oid, &op);
 }
 
 } // namespace cls_client

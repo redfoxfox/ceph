@@ -27,13 +27,14 @@ function run() {
     export CEPH_ARGS
     CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
+    CEPH_ARGS+="--osd-objectstore=filestore "
 
     local funcs=${@:-$(set | sed -n -e 's/^\(TEST_[0-9a-z_]*\) .*/\1/p')}
     for func in $funcs ; do
         setup $dir || return 1
         run_mon $dir a || return 1
 	run_mgr $dir x || return 1
-	create_rbd_pool || return 1
+	ceph osd pool create foo 8 || return 1
 
         $func $dir || return 1
         teardown $dir || return 1
@@ -109,18 +110,30 @@ function rados_get_data() {
 
     local poolname=pool-rep
     local objname=obj-$inject-$$
+    local pgid=$(get_pg $poolname $objname)
+
     rados_put $dir $poolname $objname || return 1
     inject_$inject rep data $poolname $objname $dir 0 || return 1
     rados_get $dir $poolname $objname || return 1
 
+    COUNT=$(ceph pg $pgid query | jq '.info.stats.stat_sum.num_objects_repaired')
+    test "$COUNT" = "1" || return 1
+
     inject_$inject rep data $poolname $objname $dir 0 || return 1
     inject_$inject rep data $poolname $objname $dir 1 || return 1
     rados_get $dir $poolname $objname || return 1
+
+    COUNT=$(ceph pg $pgid query | jq '.info.stats.stat_sum.num_objects_repaired')
+    test "$COUNT" = "2" || return 1
 
     inject_$inject rep data $poolname $objname $dir 0 || return 1
     inject_$inject rep data $poolname $objname $dir 1 || return 1
     inject_$inject rep data $poolname $objname $dir 2 || return 1
     rados_get $dir $poolname $objname hang || return 1
+
+    # After hang another repair couldn't happen, so count stays the same
+    COUNT=$(ceph pg $pgid query | jq '.info.stats.stat_sum.num_objects_repaired')
+    test "$COUNT" = "2" || return 1
 }
 
 function TEST_rados_get_with_eio() {
@@ -299,7 +312,7 @@ function TEST_rep_read_unfound() {
 
     setup_osds 3 || return 1
 
-    ceph osd pool delete rbd rbd --yes-i-really-really-mean-it || return 1
+    ceph osd pool delete foo foo --yes-i-really-really-mean-it || return 1
     local poolname=test-pool
     create_pool $poolname 1 1 || return 1
     ceph osd pool set $poolname size 2

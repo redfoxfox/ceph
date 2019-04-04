@@ -2,10 +2,10 @@ import threading
 import functools
 import os
 import uuid
-
-from mgr_module import MgrModule
-
-import orchestrator
+try:
+    from typing import List
+except ImportError:
+    pass  # just for type checking
 
 try:
     from kubernetes import client, config
@@ -16,6 +16,9 @@ except ImportError:
     kubernetes_imported = False
     client = None
     config = None
+
+from mgr_module import MgrModule
+import orchestrator
 
 from .rook_cluster import RookCluster
 
@@ -75,7 +78,7 @@ class RookWriteCompletion(orchestrator.WriteCompletion):
         self.executed = False
 
         # Result of k8s API call, this is set if executed==True
-        self.k8s_result = None
+        self._result = None
 
         self.effective = False
 
@@ -88,6 +91,10 @@ class RookWriteCompletion(orchestrator.WriteCompletion):
         # XXX hacky global
         global all_completions
         all_completions.append(self)
+
+    @property
+    def result(self):
+        return self._result
 
     @property
     def is_persistent(self):
@@ -103,7 +110,7 @@ class RookWriteCompletion(orchestrator.WriteCompletion):
 
     def execute(self):
         if not self.executed:
-            self.k8s_result = self.execute_cb()
+            self._result = self.execute_cb()
             self.executed = True
 
         if not self.effective:
@@ -270,11 +277,6 @@ class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
             self._k8s,
             cluster_name)
 
-
-        # In case Rook isn't already clued in to this ceph
-        # cluster's existence, initialize it.
-        # self._rook_cluster.init_rook()
-
         self._initialized.set()
 
         while not self._shutdown.is_set():
@@ -292,7 +294,7 @@ class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
         # things look a bit out of sync?
 
     @deferred_read
-    def get_inventory(self, node_filter=None):
+    def get_inventory(self, node_filter=None, refresh=False):
         node_list = None
         if node_filter and node_filter.nodes:
             # Explicit node list
@@ -346,16 +348,19 @@ class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
             sd.service_type = p['labels']['app'].replace('rook-ceph-', '')
 
             if sd.service_type == "osd":
-                sd.daemon_name = "%s" % p['labels']["ceph-osd-id"]
+                sd.service_instance = "%s" % p['labels']["ceph-osd-id"]
             elif sd.service_type == "mds":
-                sd.daemon_name = p['labels']["rook_file_system"]
+                sd.service = p['labels']['rook_file_system']
+                pfx = "{0}-".format(sd.service)
+                sd.service_instance = p['labels']['ceph_daemon_id'].replace(pfx, '', 1)
             elif sd.service_type == "mon":
-                sd.daemon_name = p['labels']["mon"]
+                sd.service_instance = p['labels']["mon"]
             elif sd.service_type == "mgr":
-                sd.daemon_name = p['labels']["mgr"]
+                sd.service_instance = p['labels']["mgr"]
             elif sd.service_type == "nfs":
-                sd.daemon_name = p['labels']["ceph_nfs"]
-                sd.rados_config_location = self.rook_cluster.get_nfs_conf_url(sd.daemon_name, p['labels']['instance'])
+                sd.service = p['labels']['ceph_nfs']
+                sd.service_instance = p['labels']['instance']
+                sd.rados_config_location = self.rook_cluster.get_nfs_conf_url(sd.service, sd.service_instance)
             else:
                 # Unknown type -- skip it
                 continue
@@ -387,11 +392,37 @@ class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
             lambda: self.rook_cluster.rm_service(service_type, service_id), None,
             "Removing {0} services for {1}".format(service_type, service_id))
 
-    def create_osds(self, spec):
-        # Validate spec.node
-        if not self.rook_cluster.node_exists(spec.node):
+    def update_mons(self, num, hosts):
+        if hosts:
+            raise RuntimeError("Host list is not supported by rook.")
+
+        return RookWriteCompletion(
+            lambda: self.rook_cluster.update_mon_count(num), None,
+            "Updating mon count to {0}".format(num))
+
+    def update_stateless_service(self, svc_type, spec):
+        # only nfs is currently supported
+        if svc_type != "nfs":
+            raise NotImplementedError(svc_type)
+
+        num = spec.count
+        return RookWriteCompletion(
+            lambda: self.rook_cluster.update_nfs_count(spec.name, num), None,
+                "Updating NFS server count in {0} to {1}".format(spec.name, num))
+
+    def create_osds(self, drive_group, all_hosts):
+        # type: (orchestrator.DriveGroupSpec, List[str]) -> RookWriteCompletion
+
+        assert len(drive_group.hosts(all_hosts)) == 1
+        targets = []
+        if drive_group.data_devices:
+            targets += drive_group.data_devices.paths
+        if drive_group.data_directories:
+            targets += drive_group.data_directories
+
+        if not self.rook_cluster.node_exists(drive_group.hosts(all_hosts)[0]):
             raise RuntimeError("Node '{0}' is not in the Kubernetes "
-                               "cluster".format(spec.node))
+                               "cluster".format(drive_group.hosts(all_hosts)))
 
         # Validate whether cluster CRD can accept individual OSD
         # creations (i.e. not useAllDevices)
@@ -400,7 +431,7 @@ class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
                                "support OSD creation.")
 
         def execute():
-            self.rook_cluster.add_osds(spec)
+            return self.rook_cluster.add_osds(drive_group, all_hosts)
 
         def is_complete():
             # Find OSD pods on this host
@@ -408,7 +439,7 @@ class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
             pods = self._k8s.list_namespaced_pod("rook-ceph",
                                                  label_selector="rook_cluster=rook-ceph,app=rook-ceph-osd",
                                                  field_selector="spec.nodeName={0}".format(
-                                                     spec.node
+                                                     drive_group.hosts(all_hosts)[0]
                                                  )).items
             for p in pods:
                 pod_osd_ids.add(int(p.metadata.labels['ceph-osd-id']))
@@ -423,7 +454,7 @@ class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
                     continue
 
                 metadata = self.get_metadata('osd', "%s" % osd_id)
-                if metadata and metadata['devices'] in spec.drive_group.devices:
+                if metadata and metadata['devices'] in targets:
                     found.append(osd_id)
                 else:
                     self.log.info("ignoring osd {0} {1}".format(
@@ -434,6 +465,5 @@ class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
 
         return RookWriteCompletion(execute, is_complete,
                                    "Creating OSD on {0}:{1}".format(
-                                       spec.node,
-                                       spec.drive_group.devices
+                                       drive_group.hosts(all_hosts)[0], targets
                                    ))

@@ -22,7 +22,6 @@
 #include "common/errno.h"
 #include "common/Clock.h"
 #include "common/Formatter.h"
-#include "common/perf_counters.h"
 #include "common/convenience.h"
 #include "common/strtol.h"
 #include "include/str_list.h"
@@ -38,8 +37,6 @@ using rgw::IAM::ARN;
 using rgw::IAM::Effect;
 using rgw::IAM::op_to_perm;
 using rgw::IAM::Policy;
-
-PerfCounters *perfcounter = NULL;
 
 const uint32_t RGWBucketInfo::NUM_SHARDS_BLIND_BUCKET(UINT32_MAX);
 
@@ -97,6 +94,7 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_NO_CORS_FOUND, {404, "NoSuchCORSConfiguration"}},
     { ERR_NO_SUCH_SUBUSER, {404, "NoSuchSubUser"}},
     { ERR_NO_SUCH_ENTITY, {404, "NoSuchEntity"}},
+    { ERR_NO_SUCH_CORS_CONFIGURATION, {404, "NoSuchCORSConfiguration"}},
     { ERR_METHOD_NOT_ALLOWED, {405, "MethodNotAllowed" }},
     { ETIMEDOUT, {408, "RequestTimeout" }},
     { EEXIST, {409, "BucketAlreadyExists" }},
@@ -106,6 +104,9 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_TAG_CONFLICT, {409, "OperationAborted"}},
     { ERR_ROLE_EXISTS, {409, "EntityAlreadyExists"}},
     { ERR_DELETE_CONFLICT, {409, "DeleteConflict"}},
+    { ERR_POSITION_NOT_EQUAL_TO_LENGTH, {409, "PositionNotEqualToLength"}},
+    { ERR_OBJECT_NOT_APPENDABLE, {409, "ObjectNotAppendable"}},
+    { ERR_INVALID_BUCKET_STATE, {409, "InvalidBucketState"}},
     { ERR_INVALID_SECRET_KEY, {400, "InvalidSecretKey"}},
     { ERR_INVALID_KEY_TYPE, {400, "InvalidKeyType"}},
     { ERR_INVALID_CAP, {400, "InvalidCapability"}},
@@ -118,6 +119,7 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_INTERNAL_ERROR, {500, "InternalError" }},
     { ERR_NOT_IMPLEMENTED, {501, "NotImplemented" }},
     { ERR_SERVICE_UNAVAILABLE, {503, "ServiceUnavailable"}},
+    { ERR_RATE_LIMITED, {503, "SlowDown"}},
     { ERR_ZERO_IN_URL, {400, "InvalidRequest" }},
 });
 
@@ -136,50 +138,13 @@ rgw_http_errors rgw_http_swift_errors({
      * procedures also for ERR_ZERO_IN_URL. This make a problem as the validation
      * is performed very early, even before setting the req_state::proto_flags. */
     { ERR_ZERO_IN_URL, {412, "Invalid UTF8 or contains NULL"}},
+    { ERR_RATE_LIMITED, {498, "Rate Limited"}},
 });
 
 rgw_http_errors rgw_http_sts_errors({
     { ERR_PACKED_POLICY_TOO_LARGE, {400, "PackedPolicyTooLarge" }},
+    { ERR_INVALID_IDENTITY_TOKEN, {400, "InvalidIdentityToken" }},
 });
-
-int rgw_perf_start(CephContext *cct)
-{
-  PerfCountersBuilder plb(cct, "rgw", l_rgw_first, l_rgw_last);
-
-  // RGW emits comparatively few metrics, so let's be generous
-  // and mark them all USEFUL to get transmission to ceph-mgr by default.
-  plb.set_prio_default(PerfCountersBuilder::PRIO_USEFUL);
-
-  plb.add_u64_counter(l_rgw_req, "req", "Requests");
-  plb.add_u64_counter(l_rgw_failed_req, "failed_req", "Aborted requests");
-
-  plb.add_u64_counter(l_rgw_get, "get", "Gets");
-  plb.add_u64_counter(l_rgw_get_b, "get_b", "Size of gets");
-  plb.add_time_avg(l_rgw_get_lat, "get_initial_lat", "Get latency");
-  plb.add_u64_counter(l_rgw_put, "put", "Puts");
-  plb.add_u64_counter(l_rgw_put_b, "put_b", "Size of puts");
-  plb.add_time_avg(l_rgw_put_lat, "put_initial_lat", "Put latency");
-
-  plb.add_u64(l_rgw_qlen, "qlen", "Queue length");
-  plb.add_u64(l_rgw_qactive, "qactive", "Active requests queue");
-
-  plb.add_u64_counter(l_rgw_cache_hit, "cache_hit", "Cache hits");
-  plb.add_u64_counter(l_rgw_cache_miss, "cache_miss", "Cache miss");
-
-  plb.add_u64_counter(l_rgw_keystone_token_cache_hit, "keystone_token_cache_hit", "Keystone token cache hits");
-  plb.add_u64_counter(l_rgw_keystone_token_cache_miss, "keystone_token_cache_miss", "Keystone token cache miss");
-
-  perfcounter = plb.create_perf_counters();
-  cct->get_perfcounters_collection()->add(perfcounter);
-  return 0;
-}
-
-void rgw_perf_stop(CephContext *cct)
-{
-  ceph_assert(perfcounter);
-  cct->get_perfcounters_collection()->remove(perfcounter);
-  delete perfcounter;
-}
 
 using namespace ceph::crypto;
 
@@ -719,11 +684,11 @@ using ceph::crypto::SHA256;
  */
 sha256_digest_t calc_hash_sha256(const boost::string_view& msg)
 {
-  std::array<unsigned char, CEPH_CRYPTO_HMACSHA256_DIGESTSIZE> hash;
+  sha256_digest_t hash;
 
   SHA256 hasher;
   hasher.Update(reinterpret_cast<const unsigned char*>(msg.data()), msg.size());
-  hasher.Final(hash.data());
+  hasher.Final(hash.v);
 
   return hash;
 }
@@ -941,7 +906,9 @@ void RGWHTTPArgs::append(const string& name, const string& val)
       (name.compare("website") == 0) ||
       (name.compare("requestPayment") == 0) ||
       (name.compare("torrent") == 0) ||
-      (name.compare("tagging") == 0)) {
+      (name.compare("tagging") == 0) ||
+      (name.compare("append") == 0) ||
+      (name.compare("position") == 0)) {
     sub_resources[name] = val;
   } else if (name[0] == 'r') { // root of all evil
     if ((name.compare("response-content-type") == 0) ||

@@ -34,6 +34,7 @@ void MgrStatMonitor::create_initial()
   dout(10) << __func__ << dendl;
   version = 0;
   service_map.epoch = 1;
+  pending_service_map_bl.clear();
   encode(service_map, pending_service_map_bl, CEPH_FEATURES_ALL);
 }
 
@@ -50,11 +51,17 @@ void MgrStatMonitor::update_from_paxos(bool *need_bootstrap)
       auto p = bl.cbegin();
       decode(digest, p);
       decode(service_map, p);
+      if (!p.end()) {
+	decode(progress_events, p);
+      }
       dout(10) << __func__ << " v" << version
-	       << " service_map e" << service_map.epoch << dendl;
+	       << " service_map e" << service_map.epoch
+	       << " " << progress_events.size() << " progress events"
+	       << dendl;
     }
     catch (buffer::error& e) {
-      derr << "failed to decode mgrstat state; luminous dev version?" << dendl;
+      derr << "failed to decode mgrstat state; luminous dev version? "
+	   << e.what() << dendl;
     }
   }
   check_subs();
@@ -119,6 +126,7 @@ void MgrStatMonitor::encode_pending(MonitorDBStore::TransactionRef t)
   encode(pending_digest, bl, mon->get_quorum_con_features());
   ceph_assert(pending_service_map_bl.length());
   bl.append(pending_service_map_bl);
+  encode(pending_progress_events, bl);
   put_version(t, version, bl);
   put_last_committed(t, version);
 
@@ -189,8 +197,10 @@ bool MgrStatMonitor::prepare_report(MonOpRequestRef op)
   if (m->service_map_bl.length()) {
     pending_service_map_bl.swap(m->service_map_bl);
   }
+  pending_progress_events.swap(m->progress_events);
   dout(10) << __func__ << " " << pending_digest << ", "
-	   << pending_health_checks.checks.size() << " health checks" << dendl;
+	   << pending_health_checks.checks.size() << " health checks, "
+	   << progress_events.size() << " progress events" << dendl;
   dout(20) << "pending_digest:\n";
   JSONFormatter jf(true);
   jf.open_object_section("pending_digest");
@@ -202,6 +212,15 @@ bool MgrStatMonitor::prepare_report(MonOpRequestRef op)
   JSONFormatter jf(true);
   jf.open_object_section("health_checks");
   pending_health_checks.dump(&jf);
+  jf.close_section();
+  jf.flush(*_dout);
+  *_dout << dendl;
+  dout(20) << "progress events:\n";
+  JSONFormatter jf(true);
+  jf.open_object_section("progress_events");
+  for (auto& i : pending_progress_events) {
+    jf.dump_object(i.first.c_str(), i.second);
+  }
   jf.close_section();
   jf.flush(*_dout);
   *_dout << dendl;

@@ -160,7 +160,8 @@ describe('OsdListComponent', () => {
     const expectOpensModal = (actionName: string, modalClass): void => {
       openActionModal(actionName);
 
-      expect(modalServiceShowSpy.calls.any()).toBe(true, 'modalService.show called');
+      // @TODO: check why tsc is complaining when passing 'expectationFailOutput' param.
+      expect(modalServiceShowSpy.calls.any()).toBeTruthy();
       expect(modalServiceShowSpy.calls.first().args[0]).toBe(modalClass);
 
       modalServiceShowSpy.calls.reset();
@@ -181,7 +182,7 @@ describe('OsdListComponent', () => {
       const modalClass = CriticalConfirmationModalComponent;
       mockSafeToDestroy();
       expectOpensModal('Mark Lost', modalClass);
-      expectOpensModal('Remove', modalClass);
+      expectOpensModal('Purge', modalClass);
       expectOpensModal('Destroy', modalClass);
     });
   });
@@ -216,7 +217,7 @@ describe('OsdListComponent', () => {
     it('calls the corresponding service methods in critical confirmation modals', () => {
       mockSafeToDestroy();
       expectOsdServiceMethodCalled('Mark Lost', 'markLost');
-      expectOsdServiceMethodCalled('Remove', 'remove');
+      expectOsdServiceMethodCalled('Purge', 'purge');
       expectOsdServiceMethodCalled('Destroy', 'destroy');
     });
   });

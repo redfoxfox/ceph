@@ -26,13 +26,14 @@ function run() {
     export CEPH_ARGS
     CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
+    CEPH_ARGS+="--osd-objectstore=filestore "
 
     local funcs=${@:-$(set | sed -n -e 's/^\(TEST_[0-9a-z_]*\) .*/\1/p')}
     for func in $funcs ; do
         setup $dir || return 1
         run_mon $dir a || return 1
 	run_mgr $dir x || return 1
-	create_rbd_pool || return 1
+	create_pool rbd 4 || return 1
 
         # check that erasure code plugins are preloaded
         CEPH_ARGS='' ceph --admin-daemon $(get_asok_path mon.a) log flush || return 1
@@ -49,7 +50,6 @@ function setup_osds() {
     for id in $(seq 0 $(expr $count - 1)) ; do
         run_osd $dir $id || return 1
     done
-    wait_for_clean || return 1
 
     # check that erasure code plugins are preloaded
     CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.0) log flush || return 1

@@ -33,6 +33,16 @@ Parameters:
 
     **TokenCode** (String/ Optional): The value provided by the MFA device, if MFA is required.
 
+An end user needs to attach a policy to allow invocation of GetSessionToken API using its permanent
+credentials and to allow subsequent s3 operations invocation using only the temporary credentials returned
+by GetSessionToken.
+The following is an example of attaching the policy to a user 'TESTER1'::
+
+    s3curl.pl --debug --id admin -- -s -v -X POST "http://localhost:8000/?Action=PutUserPolicy&PolicyName=Policy1&UserName=TESTER1&PolicyDocument=\{\"Version\":\"2012-10-17\",\"Statement\":\[\{\"Effect\":\"Deny\",\"Action\":\"s3:*\",\"Resource\":\[\"*\"\],\"Condition\":\{\"BoolIfExists\":\{\"sts:authentication\":\"false\"\}\}\},\{\"Effect\":\"Allow\",\"Action\":\"sts:GetSessionToken\",\"Resource\":\"*\",\"Condition\":\{\"BoolIfExists\":\{\"sts:authentication\":\"false\"\}\}\}\]\}&Version=2010-05-08"
+
+The user attaching the policy needs to have admin caps. For example::
+
+    radosgw-admin caps add --uid="TESTER" --caps="user-policy=*"
 
 2. AssumeRole: Returns a set of temporary credentials that can be used for 
 cross-account access. The temporary credentials will have permissions that are
@@ -212,27 +222,3 @@ Lines 13-16 have been added as a workaround in the code block below:
         else:
             self._service_name = service_name
 
-2. Currently boto does not include the payload hash with the request, but uses 
-it to calculate the signature for STS requests, which results in an incorrect 
-signature at the server side. The workaround is to send the payload hash in the
-request itself. The changes are in the file – botocore/auth.py.
-
-Lines 14-15 have been added as a workaround in the code block below:
-
-.. code-block:: python
-
-  def _modify_request_before_signing(self, request):
-          if 'Authorization' in request.headers:
-              del request.headers['Authorization']
-          self._set_necessary_date_headers(request)
-          if self.credentials.token:
-              if 'X-Amz-Security-Token' in request.headers:
-                  del request.headers['X-Amz-Security-Token']
-              request.headers['X-Amz-Security-Token'] = self.credentials.token
-
-          if not request.context.get('payload_signing_enabled', True):
-              if 'X-Amz-Content-SHA256' in request.headers:
-                  del request.headers['X-Amz-Content-SHA256']
-              request.headers['X-Amz-Content-SHA256'] = UNSIGNED_PAYLOAD
-          else:
-              request.headers['X-Amz-Content-SHA256'] = self.payload(request)

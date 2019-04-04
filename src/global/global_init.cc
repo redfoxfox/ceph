@@ -137,7 +137,7 @@ void global_pre_init(
   }
 
   // environment variables override (CEPH_ARGS, CEPH_KEYRING)
-  conf.parse_env();
+  conf.parse_env(cct->get_module_type());
 
   // command line (as passed by caller)
   conf.parse_argv(args);
@@ -154,7 +154,7 @@ void global_pre_init(
       _exit(1);
     }
   }
-
+  cct->_log->start();
   // do the --show-config[-val], if present in argv
   conf.do_argv_commands();
 

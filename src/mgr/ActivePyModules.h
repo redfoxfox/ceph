@@ -25,6 +25,7 @@
 #include "common/LogClient.h"
 #include "mon/MgrMap.h"
 #include "mon/MonCommand.h"
+#include "mon/mon_types.h"
 
 #include "DaemonState.h"
 #include "ClusterState.h"
@@ -32,6 +33,7 @@
 
 class health_check_map_t;
 class DaemonServer;
+class PyModuleRegistry;
 
 class ActivePyModules
 {
@@ -46,7 +48,9 @@ class ActivePyModules
   Client   &client;
   Finisher &finisher;
   DaemonServer &server;
+  PyModuleRegistry &py_module_registry;
 
+  map<std::string,ProgressEvent> progress_events;
 
   mutable Mutex lock{"ActivePyModules::lock"};
 
@@ -55,7 +59,7 @@ public:
             std::map<std::string, std::string> store_data,
             DaemonStateIndex &ds, ClusterState &cs, MonClient &mc,
             LogChannelRef clog_, LogChannelRef audit_clog_, Objecter &objecter_, Client &client_,
-            Finisher &f, DaemonServer &server);
+            Finisher &f, DaemonServer &server, PyModuleRegistry &pmr);
 
   ~ActivePyModules();
 
@@ -110,9 +114,20 @@ public:
   void set_config(const std::string &module_name,
       const std::string &key, const boost::optional<std::string> &val);
 
+  PyObject *get_typed_config(const std::string &module_name,
+			     const std::string &key,
+			     const std::string &prefix = "") const;
+
   void set_health_checks(const std::string& module_name,
 			 health_check_map_t&& checks);
   void get_health_checks(health_check_map_t *checks);
+
+  void update_progress_event(const std::string& evid,
+			     const std::string& desc,
+			     float progress);
+  void complete_progress_event(const std::string& evid);
+  void clear_all_progress_events();
+  void get_progress_events(std::map<std::string,ProgressEvent>* events);
 
   void config_notify();
 
@@ -156,7 +171,7 @@ public:
   int init();
   void shutdown();
 
-  int start_one(PyModuleRef py_module);
+  void start_one(PyModuleRef py_module);
 
   void dump_server(const std::string &hostname,
                    const DaemonStateCollection &dmc,
@@ -165,4 +180,3 @@ public:
   void cluster_log(const std::string &channel, clog_type prio,
     const std::string &message);
 };
-

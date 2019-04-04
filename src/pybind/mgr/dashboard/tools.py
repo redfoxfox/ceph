@@ -225,7 +225,7 @@ class ViewCache(object):
                         # pylint: disable=raising-bad-type
                         raise self.exception
                     return ViewCache.VALUE_OK, self.value
-                elif self.value_when is not None:
+                if self.value_when is not None:
                     # We have some data, but it doesn't meet freshness requirements
                     return ViewCache.VALUE_STALE, self.value
                 # We have no data, not even stale data
@@ -832,6 +832,7 @@ def getargspec(func):
             func = func.__wrapped__
     except AttributeError:
         pass
+    # pylint: disable=deprecated-method
     return _getargspec(func)
 
 
@@ -875,6 +876,37 @@ def get_request_body_params(request):
     if content_type in ['application/json', 'text/javascript']:
         if not hasattr(request, 'json'):
             raise cherrypy.HTTPError(400, 'Expected JSON body')
-        params.update(request.json.items())
+        if isinstance(request.json, str):
+            params.update(json.loads(request.json))
+        else:
+            params.update(request.json)
 
     return params
+
+
+def find_object_in_list(key, value, iterable):
+    """
+    Get the first occurrence of an object within a list with
+    the specified key/value.
+
+    >>> find_object_in_list('name', 'bar', [{'name': 'foo'}, {'name': 'bar'}])
+    {'name': 'bar'}
+
+    >>> find_object_in_list('name', 'xyz', [{'name': 'foo'}, {'name': 'bar'}]) is None
+    True
+
+    >>> find_object_in_list('foo', 'bar', [{'xyz': 4815162342}]) is None
+    True
+
+    >>> find_object_in_list('foo', 'bar', []) is None
+    True
+
+    :param key: The name of the key.
+    :param value: The value to search for.
+    :param iterable: The list to process.
+    :return: Returns the found object or None.
+    """
+    for obj in iterable:
+        if key in obj and obj[key] == value:
+            return obj
+    return None

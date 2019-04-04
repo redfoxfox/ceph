@@ -8,7 +8,7 @@ set(rados_srcs
   ${PROJECT_SOURCE_DIR}/src/osd/ECUtil.cc)
 add_executable(rados ${rados_srcs})
 
-target_link_libraries(rados librados-cxx global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
+target_link_libraries(rados librados global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
 if(WITH_LIBRADOSSTRIPER)
   target_link_libraries(rados radosstriper)
 else()
@@ -22,11 +22,11 @@ target_link_libraries(ceph_scratchtool librados global)
 install(TARGETS ceph_scratchtool DESTINATION bin)
 
 add_executable(ceph_scratchtoolpp scratchtoolpp.cc)
-target_link_libraries(ceph_scratchtoolpp librados-cxx global)
+target_link_libraries(ceph_scratchtoolpp librados global)
 install(TARGETS ceph_scratchtoolpp DESTINATION bin)
 
 add_executable(ceph_radosacl radosacl.cc)
-target_link_libraries(ceph_radosacl librados-cxx global)
+target_link_libraries(ceph_radosacl librados global)
 install(TARGETS ceph_radosacl DESTINATION bin)
 
 install(PROGRAMS
@@ -62,7 +62,9 @@ if(WITH_TESTS)
 endif(WITH_TESTS)
 endif(WITH_LIBCEPHFS)
 
-add_executable(ceph-kvstore-tool ceph_kvstore_tool.cc)
+add_executable(ceph-kvstore-tool
+  kvstore_tool.cc
+  ceph_kvstore_tool.cc)
 target_link_libraries(ceph-kvstore-tool os global)
 install(TARGETS ceph-kvstore-tool DESTINATION bin)
 
@@ -98,6 +100,13 @@ add_executable(ceph-authtool ${ceph_authtool_srcs})
 target_link_libraries(ceph-authtool global ${EXTRALIBS} ${CRYPTO_LIBS})
 install(TARGETS ceph-authtool DESTINATION bin)
 
+if(WITH_TESTS)
+set(cephdeduptool_srcs ceph_dedup_tool.cc)
+add_executable(cephdeduptool ${cephdeduptool_srcs})
+target_link_libraries(cephdeduptool librados global cls_cas_client)
+install(TARGETS cephdeduptool DESTINATION bin)
+endif(WITH_TESTS)
+
 if(WITH_CEPHFS)
   add_subdirectory(cephfs)
 endif(WITH_CEPHFS)
@@ -113,4 +122,5 @@ if(WITH_RBD)
   endif()
 endif(WITH_RBD)
 
+add_subdirectory(immutable_object_cache)
 add_subdirectory(ceph-dencoder)

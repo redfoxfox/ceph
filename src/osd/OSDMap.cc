@@ -37,6 +37,23 @@
 #include "common/Clock.h"
 #include "mon/PGMap.h"
 
+using std::list;
+using std::make_pair;
+using std::map;
+using std::multimap;
+using std::ostream;
+using std::ostringstream;
+using std::pair;
+using std::set;
+using std::string;
+using std::stringstream;
+using std::unordered_map;
+using std::vector;
+
+using ceph::decode;
+using ceph::encode;
+using ceph::Formatter;
+
 #define dout_subsys ceph_subsys_osd
 
 MEMPOOL_DEFINE_OBJECT_FACTORY(OSDMap, osdmap, osdmap);
@@ -56,7 +73,7 @@ void osd_info_t::dump(Formatter *f) const
   f->dump_int("lost_at", lost_at);
 }
 
-void osd_info_t::encode(bufferlist& bl) const
+void osd_info_t::encode(ceph::buffer::list& bl) const
 {
   using ceph::encode;
   __u8 struct_v = 1;
@@ -69,7 +86,7 @@ void osd_info_t::encode(bufferlist& bl) const
   encode(lost_at, bl);
 }
 
-void osd_info_t::decode(bufferlist::const_iterator& bl)
+void osd_info_t::decode(ceph::buffer::list::const_iterator& bl)
 {
   using ceph::decode;
   __u8 struct_v;
@@ -117,7 +134,7 @@ void osd_xinfo_t::dump(Formatter *f) const
   f->dump_unsigned("old_weight", old_weight);
 }
 
-void osd_xinfo_t::encode(bufferlist& bl) const
+void osd_xinfo_t::encode(ceph::buffer::list& bl) const
 {
   ENCODE_START(3, 1, bl);
   encode(down_stamp, bl);
@@ -129,7 +146,7 @@ void osd_xinfo_t::encode(bufferlist& bl) const
   ENCODE_FINISH(bl);
 }
 
-void osd_xinfo_t::decode(bufferlist::const_iterator& bl)
+void osd_xinfo_t::decode(ceph::buffer::list::const_iterator& bl)
 {
   DECODE_START(3, bl);
   decode(down_stamp, bl);
@@ -356,7 +373,7 @@ bool OSDMap::subtree_type_is_down(
   return true;
 }
 
-void OSDMap::Incremental::encode_client_old(bufferlist& bl) const
+void OSDMap::Incremental::encode_client_old(ceph::buffer::list& bl) const
 {
   using ceph::encode;
   __u16 v = 5;
@@ -417,7 +434,7 @@ void OSDMap::Incremental::encode_client_old(bufferlist& bl) const
   }
 }
 
-void OSDMap::Incremental::encode_classic(bufferlist& bl, uint64_t features) const
+void OSDMap::Incremental::encode_classic(ceph::buffer::list& bl, uint64_t features) const
 {
   using ceph::encode;
   if ((features & CEPH_FEATURE_PGID64) == 0) {
@@ -469,7 +486,7 @@ void OSDMap::Incremental::encode_classic(bufferlist& bl, uint64_t features) cons
 }
 
 template<class T>
-static void encode_addrvec_map_as_addr(const T& m, bufferlist& bl, uint64_t f)
+static void encode_addrvec_map_as_addr(const T& m, ceph::buffer::list& bl, uint64_t f)
 {
   uint32_t n = m.size();
   encode(n, bl);
@@ -480,7 +497,7 @@ static void encode_addrvec_map_as_addr(const T& m, bufferlist& bl, uint64_t f)
 }
 
 template<class T>
-static void encode_addrvec_pvec_as_addr(const T& m, bufferlist& bl, uint64_t f)
+static void encode_addrvec_pvec_as_addr(const T& m, ceph::buffer::list& bl, uint64_t f)
 {
   uint32_t n = m.size();
   encode(n, bl);
@@ -493,7 +510,11 @@ static void encode_addrvec_pvec_as_addr(const T& m, bufferlist& bl, uint64_t f)
   }
 }
 
-void OSDMap::Incremental::encode(bufferlist& bl, uint64_t features) const
+/* for a description of osdmap incremental versions, and when they were
+ * introduced, please refer to
+ *    doc/dev/osd_internals/osdmap_versions.txt
+ */
+void OSDMap::Incremental::encode(ceph::buffer::list& bl, uint64_t features) const
 {
   using ceph::encode;
   if ((features & CEPH_FEATURE_OSDMAP_ENC) == 0) {
@@ -511,7 +532,7 @@ void OSDMap::Incremental::encode(bufferlist& bl, uint64_t features) const
   size_t start_offset = bl.length();
   size_t tail_offset;
   size_t crc_offset;
-  std::optional<buffer::list::contiguous_filler> crc_filler;
+  std::optional<ceph::buffer::list::contiguous_filler> crc_filler;
 
   // meta-encoding: how we include client-used and osd-specific data
   ENCODE_START(8, 7, bl);
@@ -630,10 +651,10 @@ void OSDMap::Incremental::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl); // meta-encoding wrapper
 
   // fill in crc
-  bufferlist front;
+  ceph::buffer::list front;
   front.substr_of(bl, start_offset, crc_offset - start_offset);
   inc_crc = front.crc32c(-1);
-  bufferlist tail;
+  ceph::buffer::list tail;
   tail.substr_of(bl, tail_offset, bl.length() - tail_offset);
   inc_crc = tail.crc32c(inc_crc);
   ceph_le32 crc_le;
@@ -642,7 +663,7 @@ void OSDMap::Incremental::encode(bufferlist& bl, uint64_t features) const
   have_crc = true;
 }
 
-void OSDMap::Incremental::decode_classic(bufferlist::const_iterator &p)
+void OSDMap::Incremental::decode_classic(ceph::buffer::list::const_iterator &p)
 {
   using ceph::decode;
   __u32 n, t;
@@ -707,7 +728,7 @@ void OSDMap::Incremental::decode_classic(bufferlist::const_iterator &p)
     decode(n, p);
     while (n--) {
       old_pg_t opg;
-      ::decode_raw(opg, p);
+      ceph::decode_raw(opg, p);
       decode(new_pg_temp[pg_t(opg)], p);
     }
   } else {
@@ -742,7 +763,11 @@ void OSDMap::Incremental::decode_classic(bufferlist::const_iterator &p)
     decode(new_hb_front_up, p);
 }
 
-void OSDMap::Incremental::decode(bufferlist::const_iterator& bl)
+/* for a description of osdmap incremental versions, and when they were
+ * introduced, please refer to
+ *    doc/dev/osd_internals/osdmap_versions.txt
+ */
+void OSDMap::Incremental::decode(ceph::buffer::list::const_iterator& bl)
 {
   using ceph::decode;
   /**
@@ -754,7 +779,7 @@ void OSDMap::Incremental::decode(bufferlist::const_iterator& bl)
    */
   size_t start_offset = bl.get_off();
   size_t tail_offset = 0;
-  bufferlist crc_front, crc_tail;
+  ceph::buffer::list crc_front, crc_tail;
 
   DECODE_START_LEGACY_COMPAT_LEN(8, 7, 7, bl); // wrapper
   if (struct_v < 7) {
@@ -895,7 +920,7 @@ void OSDMap::Incremental::decode(bufferlist::const_iterator& bl)
     // verify crc
     uint32_t actual = crc_front.crc32c(-1);
     if (tail_offset < bl.get_off()) {
-      bufferlist tail;
+      ceph::buffer::list tail;
       tail.substr_of(bl.get_bl(), tail_offset, bl.get_off() - tail_offset);
       actual = tail.crc32c(actual);
     }
@@ -903,7 +928,7 @@ void OSDMap::Incremental::decode(bufferlist::const_iterator& bl)
       ostringstream ss;
       ss << "bad crc, actual " << actual << " != expected " << inc_crc;
       string s = ss.str();
-      throw buffer::malformed_input(s.c_str());
+      throw ceph::buffer::malformed_input(s.c_str());
     }
   }
 }
@@ -926,7 +951,7 @@ void OSDMap::Incremental::dump(Formatter *f) const
   if (fullmap.length()) {
     f->open_object_section("full_map");
     OSDMap full;
-    bufferlist fbl = fullmap;  // kludge around constness.
+    ceph::buffer::list fbl = fullmap;  // kludge around constness.
     auto p = fbl.cbegin();
     full.decode(p);
     full.dump(f);
@@ -935,7 +960,7 @@ void OSDMap::Incremental::dump(Formatter *f) const
   if (crush.length()) {
     f->open_object_section("crush");
     CrushWrapper c;
-    bufferlist tbl = crush;  // kludge around constness.
+    ceph::buffer::list tbl = crush;  // kludge around constness.
     auto p = tbl.cbegin();
     c.decode(p);
     c.dump(f);
@@ -1628,7 +1653,7 @@ void OSDMap::dedup(const OSDMap *o, OSDMap *n)
   }
 
   // does crush match?
-  bufferlist oc, nc;
+  ceph::buffer::list oc, nc;
   encode(*o->crush, oc, CEPH_FEATURES_SUPPORTED_DEFAULT);
   encode(*n->crush, nc, CEPH_FEATURES_SUPPORTED_DEFAULT);
   if (oc.contents_equal(nc)) {
@@ -1768,7 +1793,30 @@ void OSDMap::maybe_remove_pg_upmaps(CephContext *cct,
       to_cancel.insert(pg);
       continue;
     }
+    vector<int> raw_up;
+    int primary;
+    nextmap.pg_to_raw_up(pg, &raw_up, &primary);
+    vector<int> up;
+    up.reserve(raw_up.size());
+    for (auto osd : raw_up) {
+      // skip non-existent/down osd for erasure-coded PGs
+      if (osd == CRUSH_ITEM_NONE)
+        continue;
+      up.push_back(osd);
+    }
     auto crush_rule = nextmap.get_pg_pool_crush_rule(pg);
+    auto r = nextmap.crush->verify_upmap(cct,
+                                         crush_rule,
+                                         nextmap.get_pg_pool_size(pg),
+                                         up);
+    if (r < 0) {
+      ldout(cct, 0) << __func__ << " verify_upmap of pg " << pg
+                    << " returning " << r
+                    << dendl;
+      to_cancel.insert(pg);
+      continue;
+    }
+    // below we check against crush-topology changing..
     map<int, float> weight_map;
     auto it = rule_weight_map.find(crush_rule);
     if (it == rule_weight_map.end()) {
@@ -1782,43 +1830,10 @@ void OSDMap::maybe_remove_pg_upmaps(CephContext *cct,
     } else {
       weight_map = it->second;
     }
-    auto type = nextmap.crush->get_rule_failure_domain(crush_rule);
-    if (type < 0) {
-      lderr(cct) << __func__ << " unable to load failure-domain-type of pg "
-                 << pg << dendl;
-      continue;
-    }
     ldout(cct, 10) << __func__ << " pg " << pg
-                   << " crush-rule-id " << crush_rule
                    << " weight_map " << weight_map
-                   << " failure-domain-type " << type
                    << dendl;
-    vector<int> raw;
-    int primary;
-    nextmap.pg_to_raw_up(pg, &raw, &primary);
-    set<int> parents;
-    for (auto osd : raw) {
-      // skip non-existent/down osd for erasure-coded PGs
-      if (osd == CRUSH_ITEM_NONE)
-        continue;
-      if (type > 0) {
-        auto parent = nextmap.crush->get_parent_of_type(osd, type, crush_rule);
-        if (parent < 0) {
-          auto r = parents.insert(parent);
-          if (!r.second) {
-            // two up-set osds come from same parent
-            to_cancel.insert(pg);
-            break;
-          }
-        } else {
-          lderr(cct) << __func__ << " unable to get parent of raw osd."
-                     << osd << " of pg " << pg
-                     << dendl;
-          // continue to do checks below
-        }
-      }
-      // the above check validates collision only
-      // below we continue to check against crush-topology changing..
+    for (auto osd : up) {
       auto it = weight_map.find(osd);
       if (it == weight_map.end()) {
         // osd is gone or has been moved out of the specific crush-tree
@@ -1888,7 +1903,7 @@ int OSDMap::apply_incremental(const Incremental &inc)
 
   // full map?
   if (inc.fullmap.length()) {
-    bufferlist bl(inc.fullmap);
+    ceph::buffer::list bl(inc.fullmap);
     decode(bl);
     return 0;
   }
@@ -2126,7 +2141,7 @@ int OSDMap::apply_incremental(const Incremental &inc)
   }
   // do new crush map last (after up/down stuff)
   if (inc.crush.length()) {
-    bufferlist bl(inc.crush);
+    ceph::buffer::list bl(inc.crush);
     auto blp = bl.cbegin();
     crush.reset(new CrushWrapper);
     crush->decode(blp);
@@ -2416,6 +2431,17 @@ void OSDMap::pg_to_raw_osds(pg_t pg, vector<int> *raw, int *primary) const
   *primary = _pick_primary(*raw);
 }
 
+void OSDMap::pg_to_raw_upmap(pg_t pg, vector<int> *raw_upmap) const
+{
+  auto pool = get_pg_pool(pg.pool());
+  if (!pool) {
+    raw_upmap->clear();
+    return;
+  }
+  _pg_to_raw_osds(*pool, pg, raw_upmap, NULL);
+  _apply_upmap(*pool, pg, raw_upmap);
+}
+
 void OSDMap::pg_to_raw_up(pg_t pg, vector<int> *up, int *primary) const
 {
   const pg_pool_t *pool = get_pg_pool(pg.pool());
@@ -2519,6 +2545,9 @@ bool OSDMap::primary_changed(
 uint64_t OSDMap::get_encoding_features() const
 {
   uint64_t f = SIGNIFICANT_FEATURES;
+  if (require_osd_release < CEPH_RELEASE_OCTOPUS) {
+    f &= ~CEPH_FEATURE_SERVER_OCTOPUS;
+  }
   if (require_osd_release < CEPH_RELEASE_NAUTILUS) {
     f &= ~CEPH_FEATURE_SERVER_NAUTILUS;
   }
@@ -2542,7 +2571,7 @@ uint64_t OSDMap::get_encoding_features() const
 }
 
 // serialize, unserialize
-void OSDMap::encode_client_old(bufferlist& bl) const
+void OSDMap::encode_client_old(ceph::buffer::list& bl) const
 {
   using ceph::encode;
   __u16 v = 5;
@@ -2598,12 +2627,12 @@ void OSDMap::encode_client_old(bufferlist& bl) const
   }
 
   // crush
-  bufferlist cbl;
+  ceph::buffer::list cbl;
   crush->encode(cbl, 0 /* legacy (no) features */);
   encode(cbl, bl);
 }
 
-void OSDMap::encode_classic(bufferlist& bl, uint64_t features) const
+void OSDMap::encode_classic(ceph::buffer::list& bl, uint64_t features) const
 {
   using ceph::encode;
   if ((features & CEPH_FEATURE_PGID64) == 0) {
@@ -2640,7 +2669,7 @@ void OSDMap::encode_classic(bufferlist& bl, uint64_t features) const
   encode(*pg_temp, bl);
 
   // crush
-  bufferlist cbl;
+  ceph::buffer::list cbl;
   crush->encode(cbl, 0 /* legacy (no) features */);
   encode(cbl, bl);
 
@@ -2658,7 +2687,11 @@ void OSDMap::encode_classic(bufferlist& bl, uint64_t features) const
   encode(osd_addrs->hb_front_addrs, bl, features);
 }
 
-void OSDMap::encode(bufferlist& bl, uint64_t features) const
+/* for a description of osdmap versions, and when they were introduced, please
+ * refer to
+ *    doc/dev/osd_internals/osdmap_versions.txt
+ */
+void OSDMap::encode(ceph::buffer::list& bl, uint64_t features) const
 {
   using ceph::encode;
   if ((features & CEPH_FEATURE_OSDMAP_ENC) == 0) {
@@ -2676,7 +2709,7 @@ void OSDMap::encode(bufferlist& bl, uint64_t features) const
   size_t start_offset = bl.length();
   size_t tail_offset;
   size_t crc_offset;
-  std::optional<buffer::list::contiguous_filler> crc_filler;
+  std::optional<ceph::buffer::list::contiguous_filler> crc_filler;
 
   // meta-encoding: how we include client-used and osd-specific data
   ENCODE_START(8, 7, bl);
@@ -2743,7 +2776,7 @@ void OSDMap::encode(bufferlist& bl, uint64_t features) const
     }
 
     // crush
-    bufferlist cbl;
+    ceph::buffer::list cbl;
     crush->encode(cbl, features);
     encode(cbl, bl);
     encode(erasure_code_profiles, bl);
@@ -2832,11 +2865,11 @@ void OSDMap::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl); // meta-encoding wrapper
 
   // fill in crc
-  bufferlist front;
+  ceph::buffer::list front;
   front.substr_of(bl, start_offset, crc_offset - start_offset);
   crc = front.crc32c(-1);
   if (tail_offset < bl.length()) {
-    bufferlist tail;
+    ceph::buffer::list tail;
     tail.substr_of(bl, tail_offset, bl.length() - tail_offset);
     crc = tail.crc32c(crc);
   }
@@ -2846,13 +2879,17 @@ void OSDMap::encode(bufferlist& bl, uint64_t features) const
   crc_defined = true;
 }
 
-void OSDMap::decode(bufferlist& bl)
+/* for a description of osdmap versions, and when they were introduced, please
+ * refer to
+ *    doc/dev/osd_internals/osdmap_versions.txt
+ */
+void OSDMap::decode(ceph::buffer::list& bl)
 {
   auto p = bl.cbegin();
   decode(p);
 }
 
-void OSDMap::decode_classic(bufferlist::const_iterator& p)
+void OSDMap::decode_classic(ceph::buffer::list::const_iterator& p)
 {
   using ceph::decode;
   __u32 n, t;
@@ -2918,7 +2955,7 @@ void OSDMap::decode_classic(bufferlist::const_iterator& p)
     decode(n, p);
     while (n--) {
       old_pg_t opg;
-      ::decode_raw(opg, p);
+      ceph::decode_raw(opg, p);
       mempool::osdmap::vector<int32_t> v;
       decode(v, p);
       pg_temp->set(pg_t(opg), v);
@@ -2928,7 +2965,7 @@ void OSDMap::decode_classic(bufferlist::const_iterator& p)
   }
 
   // crush
-  bufferlist cbl;
+  ceph::buffer::list cbl;
   decode(cbl, p);
   auto cblp = cbl.cbegin();
   crush->decode(cblp);
@@ -2973,7 +3010,7 @@ void OSDMap::decode_classic(bufferlist::const_iterator& p)
   post_decode();
 }
 
-void OSDMap::decode(bufferlist::const_iterator& bl)
+void OSDMap::decode(ceph::buffer::list::const_iterator& bl)
 {
   using ceph::decode;
   /**
@@ -2985,7 +3022,7 @@ void OSDMap::decode(bufferlist::const_iterator& bl)
    */
   size_t start_offset = bl.get_off();
   size_t tail_offset = 0;
-  bufferlist crc_front, crc_tail;
+  ceph::buffer::list crc_front, crc_tail;
 
   DECODE_START_LEGACY_COMPAT_LEN(8, 7, 7, bl); // wrapper
   if (struct_v < 7) {
@@ -3026,6 +3063,8 @@ void OSDMap::decode(bufferlist::const_iterator& bl)
 
     decode(*pg_temp, bl);
     decode(*primary_temp, bl);
+    // dates back to firefly. version increased from 2 to 3 still in firefly.
+    // do we really still need to keep this around? even for old clients?
     if (struct_v >= 2) {
       osd_primary_affinity.reset(new mempool::osdmap::vector<__u32>);
       decode(*osd_primary_affinity, bl);
@@ -3036,15 +3075,20 @@ void OSDMap::decode(bufferlist::const_iterator& bl)
     }
 
     // crush
-    bufferlist cbl;
+    ceph::buffer::list cbl;
     decode(cbl, bl);
     auto cblp = cbl.cbegin();
     crush->decode(cblp);
+    // added in firefly; version increased in luminous, so it affects
+    // giant, hammer, infernallis, jewel, and kraken. probably should be left
+    // alone until we require clients to be all luminous?
     if (struct_v >= 3) {
       decode(erasure_code_profiles, bl);
     } else {
       erasure_code_profiles.clear();
     }
+    // version increased from 3 to 4 still in luminous, so same as above
+    // applies.
     if (struct_v >= 4) {
       decode(pg_upmap, bl);
       decode(pg_upmap_items, bl);
@@ -3052,13 +3096,17 @@ void OSDMap::decode(bufferlist::const_iterator& bl)
       pg_upmap.clear();
       pg_upmap_items.clear();
     }
+    // again, version increased from 5 to 6 still in luminous, so above
+    // applies.
     if (struct_v >= 6) {
       decode(crush_version, bl);
     }
+    // version increase from 6 to 7 in mimic
     if (struct_v >= 7) {
       decode(new_removed_snaps, bl);
       decode(new_purged_snaps, bl);
     }
+    // version increase from 7 to 8, 8 to 9, in nautilus.
     if (struct_v >= 9) {
       decode(last_up_change, bl);
       decode(last_in_change, bl);
@@ -3077,6 +3125,7 @@ void OSDMap::decode(bufferlist::const_iterator& bl)
     decode(*osd_uuid, bl);
     decode(osd_xinfo, bl);
     decode(osd_addrs->hb_front_addrs, bl);
+    // 
     if (struct_v >= 2) {
       decode(nearfull_ratio, bl);
       decode(full_ratio, bl);
@@ -3141,7 +3190,7 @@ void OSDMap::decode(bufferlist::const_iterator& bl)
     // verify crc
     uint32_t actual = crc_front.crc32c(-1);
     if (tail_offset < bl.get_off()) {
-      bufferlist tail;
+      ceph::buffer::list tail;
       tail.substr_of(bl.get_bl(), tail_offset, bl.get_off() - tail_offset);
       actual = tail.crc32c(actual);
     }
@@ -3149,7 +3198,7 @@ void OSDMap::decode(bufferlist::const_iterator& bl)
       ostringstream ss;
       ss << "bad crc, actual " << actual << " != expected " << crc;
       string s = ss.str();
-      throw buffer::malformed_input(s.c_str());
+      throw ceph::buffer::malformed_input(s.c_str());
     }
   }
 
@@ -3928,9 +3977,10 @@ int OSDMap::_build_crush_types(CrushWrapper& crush)
   crush.set_type_name(6, "pod");
   crush.set_type_name(7, "room");
   crush.set_type_name(8, "datacenter");
-  crush.set_type_name(9, "region");
-  crush.set_type_name(10, "root");
-  return 10;
+  crush.set_type_name(9, "zone");
+  crush.set_type_name(10, "region");
+  crush.set_type_name(11, "root");
+  return 11;
 }
 
 int OSDMap::build_simple_crush_map(CephContext *cct, CrushWrapper& crush,
@@ -4281,9 +4331,6 @@ bool OSDMap::try_pg_upmap(
   if (rule < 0)
     return false;
 
-  // get original mapping
-  _pg_to_raw_osds(*pool, pg, orig, NULL);
-
   // make sure there is something there to remap
   bool any = false;
   for (auto osd : *orig) {
@@ -4314,21 +4361,12 @@ int OSDMap::calc_pg_upmaps(
   CephContext *cct,
   float max_deviation_ratio,
   int max,
-  const set<int64_t>& only_pools_orig,
+  const set<int64_t>& only_pools,
   OSDMap::Incremental *pending_inc)
 {
-  set<int64_t> only_pools;
-  if (only_pools_orig.empty()) {
-    for (auto& i : pools) {
-      only_pools.insert(i.first);
-    }
-  } else {
-    only_pools = only_pools_orig;
-  }
+  ldout(cct, 10) << __func__ << " pools " << only_pools << dendl;
   OSDMap tmp;
   tmp.deepish_copy_from(*this);
-  float start_deviation = 0;
-  float end_deviation = 0;
   int num_changed = 0;
   map<int,set<pg_t>> pgs_by_osd;
   int total_pgs = 0;
@@ -4336,15 +4374,16 @@ int OSDMap::calc_pg_upmaps(
   map<int,float> osd_weight;
   for (auto& i : pools) {
     if (!only_pools.empty() && !only_pools.count(i.first))
-	continue;
+      continue;
     for (unsigned ps = 0; ps < i.second.get_pg_num(); ++ps) {
-	pg_t pg(ps, i.first);
-	vector<int> up;
-	tmp.pg_to_up_acting_osds(pg, &up, nullptr, nullptr, nullptr);
-	for (auto osd : up) {
-	  if (osd != CRUSH_ITEM_NONE)
-	    pgs_by_osd[osd].insert(pg);
-	}
+      pg_t pg(ps, i.first);
+      vector<int> up;
+      tmp.pg_to_up_acting_osds(pg, &up, nullptr, nullptr, nullptr);
+      ldout(cct, 20) << __func__ << " " << pg << " up " << up << dendl;
+      for (auto osd : up) {
+        if (osd != CRUSH_ITEM_NONE)
+	  pgs_by_osd[osd].insert(pg);
+      }
     }
     total_pgs += i.second.get_size() * i.second.get_pg_num();
 
@@ -4353,7 +4392,10 @@ int OSDMap::calc_pg_upmaps(
 				      i.second.get_type(),
 				      i.second.get_size());
     tmp.crush->get_rule_weight_osd_map(ruleno, &pmap);
-    ldout(cct,30) << __func__ << " pool " << i.first << " ruleno " << ruleno << dendl;
+    ldout(cct,20) << __func__ << " pool " << i.first
+                  << " ruleno " << ruleno
+                  << " weight-map " << pmap
+                  << dendl;
     for (auto p : pmap) {
       auto adjusted_weight = tmp.get_weightf(p.first) * p.second;
       if (adjusted_weight == 0) {
@@ -4381,143 +4423,414 @@ int OSDMap::calc_pg_upmaps(
   ldout(cct, 10) << " osd_weight_total " << osd_weight_total << dendl;
   ldout(cct, 10) << " pgs_per_weight " << pgs_per_weight << dendl;
 
-  while (true) {
-    // osd deviation
-    float total_deviation = 0;
-    map<int,float> osd_deviation;       // osd, deviation(pgs)
-    multimap<float,int> deviation_osd;  // deviation(pgs), osd
+  if (max <= 0) {
+    lderr(cct) << __func__ << " abort due to max <= 0" << dendl;
+    return 0;
+  }
+  float decay_factor = 1.0 / float(max);
+  float stddev = 0;
+  map<int,float> osd_deviation;       // osd, deviation(pgs)
+  multimap<float,int> deviation_osd;  // deviation(pgs), osd
+  for (auto& i : pgs_by_osd) {
+    // make sure osd is still there (belongs to this crush-tree)
+    ceph_assert(osd_weight.count(i.first));
+    float target = osd_weight[i.first] * pgs_per_weight;
+    float deviation = (float)i.second.size() - target;
+    ldout(cct, 20) << " osd." << i.first
+                   << "\tpgs " << i.second.size()
+                   << "\ttarget " << target
+                   << "\tdeviation " << deviation
+                   << dendl;
+    osd_deviation[i.first] = deviation;
+    deviation_osd.insert(make_pair(deviation, i.first));
+    stddev += deviation * deviation;
+  }
+  if (stddev <= cct->_conf.get_val<double>("osd_calc_pg_upmaps_max_stddev")) {
+    ldout(cct, 10) << __func__ << " distribution is almost perfect"
+                   << dendl;
+    return 0;
+  }
+  bool skip_overfull = false;
+  auto aggressive =
+    cct->_conf.get_val<bool>("osd_calc_pg_upmaps_aggressively");
+  auto local_fallback_retries =
+    cct->_conf.get_val<uint64_t>("osd_calc_pg_upmaps_local_fallback_retries");
+  while (max--) {
+    // build overfull and underfull
     set<int> overfull;
-    for (auto& i : pgs_by_osd) {
+    vector<int> underfull;
+    float decay = 0;
+    int decay_count = 0;
+    while (overfull.empty()) {
+      for (auto i = deviation_osd.rbegin(); i != deviation_osd.rend(); i++) {
+        if (i->first >= (1.0 - decay))
+          overfull.insert(i->second);
+      }
+      if (!overfull.empty())
+        break;
+      decay_count++;
+      decay = decay_factor * decay_count;
+      if (decay >= 1.0)
+        break;
+      ldout(cct, 30) << " decay_factor = " << decay_factor
+                     << " decay_count = " << decay_count
+                     << " decay (overfull) = " << decay
+                     << dendl;
+    }
+    if (overfull.empty()) {
+      lderr(cct) << __func__ << " failed to build overfull" << dendl;
+      break;
+    }
+
+    decay = 0;
+    decay_count = 0;
+    while (underfull.empty()) {
+      for (auto i = deviation_osd.begin(); i != deviation_osd.end(); i++) {
+        if (i->first >= (-.999 + decay))
+          break;
+        underfull.push_back(i->second);
+      }
+      if (!underfull.empty())
+        break;
+      decay_count++;
+      decay = decay_factor * decay_count;
+      if (decay >= .999)
+        break;
+      ldout(cct, 30) << " decay_factor = " << decay_factor
+                     << " decay_count = " << decay_count
+                     << " decay (underfull) = " << decay
+                     << dendl;
+    }
+    if (underfull.empty()) {
+      lderr(cct) << __func__ << " failed to build underfull" << dendl;
+      break;
+    }
+
+    ldout(cct, 10) << " overfull " << overfull
+                   << " underfull " << underfull
+                   << dendl;
+    set<pg_t> to_skip;
+    uint64_t local_fallback_retried = 0;
+
+  retry:
+
+    set<pg_t> to_unmap;
+    map<pg_t, mempool::osdmap::vector<pair<int32_t,int32_t>>> to_upmap;
+    auto temp_pgs_by_osd = pgs_by_osd;
+    // always start with fullest, break if we find any changes to make
+    for (auto p = deviation_osd.rbegin(); p != deviation_osd.rend(); ++p) {
+      if (skip_overfull) {
+        ldout(cct, 10) << " skipping overfull " << dendl;
+        break; // fall through to check underfull
+      }
+      int osd = p->second;
+      float deviation = p->first;
+      float target = osd_weight[osd] * pgs_per_weight;
+      ceph_assert(target > 0);
+      float deviation_ratio = deviation / target;
+      if (deviation_ratio < max_deviation_ratio) {
+	ldout(cct, 10) << " osd." << osd
+                       << " target " << target
+                       << " deviation " << deviation
+                       << " -> ratio " << deviation_ratio
+                       << " < max ratio " << max_deviation_ratio
+                       << dendl;
+	break;
+      }
+
+      vector<pg_t> pgs;
+      pgs.reserve(pgs_by_osd[osd].size());
+      for (auto& pg : pgs_by_osd[osd]) {
+        if (to_skip.count(pg))
+          continue;
+        pgs.push_back(pg);
+      }
+      if (aggressive) {
+        // shuffle PG list so they all get equal (in)attention
+        std::random_device rd;
+        std::default_random_engine rng{rd()};
+        std::shuffle(pgs.begin(), pgs.end(), rng);
+      }
+      // look for remaps we can un-remap
+      for (auto pg : pgs) {
+	auto p = tmp.pg_upmap_items.find(pg);
+        if (p == tmp.pg_upmap_items.end())
+          continue;
+        mempool::osdmap::vector<pair<int32_t,int32_t>> new_upmap_items;
+        for (auto q : p->second) {
+	  if (q.second == osd) {
+            ldout(cct, 10) << " will try dropping existing"
+                           << " remapping pair "
+                           << q.first << " -> " << q.second
+                           << " which remapped " << pg
+                           << " into overfull osd." << osd
+                           << dendl;
+            temp_pgs_by_osd[q.second].erase(pg);
+            temp_pgs_by_osd[q.first].insert(pg);
+          } else {
+            new_upmap_items.push_back(q);
+          }
+        }
+        if (new_upmap_items.empty()) {
+          // drop whole item
+          ldout(cct, 10) << " existing pg_upmap_items " << p->second
+                         << " remapped " << pg << " into overfull osd." << osd
+                         << ", will try cancelling it entirely"
+                         << dendl;
+          to_unmap.insert(pg);
+          goto test_change;
+        } else if (new_upmap_items.size() != p->second.size()) {
+          // drop single remapping pair, updating
+          ceph_assert(new_upmap_items.size() < p->second.size());
+          ldout(cct, 10) << " existing pg_upmap_items " << p->second
+                         << " remapped " << pg << " into overfull osd." << osd
+                         << ", new_pg_upmap_items now " << new_upmap_items
+                         << dendl;
+          to_upmap[pg] = new_upmap_items;
+          goto test_change;
+        }
+      }
+
+      // try upmap
+      for (auto pg : pgs) {
+        auto temp_it = tmp.pg_upmap.find(pg);
+        if (temp_it != tmp.pg_upmap.end()) {
+          // leave pg_upmap alone
+          // it must be specified by admin since balancer does not
+          // support pg_upmap yet
+	  ldout(cct, 10) << " " << pg << " already has pg_upmap "
+                         << temp_it->second << ", skipping"
+                         << dendl;
+	  continue;
+	}
+        auto pg_pool_size = tmp.get_pg_pool_size(pg);
+        mempool::osdmap::vector<pair<int32_t,int32_t>> new_upmap_items;
+        set<int> existing;
+        auto it = tmp.pg_upmap_items.find(pg);
+        if (it != tmp.pg_upmap_items.end() &&
+            it->second.size() >= (size_t)pg_pool_size) {
+          ldout(cct, 10) << " " << pg << " already has full-size pg_upmap_items "
+                         << it->second << ", skipping"
+                         << dendl;
+          continue;
+        } else if (it != tmp.pg_upmap_items.end()) {
+          ldout(cct, 10) << " " << pg << " already has pg_upmap_items "
+                         << it->second
+                         << dendl;
+          new_upmap_items = it->second;
+          // build existing too (for dedup)
+          for (auto i : it->second) {
+            existing.insert(i.first);
+            existing.insert(i.second);
+          }
+          // fall through
+          // to see if we can append more remapping pairs
+        }
+	ldout(cct, 10) << " trying " << pg << dendl;
+	vector<int> orig, out;
+        tmp.pg_to_raw_upmap(pg, &orig); // including existing upmaps too
+	if (!try_pg_upmap(cct, pg, overfull, underfull, &orig, &out)) {
+	  continue;
+	}
+	ldout(cct, 10) << " " << pg << " " << orig << " -> " << out << dendl;
+	if (orig.size() != out.size()) {
+	  continue;
+	}
+	ceph_assert(orig != out);
+	for (unsigned i = 0; i < out.size(); ++i) {
+          if (orig[i] == out[i])
+            continue; // skip invalid remappings
+          if (existing.count(orig[i]) || existing.count(out[i]))
+            continue; // we want new remappings only!
+          ldout(cct, 10) << " will try adding new remapping pair "
+                         << orig[i] << " -> " << out[i] << " for " << pg
+                         << dendl;
+          existing.insert(orig[i]);
+          existing.insert(out[i]);
+          temp_pgs_by_osd[orig[i]].erase(pg);
+          temp_pgs_by_osd[out[i]].insert(pg);
+          ceph_assert(new_upmap_items.size() < (size_t)pg_pool_size);
+          new_upmap_items.push_back(make_pair(orig[i], out[i]));
+          // append new remapping pairs slowly
+          // This way we can make sure that each tiny change will
+          // definitely make distribution of PGs converging to
+          // the perfect status.
+          to_upmap[pg] = new_upmap_items;
+          goto test_change;
+	}
+      }
+    }
+
+    ceph_assert(!(to_unmap.size() || to_upmap.size()));
+    ldout(cct, 10) << " failed to find any changes for overfull osds"
+                   << dendl;
+    for (auto& p : deviation_osd) {
+      if (std::find(underfull.begin(), underfull.end(), p.second) ==
+                    underfull.end())
+        break;
+      int osd = p.second;
+      float deviation = p.first;
+      float target = osd_weight[osd] * pgs_per_weight;
+      ceph_assert(target > 0);
+      float deviation_ratio = abs(deviation / target);
+      if (deviation_ratio < max_deviation_ratio) {
+        // respect max_deviation_ratio too
+        ldout(cct, 10) << " osd." << osd
+                       << " target " << target
+                       << " deviation " << deviation
+                       << " -> absolute ratio " << deviation_ratio
+                       << " < max ratio " << max_deviation_ratio
+                       << dendl;
+        break;
+      }
+      // look for remaps we can un-remap
+      vector<pair<pg_t,
+        mempool::osdmap::vector<pair<int32_t,int32_t>>>> candidates;
+      candidates.reserve(tmp.pg_upmap_items.size());
+      for (auto& i : tmp.pg_upmap_items) {
+        if (to_skip.count(i.first))
+          continue;
+        if (!only_pools.empty() && !only_pools.count(i.first.pool()))
+          continue;
+        candidates.push_back(make_pair(i.first, i.second));
+      }
+      if (aggressive) {
+        // shuffle candidates so they all get equal (in)attention
+        std::random_device rd;
+        std::default_random_engine rng{rd()};
+        std::shuffle(candidates.begin(), candidates.end(), rng);
+      }
+      for (auto& i : candidates) {
+        auto pg = i.first;
+        mempool::osdmap::vector<pair<int32_t,int32_t>> new_upmap_items;
+        for (auto& j : i.second) {
+          if (j.first == osd) {
+            ldout(cct, 10) << " will try dropping existing"
+                           << " remapping pair "
+                           << j.first << " -> " << j.second
+                           << " which remapped " << pg
+                           << " out from underfull osd." << osd
+                           << dendl;
+            temp_pgs_by_osd[j.second].erase(pg);
+            temp_pgs_by_osd[j.first].insert(pg);
+          } else {
+            new_upmap_items.push_back(j);
+          }
+        }
+        if (new_upmap_items.empty()) {
+          // drop whole item
+          ldout(cct, 10) << " existing pg_upmap_items " << i.second
+                         << " remapped " << pg
+                         << " out from underfull osd." << osd
+                         << ", will try cancelling it entirely"
+                         << dendl;
+          to_unmap.insert(pg);
+          goto test_change;
+        } else if (new_upmap_items.size() != i.second.size()) {
+          // drop single remapping pair, updating
+          ceph_assert(new_upmap_items.size() < i.second.size());
+          ldout(cct, 10) << " existing pg_upmap_items " << i.second
+                         << " remapped " << pg
+                         << " out from underfull osd." << osd
+                         << ", new_pg_upmap_items now " << new_upmap_items
+                         << dendl;
+          to_upmap[pg] = new_upmap_items;
+          goto test_change;
+        }
+      }
+    }
+
+    ceph_assert(!(to_unmap.size() || to_upmap.size()));
+    ldout(cct, 10) << " failed to find any changes for underfull osds"
+                   << dendl;
+    if (!aggressive) {
+      ldout(cct, 10) << " break due to aggressive mode not enabled" << dendl;
+      break;
+    } else if (!skip_overfull) {
+      // safe to quit because below here we know
+      // we've done checking both overfull and underfull osds..
+      ldout(cct, 10) << " break due to not being able to find any"
+                     << " further optimizations"
+                     << dendl;
+      break;
+    }
+    // restart with fullest and do exhaustive searching
+    skip_overfull = false;
+    continue;
+
+  test_change:
+
+    // test change, apply if change is good
+    ceph_assert(to_unmap.size() || to_upmap.size());
+    float new_stddev = 0;
+    map<int,float> temp_osd_deviation;
+    multimap<float,int> temp_deviation_osd;
+    for (auto& i : temp_pgs_by_osd) {
       // make sure osd is still there (belongs to this crush-tree)
       ceph_assert(osd_weight.count(i.first));
       float target = osd_weight[i.first] * pgs_per_weight;
       float deviation = (float)i.second.size() - target;
       ldout(cct, 20) << " osd." << i.first
-		     << "\tpgs " << i.second.size()
-		     << "\ttarget " << target
-		     << "\tdeviation " << deviation
-		     << dendl;
-      osd_deviation[i.first] = deviation;
-      deviation_osd.insert(make_pair(deviation, i.first));
-      if (deviation >= 1.0)
-	overfull.insert(i.first);
-      total_deviation += abs(deviation);
+                     << "\tpgs " << i.second.size()
+                     << "\ttarget " << target
+                     << "\tdeviation " << deviation
+                     << dendl;
+      temp_osd_deviation[i.first] = deviation;
+      temp_deviation_osd.insert(make_pair(deviation, i.first));
+      new_stddev += deviation * deviation;
     }
-    if (num_changed == 0) {
-      start_deviation = total_deviation;
-    }
-    end_deviation = total_deviation;
-
-    // build underfull, sorted from least-full to most-average
-    vector<int> underfull;
-    for (auto i = deviation_osd.begin();
-	 i != deviation_osd.end();
-	 ++i) {
-      if (i->first >= -.999)
-	break;
-      underfull.push_back(i->second);
-    }
-    ldout(cct, 10) << " total_deviation " << total_deviation
-		   << " overfull " << overfull
-		   << " underfull " << underfull << dendl;
-    if (overfull.empty() || underfull.empty())
-      break;
-
-    // pick fullest
-    bool restart = false;
-    for (auto p = deviation_osd.rbegin(); p != deviation_osd.rend(); ++p) {
-      int osd = p->second;
-      float deviation = p->first;
-      float target = osd_weight[osd] * pgs_per_weight;
-      ceph_assert(target > 0);
-      if (deviation/target < max_deviation_ratio) {
-	ldout(cct, 10) << " osd." << osd
-		       << " target " << target
-		       << " deviation " << deviation
-		       << " -> ratio " << deviation/target
-		       << " < max ratio " << max_deviation_ratio << dendl;
-	break;
+    ldout(cct, 10) << " stddev " << stddev << " -> " << new_stddev << dendl;
+    if (new_stddev >= stddev) {
+      if (!aggressive) {
+        ldout(cct, 10) << " break because stddev is not decreasing"
+                       << " and aggressive mode is not enabled"
+                       << dendl;
+        break;
       }
-      int num_to_move = deviation;
-      ldout(cct, 10) << " osd." << osd << " move " << num_to_move << dendl;
-      if (num_to_move < 1)
-	break;
-
-      set<pg_t>& pgs = pgs_by_osd[osd];
-
-      // look for remaps we can un-remap
-      for (auto pg : pgs) {
-	auto p = tmp.pg_upmap_items.find(pg);
-	if (p != tmp.pg_upmap_items.end()) {
-	  for (auto q : p->second) {
-	    if (q.second == osd) {
-	      ldout(cct, 10) << "  dropping pg_upmap_items " << pg
-			     << " " << p->second << dendl;
-              for (auto i : p->second) {
-                pgs_by_osd[i.second].erase(pg);
-                pgs_by_osd[i.first].insert(pg);
-              }
-	      tmp.pg_upmap_items.erase(p);
-	      pending_inc->old_pg_upmap_items.insert(pg);
-	      ++num_changed;
-	      restart = true;
-              break;
-	    }
-	  }
-	}
-	if (restart)
-	  break;
-      } // pg loop
-      if (restart)
-	break;
-
-      for (auto pg : pgs) {
-	if (tmp.pg_upmap.count(pg) ||
-	    tmp.pg_upmap_items.count(pg)) {
-	  ldout(cct, 20) << "  already remapped " << pg << dendl;
-	  continue;
-	}
-	ldout(cct, 10) << "  trying " << pg << dendl;
-	vector<int> orig, out;
-	if (!try_pg_upmap(cct, pg, overfull, underfull, &orig, &out)) {
-	  continue;
-	}
-	ldout(cct, 10) << "  " << pg << " " << orig << " -> " << out << dendl;
-	if (orig.size() != out.size()) {
-	  continue;
-	}
-	ceph_assert(orig != out);
-	auto& rmi = tmp.pg_upmap_items[pg];
-	for (unsigned i = 0; i < out.size(); ++i) {
-	  if (orig[i] != out[i]) {
-	    rmi.push_back(make_pair(orig[i], out[i]));
-	  }
-	}
-        for (auto i : rmi) {
-          pgs_by_osd[i.first].erase(pg);
-          pgs_by_osd[i.second].insert(pg);
-        }
-	pending_inc->new_pg_upmap_items[pg] = rmi;
-	ldout(cct, 10) << "  " << pg << " pg_upmap_items " << rmi << dendl;
-	restart = true;
-	++num_changed;
-	break;
-      } // pg loop
-      if (restart)
-	break;
-    } // osd loop
-
-    if (!restart) {
-      ldout(cct, 10) << " failed to find any changes to make" << dendl;
-      break;
+      local_fallback_retried++;
+      if (local_fallback_retried >= local_fallback_retries) {
+        // does not make progress
+        // flip *skip_overfull* so both overfull and underfull
+        // get equal (in)attention
+        skip_overfull = !skip_overfull;
+        ldout(cct, 10) << " hit local_fallback_retries "
+                       << local_fallback_retries
+                       << dendl;
+        continue;
+      }
+      for (auto& i : to_unmap)
+        to_skip.insert(i);
+      for (auto& i : to_upmap)
+        to_skip.insert(i.first);
+      ldout(cct, 20) << " local_fallback_retried " << local_fallback_retried
+                     << " to_skip " << to_skip
+                     << dendl;
+      goto retry;
     }
-    if (--max == 0) {
-      ldout(cct, 10) << " hit max iterations, stopping" << dendl;
-      break;
+
+    // ready to go
+    ceph_assert(new_stddev < stddev);
+    stddev = new_stddev;
+    pgs_by_osd = temp_pgs_by_osd;
+    osd_deviation = temp_osd_deviation;
+    deviation_osd = temp_deviation_osd;
+    for (auto& i : to_unmap) {
+      ldout(cct, 10) << " unmap pg " << i << dendl;
+      ceph_assert(tmp.pg_upmap_items.count(i));
+      tmp.pg_upmap_items.erase(i);
+      pending_inc->old_pg_upmap_items.insert(i);
+      ++num_changed;
+    }
+    for (auto& i : to_upmap) {
+      ldout(cct, 10) << " upmap pg " << i.first
+                     << " new pg_upmap_items " << i.second
+                     << dendl;
+      tmp.pg_upmap_items[i.first] = i.second;
+      pending_inc->new_pg_upmap_items[i.first] = i.second;
+      ++num_changed;
     }
   }
-  ldout(cct, 10) << " start deviation " << start_deviation << dendl;
-  ldout(cct, 10) << " end deviation " << end_deviation << dendl;
+  ldout(cct, 10) << " num_changed = " << num_changed << dendl;
   return num_changed;
 }
 
@@ -4557,19 +4870,51 @@ public:
   typedef CrushTreeDumper::Dumper<F> Parent;
 
   OSDUtilizationDumper(const CrushWrapper *crush, const OSDMap *osdmap_,
-		       const PGMap& pgmap_, bool tree_) :
+                       const PGMap& pgmap_, bool tree_,
+                       const string& class_name_,
+                       const string& item_name_) :
     Parent(crush, osdmap_->get_pool_names()),
     osdmap(osdmap_),
     pgmap(pgmap_),
     tree(tree_),
-    average_util(average_utilization()),
+    class_name(class_name_),
+    item_name(item_name_),
     min_var(-1),
     max_var(-1),
     stddev(0),
     sum(0) {
+    if (osdmap->crush->name_exists(item_name)) {
+      // filter out items we are allowed to dump
+      auto item_id = osdmap->crush->get_item_id(item_name);
+      allowed.insert(item_id);
+      osdmap->crush->get_all_children(item_id, &allowed);
+    }
+    average_util = average_utilization();
   }
 
 protected:
+
+  bool should_dump(int id) const {
+    if (!allowed.empty() && !allowed.count(id)) // filter by name
+      return false;
+    if (id >= 0 && !class_name.empty()) {
+      const char* item_class_name = osdmap->crush->get_item_class(id);
+      if (!item_class_name || // not bound to a class yet
+           item_class_name != class_name) // or already bound to
+                                          // a different class
+        return false;
+    }
+    return true;
+  }
+
+  set<int> get_dumped_osds() {
+    if (class_name.empty() && item_name.empty()) {
+      // old way, all
+      return {};
+    }
+    return dumped_osds;
+  }
+
   void dump_stray(F *f) {
     for (int i = 0; i < osdmap->get_max_osd(); i++) {
       if (osdmap->exists(i) && !this->is_touched(i))
@@ -4580,7 +4925,11 @@ protected:
   void dump_item(const CrushTreeDumper::Item &qi, F *f) override {
     if (!tree && qi.is_bucket())
       return;
+    if (!should_dump(qi.id))
+      return;
 
+    if (!qi.is_bucket())
+      dumped_osds.insert(qi.id);
     float reweight = qi.is_bucket() ? -1 : osdmap->get_weightf(qi.id);
     int64_t kb = 0, kb_used = 0, kb_used_data = 0, kb_used_omap = 0,
       kb_used_meta = 0, kb_avail = 0;
@@ -4633,7 +4982,9 @@ protected:
   double average_utilization() {
     int64_t kb = 0, kb_used = 0;
     for (int i = 0; i < osdmap->get_max_osd(); i++) {
-      if (!osdmap->exists(i) || osdmap->get_weight(i) == 0)
+      if (!osdmap->exists(i) ||
+           osdmap->get_weight(i) == 0 ||
+          !should_dump(i))
 	continue;
       int64_t kb_i, kb_used_i, kb_used_data_i, kb_used_omap_i, kb_used_meta_i,
 	kb_avail_i;
@@ -4669,7 +5020,7 @@ protected:
 			      int64_t* kb_used_meta,
 			      int64_t* kb_avail) const {
     if (id >= 0) {
-      if (osdmap->is_out(id)) {
+      if (osdmap->is_out(id) || !should_dump(id)) {
         *kb = 0;
         *kb_used = 0;
 	*kb_used_data = 0;
@@ -4711,11 +5062,15 @@ protected:
   const OSDMap *osdmap;
   const PGMap& pgmap;
   bool tree;
+  const string class_name;
+  const string item_name;
   double average_util;
   double min_var;
   double max_var;
   double stddev;
   double sum;
+  set<int> allowed;
+  set<int> dumped_osds;
 };
 
 
@@ -4724,8 +5079,10 @@ public:
   typedef OSDUtilizationDumper<TextTable> Parent;
 
   OSDUtilizationPlainDumper(const CrushWrapper *crush, const OSDMap *osdmap,
-			    const PGMap& pgmap, bool tree) :
-    Parent(crush, osdmap, pgmap, tree) {}
+                            const PGMap& pgmap, bool tree,
+                            const string& class_name,
+                            const string& item_name) :
+    Parent(crush, osdmap, pgmap, tree, class_name, item_name) {}
 
   void dump(TextTable *tbl) {
     tbl->define_column("ID", TextTable::LEFT, TextTable::RIGHT);
@@ -4749,15 +5106,16 @@ public:
 
     dump_stray(tbl);
 
+    auto sum = pgmap.get_osd_sum(get_dumped_osds());
     *tbl << ""
 	 << ""
 	 << "" << "TOTAL"
-	 << byte_u_t(pgmap.get_osd_sum().statfs.total)
-	 << byte_u_t(pgmap.get_osd_sum().statfs.get_used_raw())
-	 << byte_u_t(pgmap.get_osd_sum().statfs.allocated)
-	 << byte_u_t(pgmap.get_osd_sum().statfs.omap_allocated)
-	 << byte_u_t(pgmap.get_osd_sum().statfs.internal_metadata)
-	 << byte_u_t(pgmap.get_osd_sum().statfs.available)
+	 << byte_u_t(sum.statfs.total)
+	 << byte_u_t(sum.statfs.get_used_raw())
+	 << byte_u_t(sum.statfs.allocated)
+	 << byte_u_t(sum.statfs.omap_allocated)
+	 << byte_u_t(sum.statfs.internal_metadata)
+	 << byte_u_t(sum.statfs.available)
 	 << lowprecision_t(average_util)
 	 << ""
 	 << TextTable::endrow;
@@ -4858,8 +5216,10 @@ public:
   typedef OSDUtilizationDumper<Formatter> Parent;
 
   OSDUtilizationFormatDumper(const CrushWrapper *crush, const OSDMap *osdmap,
-			     const PGMap& pgmap, bool tree) :
-    Parent(crush, osdmap, pgmap, tree) {}
+                             const PGMap& pgmap, bool tree,
+                             const string& class_name,
+                             const string& item_name) :
+    Parent(crush, osdmap, pgmap, tree, class_name, item_name) {}
 
   void dump(Formatter *f) {
     f->open_array_section("nodes");
@@ -4913,7 +5273,8 @@ protected:
 public:
   void summary(Formatter *f) {
     f->open_object_section("summary");
-    auto& s = pgmap.get_osd_sum().statfs;
+    auto sum = pgmap.get_osd_sum(get_dumped_osds());
+    auto& s = sum.statfs;
 
     f->dump_int("total_kb", s.kb());
     f->dump_int("total_kb_used", s.kb_used_raw());
@@ -4930,21 +5291,25 @@ public:
 };
 
 void print_osd_utilization(const OSDMap& osdmap,
-			   const PGMap& pgmap,
-			   ostream& out,
-			   Formatter *f,
-			   bool tree)
+                           const PGMap& pgmap,
+                           ostream& out,
+                           Formatter *f,
+                           bool tree,
+                           const string& class_name,
+                           const string& item_name)
 {
   const CrushWrapper *crush = osdmap.crush.get();
   if (f) {
     f->open_object_section("df");
-    OSDUtilizationFormatDumper d(crush, &osdmap, pgmap, tree);
+    OSDUtilizationFormatDumper d(crush, &osdmap, pgmap, tree,
+                                 class_name, item_name);
     d.dump(f);
     d.summary(f);
     f->close_section();
     f->flush(out);
   } else {
-    OSDUtilizationPlainDumper d(crush, &osdmap, pgmap, tree);
+    OSDUtilizationPlainDumper d(crush, &osdmap, pgmap, tree,
+                                class_name, item_name);
     TextTable tbl;
     d.dump(&tbl);
     out << tbl << d.summary() << "\n";
@@ -5254,9 +5619,7 @@ void OSDMap::check_health(health_check_map_t *checks) const
   // CACHE_POOL_NO_HIT_SET
   if (g_conf()->mon_warn_on_cache_pools_without_hit_sets) {
     list<string> detail;
-    for (map<int64_t, pg_pool_t>::const_iterator p = pools.begin();
-	 p != pools.end();
-	 ++p) {
+    for (auto p = pools.cbegin(); p != pools.cend(); ++p) {
       const pg_pool_t& info = p->second;
       if (info.cache_mode_requires_hit_set() &&
 	  info.hit_set_params.get_type() == HitSet::TYPE_NONE) {

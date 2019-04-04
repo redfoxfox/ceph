@@ -2,12 +2,14 @@ include(GetGitRevisionDescription)
 
 include(GNUInstallDirs)
 # for erasure and compressor plugins
-set(CMAKE_INSTALL_PKGLIBDIR ${CMAKE_INSTALL_LIBDIR}/${PROJECT_NAME})
-set(CMAKE_INSTALL_FULL_PKGLIBDIR ${CMAKE_INSTALL_FULL_LIBDIR}/${PROJECT_NAME})
+set(CEPH_INSTALL_PKGLIBDIR ${CMAKE_INSTALL_LIBDIR}/${PROJECT_NAME})
+set(CEPH_INSTALL_FULL_PKGLIBDIR ${CMAKE_INSTALL_FULL_LIBDIR}/${PROJECT_NAME})
+# for mgr plugins
+set(CEPH_INSTALL_DATADIR ${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME})
 # so libceph-common can be found
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 if(NOT CMAKE_INSTALL_RPATH)
-  set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_FULL_PKGLIBDIR}")
+  set(CMAKE_INSTALL_RPATH "${CEPH_INSTALL_FULL_PKGLIBDIR}")
 endif()
 
 # to be compatible with configure_files shared with autoconfig
@@ -17,7 +19,7 @@ set(libdir ${CMAKE_INSTALL_FULL_LIBDIR})
 set(sysconfdir ${CMAKE_INSTALL_FULL_SYSCONFDIR})
 set(libexecdir ${CMAKE_INSTALL_FULL_LIBEXECDIR})
 set(pkgdatadir ${CMAKE_INSTALL_FULL_DATADIR})
-set(datadir ${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME})
+set(datadir ${CEPH_INSTALL_DATADIR})
 set(prefix ${CMAKE_INSTALL_PREFIX})
 
 add_definitions("-DHAVE_CONFIG_H -D__CEPH__ -D_REENTRANT -D_THREAD_SAFE -D__STDC_FORMAT_MACROS")
@@ -235,11 +237,6 @@ else()
   set(PY_BINDING_INFIX 3)
 endif()
 
-if(HAVE_XIO)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${XIO_INCLUDE_DIR}")
-  list(APPEND EXTRALIBS ${XIO_LIBRARY} pthread)
-endif(HAVE_XIO)
-
 # sort out which allocator to use
 if(ALLOCATOR STREQUAL "tcmalloc")
   set(ALLOC_LIBS gperftools::tcmalloc)
@@ -280,7 +277,7 @@ if(WITH_SEASTAR)
   find_package(fmt 5.2.1 QUIET)
   if(NOT fmt_FOUND)
     message(STATUS "Could not find fmt, will build it")
-    add_subdirectory(seastar/fmt)
+    add_subdirectory(fmt)
   endif()
   find_package(c-ares 1.13.0 QUIET)
   if(NOT c-ares_FOUND)
@@ -295,6 +292,7 @@ if(WITH_SEASTAR)
   endmacro ()
   set(Seastar_HWLOC OFF CACHE BOOL "" FORCE)
   set(Seastar_STD_OPTIONAL_VARIANT_STRINGVIEW ON CACHE BOOL "" FORCE)
+  set(Seastar_CXX_FLAGS "-Wno-error;-Wno-sign-compare;-Wno-attributes;-Wno-pessimizing-move;-Wno-address-of-packed-member" CACHE STRING "" FORCE)
   add_subdirectory(seastar)
   # create the directory so cmake won't complain when looking at the imported
   # target: Seastar exports this directory created at build-time
@@ -312,6 +310,7 @@ set(libcommon_files
   mon/MonMap.cc
   mon/MonSub.cc
   mgr/MgrClient.cc
+  mon/PGMap.cc
   mgr/ServiceMap.cc
   osd/ECMsgTypes.cc
   osd/HitSet.cc
@@ -393,7 +392,7 @@ add_library(ceph-common SHARED ${ceph_common_objs})
 target_link_libraries(ceph-common ${ceph_common_deps})
 # appease dpkg-shlibdeps
 set_target_properties(ceph-common PROPERTIES
-  SOVERSION 1
+  SOVERSION 0
   INSTALL_RPATH "")
 if(NOT APPLE AND NOT FREEBSD)
   # Apple uses Mach-O, not ELF. so this option does not apply to APPLE.
@@ -412,7 +411,7 @@ endif()
 install(
   TARGETS ceph-common
   LIBRARY
-  DESTINATION ${CMAKE_INSTALL_PKGLIBDIR}
+  DESTINATION ${CEPH_INSTALL_PKGLIBDIR}
   NAMELINK_SKIP)
 
 if(${WITH_LTTNG})
@@ -458,7 +457,7 @@ install(TARGETS librados-config DESTINATION bin)
 # virtualenv base directory for ceph-disk and ceph-detect-init
 set(CEPH_BUILD_VIRTUALENV $ENV{TMPDIR})
 if(NOT CEPH_BUILD_VIRTUALENV)
-  set(CEPH_BUILD_VIRTUALENV /tmp)
+  set(CEPH_BUILD_VIRTUALENV ${CMAKE_BINARY_DIR})
 endif()
 
 add_subdirectory(pybind)

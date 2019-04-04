@@ -22,6 +22,10 @@ if(WITH_RADOSGW)
   list(APPEND DENCODER_EXTRALIBS
     rgw_a
     cls_rgw_client)
+  if(WITH_RADOSGW_AMQP_ENDPOINT)
+    list(APPEND DENCODER_EXTRALIBS
+      rabbitmq)
+  endif()
 endif()
 
 if(WITH_RBD)

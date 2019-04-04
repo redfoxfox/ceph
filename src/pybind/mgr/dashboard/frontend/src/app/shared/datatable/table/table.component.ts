@@ -1,5 +1,6 @@
 import {
   AfterContentChecked,
+  ChangeDetectorRef,
   Component,
   EventEmitter,
   Input,
@@ -47,6 +48,8 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
   perSecondTpl: TemplateRef<any>;
   @ViewChild('executingTpl')
   executingTpl: TemplateRef<any>;
+  @ViewChild('classAddingTpl')
+  classAddingTpl: TemplateRef<any>;
 
   // This is the array with the items to be shown.
   @Input()
@@ -99,6 +102,10 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
 
   @Input()
   autoSave = true;
+
+  // Only needed to set if the classAddingTpl is used
+  @Input()
+  customCss?: { [css: string]: number | string | ((any) => boolean) };
 
   /**
    * Should be a function to update the input data if undefined nothing will be triggered
@@ -153,7 +160,7 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
   // table columns after the browser window has been resized.
   private currentWidth: number;
 
-  constructor(private ngZone: NgZone) {}
+  constructor(private ngZone: NgZone, private cdRef: ChangeDetectorRef) {}
 
   ngOnInit() {
     this._addTemplates();
@@ -193,7 +200,7 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
     }
     if (_.isInteger(this.autoReload) && this.autoReload > 0) {
       this.ngZone.runOutsideAngular(() => {
-        this.reloadSubscriber = observableTimer(0, this.autoReload).subscribe((x) => {
+        this.reloadSubscriber = observableTimer(0, this.autoReload).subscribe(() => {
           this.ngZone.run(() => {
             return this.reloadData();
           });
@@ -311,9 +318,22 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
     this.cellTemplates.routerLink = this.routerLinkTpl;
     this.cellTemplates.perSecond = this.perSecondTpl;
     this.cellTemplates.executing = this.executingTpl;
+    this.cellTemplates.classAdding = this.classAddingTpl;
   }
 
-  ngOnChanges(changes) {
+  useCustomClass(value: any): string {
+    if (!this.customCss) {
+      throw new Error('Custom classes are not set!');
+    }
+    const classes = Object.keys(this.customCss);
+    const css = Object.values(this.customCss)
+      .map((v, i) => ((_.isFunction(v) && v(value)) || v === value) && classes[i])
+      .filter((x) => x)
+      .join(' ');
+    return _.isEmpty(css) ? undefined : css;
+  }
+
+  ngOnChanges() {
     this.useData();
   }
 
@@ -364,7 +384,7 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
     }
     this.rows = [...this.data];
     if (this.search.length > 0) {
-      this.updateFilter(true);
+      this.updateFilter();
     }
     this.reset();
     this.updateSelected();
@@ -432,6 +452,7 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
       this.table.onColumnSort({ sorts: this.userConfig.sorts });
     }
     this.table.recalculate();
+    this.cdRef.detectChanges();
   }
 
   createSortingDefinition(prop: TableColumnProp): SortPropDir[] {
@@ -447,10 +468,11 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
     this.userConfig.sorts = sorts;
   }
 
-  updateFilter(event?: any) {
-    if (!event) {
+  updateFilter(clearSearch = false) {
+    if (clearSearch) {
       this.search = '';
     }
+    // prepare search strings
     let search = this.search.toLowerCase().replace(/,/g, '');
     const columns = this.columns.filter((c) => c.cellTransformation !== CellTemplate.sparkline);
     if (search.match(/['"][^'"]+['"]/)) {
@@ -488,20 +510,22 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
     return this.subSearch(data, currentSearch, columnsClone);
   }
 
-  basicDataSearch(searchTerm: string, data: any[], columns: CdTableColumn[]) {
+  basicDataSearch(searchTerm: string, rows: any[], columns: CdTableColumn[]) {
     if (searchTerm.length === 0) {
-      return data;
+      return rows;
     }
-    return data.filter((d) => {
+    return rows.filter((row) => {
       return (
-        columns.filter((c) => {
-          let cellValue: any = _.get(d, c.prop);
-          if (!_.isUndefined(c.pipe)) {
-            cellValue = c.pipe.transform(cellValue);
+        columns.filter((col) => {
+          let cellValue: any = _.get(row, col.prop);
+
+          if (!_.isUndefined(col.pipe)) {
+            cellValue = col.pipe.transform(cellValue);
           }
-          if (_.isUndefined(cellValue)) {
-            return;
+          if (_.isUndefined(cellValue) || _.isNull(cellValue)) {
+            return false;
           }
+
           if (_.isArray(cellValue)) {
             cellValue = cellValue.join(' ');
           } else if (_.isNumber(cellValue) || _.isBoolean(cellValue)) {

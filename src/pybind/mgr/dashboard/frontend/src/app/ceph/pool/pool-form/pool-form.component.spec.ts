@@ -10,7 +10,12 @@ import { BsModalService } from 'ngx-bootstrap/modal';
 import { TabsModule } from 'ngx-bootstrap/tabs';
 import { of } from 'rxjs';
 
-import { configureTestBed, FormHelper, i18nProviders } from '../../../../testing/unit-test-helper';
+import {
+  configureTestBed,
+  FixtureHelper,
+  FormHelper,
+  i18nProviders
+} from '../../../../testing/unit-test-helper';
 import { NotFoundComponent } from '../../../core/not-found/not-found.component';
 import { ErasureCodeProfileService } from '../../../shared/api/erasure-code-profile.service';
 import { PoolService } from '../../../shared/api/pool.service';
@@ -29,6 +34,7 @@ import { PoolFormComponent } from './pool-form.component';
 describe('PoolFormComponent', () => {
   const OSDS = 8;
   let formHelper: FormHelper;
+  let fixtureHelper: FixtureHelper;
   let component: PoolFormComponent;
   let fixture: ComponentFixture<PoolFormComponent>;
   let poolService: PoolService;
@@ -37,9 +43,7 @@ describe('PoolFormComponent', () => {
   let ecpService: ErasureCodeProfileService;
 
   const setPgNum = (pgs): AbstractControl => {
-    formHelper.setValue('poolType', 'erasure');
     const control = formHelper.setValue('pgNum', pgs);
-    fixture.detectChanges();
     fixture.debugElement.query(By.css('#pgNum')).nativeElement.dispatchEvent(new Event('blur'));
     return control;
   };
@@ -83,7 +87,11 @@ describe('PoolFormComponent', () => {
     return rule;
   };
 
-  const testSubmit = (pool: any, taskName: string, poolServiceMethod: 'create' | 'update') => {
+  const expectValidSubmit = (
+    pool: any,
+    taskName: string,
+    poolServiceMethod: 'create' | 'update'
+  ) => {
     spyOn(poolService, poolServiceMethod).and.stub();
     const taskWrapper = TestBed.get(TaskWrapperService);
     spyOn(taskWrapper, 'wrapTaskAroundCall').and.callThrough();
@@ -102,6 +110,7 @@ describe('PoolFormComponent', () => {
 
   const setUpPoolComponent = () => {
     fixture = TestBed.createComponent(PoolFormComponent);
+    fixtureHelper = new FixtureHelper(fixture);
     component = fixture.componentInstance;
     component.info = {
       pool_names: [],
@@ -208,7 +217,7 @@ describe('PoolFormComponent', () => {
 
   describe('pool form validation', () => {
     beforeEach(() => {
-      component.ngOnInit();
+      fixture.detectChanges();
     });
 
     it('is invalid at the beginning all sub forms are valid', () => {
@@ -224,6 +233,7 @@ describe('PoolFormComponent', () => {
       expect(component.editing).toBeFalsy();
       formHelper.expectError('name', 'required');
       formHelper.expectValidChange('name', 'some-name');
+      formHelper.expectValidChange('name', 'name/with/slash');
       component.info.pool_names.push('someExistingPoolName');
       formHelper.expectErrorChange('name', 'someExistingPoolName', 'uniqueName');
       formHelper.expectErrorChange('name', 'wrong format with spaces', 'pattern');
@@ -239,38 +249,24 @@ describe('PoolFormComponent', () => {
       formHelper.expectValidChange('poolType', 'replicated');
     });
 
-    it('validates pgNum in creation mode', () => {
+    it('validates that pgNum is required creation mode', () => {
       formHelper.expectError(form.get('pgNum'), 'required');
-      formHelper.setValue('poolType', 'erasure');
-      formHelper.expectValid(setPgNum(-28));
-      expect(form.getValue('pgNum')).toBe(1);
-      formHelper.expectValid(setPgNum(15));
-      expect(form.getValue('pgNum')).toBe(16);
-    });
-
-    it('increases pgNum by the power of two for if the value has changed by one', () => {
-      setPgNum('16');
-      expect(setPgNum(17).value).toBe(32);
-      expect(setPgNum(31).value).toBe(16);
-    });
-
-    it('not increases pgNum by more than one but lower than the next pg update change', () => {
-      setPgNum('16');
-      expect(setPgNum('18').value).toBe(16);
-      expect(setPgNum('14').value).toBe(16);
     });
 
     it('validates pgNum in edit mode', () => {
       component.data.pool = new Pool('test');
       component.data.pool.pg_num = 16;
       component.editing = true;
-      component.ngOnInit();
+      component.ngOnInit(); // Switches form into edit mode
+      formHelper.setValue('poolType', 'erasure');
+      fixture.detectChanges();
       formHelper.expectError(setPgNum('8'), 'noDecrease');
     });
 
     it('is valid if pgNum, poolType and name are valid', () => {
       formHelper.setValue('name', 'some-name');
       formHelper.setValue('poolType', 'erasure');
+      fixture.detectChanges();
       setPgNum(1);
       expect(form.valid).toBeTruthy();
     });
@@ -380,7 +376,7 @@ describe('PoolFormComponent', () => {
       fixture.detectChanges();
       const selectBadges = fixture.debugElement.query(By.directive(SelectBadgesComponent))
         .componentInstance;
-      const control = selectBadges.filter;
+      const control = selectBadges.cdSelect.filter;
       formHelper.expectValid(control);
       control.setValue('?');
       formHelper.expectError(control, 'pattern');
@@ -529,21 +525,21 @@ describe('PoolFormComponent', () => {
     let selectBadges: SelectBadgesComponent;
 
     const testAddApp = (app?: string, result?: string[]) => {
-      selectBadges.filter.setValue(app);
-      selectBadges.updateFilter();
-      selectBadges.selectOption();
+      selectBadges.cdSelect.filter.setValue(app);
+      selectBadges.cdSelect.updateFilter();
+      selectBadges.cdSelect.selectOption();
       expect(component.data.applications.selected).toEqual(result);
     };
 
     const testRemoveApp = (app: string, result: string[]) => {
-      selectBadges.removeItem(app);
+      selectBadges.cdSelect.removeItem(app);
       expect(component.data.applications.selected).toEqual(result);
     };
 
     const setCurrentApps = (apps: string[]) => {
       component.data.applications.selected = apps;
       fixture.detectChanges();
-      selectBadges.ngOnInit();
+      selectBadges.cdSelect.ngOnInit();
       return apps;
     };
 
@@ -583,14 +579,82 @@ describe('PoolFormComponent', () => {
   });
 
   describe('pg number changes', () => {
+    const setPgs = (pgs) => {
+      formHelper.setValue('pgNum', pgs);
+      fixture.debugElement.query(By.css('#pgNum')).nativeElement.dispatchEvent(new Event('blur'));
+    };
+
+    const testPgUpdate = (pgs, jump, returnValue) => {
+      if (pgs) {
+        setPgs(pgs);
+      }
+      if (jump) {
+        setPgs(form.getValue('pgNum') + jump);
+      }
+      expect(form.getValue('pgNum')).toBe(returnValue);
+    };
+
     beforeEach(() => {
       formHelper.setValue('crushRule', {
         min_size: 1,
         max_size: 20
       });
-      component.ngOnInit();
-      // triggers pgUpdate
+      formHelper.setValue('poolType', 'erasure');
+      fixture.detectChanges();
       setPgNum(256);
+    });
+
+    it('updates by value', () => {
+      testPgUpdate(10, undefined, 8);
+      testPgUpdate(22, undefined, 16);
+      testPgUpdate(26, undefined, 32);
+      testPgUpdate(200, undefined, 256);
+      testPgUpdate(300, undefined, 256);
+      testPgUpdate(350, undefined, 256);
+    });
+
+    it('updates by jump -> a magnitude of the power of 2', () => {
+      testPgUpdate(undefined, 1, 512);
+      testPgUpdate(undefined, -1, 256);
+    });
+
+    it('returns 1 as minimum for false numbers', () => {
+      testPgUpdate(-26, undefined, 1);
+      testPgUpdate(0, undefined, 1);
+      testPgUpdate(0, -1, 1);
+      testPgUpdate(undefined, -20, 1);
+    });
+
+    it('changes the value and than jumps', () => {
+      testPgUpdate(230, 1, 512);
+      testPgUpdate(3500, -1, 2048);
+    });
+
+    describe('pg power jump', () => {
+      it('should jump correctly at the beginning', () => {
+        testPgUpdate(1, -1, 1);
+        testPgUpdate(1, 1, 2);
+        testPgUpdate(2, -1, 1);
+        testPgUpdate(2, 1, 4);
+        testPgUpdate(4, -1, 2);
+        testPgUpdate(4, 1, 8);
+        testPgUpdate(4, 1, 8);
+      });
+
+      it('increments pg power if difference to the current number is 1', () => {
+        testPgUpdate(undefined, 1, 512);
+        testPgUpdate(undefined, 1, 1024);
+        testPgUpdate(undefined, 1, 2048);
+        testPgUpdate(undefined, 1, 4096);
+      });
+
+      it('decrements pg power if difference to the current number is -1', () => {
+        testPgUpdate(undefined, -1, 128);
+        testPgUpdate(undefined, -1, 64);
+        testPgUpdate(undefined, -1, 32);
+        testPgUpdate(undefined, -1, 16);
+        testPgUpdate(undefined, -1, 8);
+      });
     });
 
     describe('pgCalc', () => {
@@ -678,68 +742,6 @@ describe('PoolFormComponent', () => {
         testPgCalc(test);
       });
     });
-
-    describe('pgUpdate', () => {
-      const testPgUpdate = (pgs, jump, returnValue) => {
-        component['pgUpdate'](pgs, jump);
-        expect(form.getValue('pgNum')).toBe(returnValue);
-      };
-
-      it('updates by value', () => {
-        testPgUpdate(10, undefined, 8);
-        testPgUpdate(22, undefined, 16);
-        testPgUpdate(26, undefined, 32);
-      });
-
-      it('updates by jump -> a magnitude of the power of 2', () => {
-        testPgUpdate(undefined, 1, 512);
-        testPgUpdate(undefined, -1, 256);
-        testPgUpdate(undefined, -2, 64);
-        testPgUpdate(undefined, -10, 1);
-      });
-
-      it('returns 1 as minimum for false numbers', () => {
-        testPgUpdate(-26, undefined, 1);
-        testPgUpdate(0, undefined, 1);
-        testPgUpdate(undefined, -20, 1);
-      });
-
-      it('uses by value and jump', () => {
-        testPgUpdate(330, 0, 256);
-        testPgUpdate(230, 2, 1024);
-        testPgUpdate(230, 3, 2048);
-      });
-    });
-
-    describe('pgKeyUp', () => {
-      const testPgKeyUp = (keyName, returnValue) => {
-        component.pgKeyUp({ key: keyName });
-        expect(form.getValue('pgNum')).toBe(returnValue);
-      };
-
-      it('does nothing with unrelated keys', () => {
-        testPgKeyUp('0', 256);
-        testPgKeyUp(',', 256);
-        testPgKeyUp('a', 256);
-        testPgKeyUp('Space', 256);
-        testPgKeyUp('ArrowLeft', 256);
-        testPgKeyUp('ArrowRight', 256);
-      });
-
-      it('increments by jump with plus or ArrowUp', () => {
-        testPgKeyUp('ArrowUp', 512);
-        testPgKeyUp('ArrowUp', 1024);
-        testPgKeyUp('+', 2048);
-        testPgKeyUp('+', 4096);
-      });
-
-      it('decrement by jump with minus or ArrowDown', () => {
-        testPgKeyUp('ArrowDown', 128);
-        testPgKeyUp('ArrowDown', 64);
-        testPgKeyUp('-', 32);
-        testPgKeyUp('-', 16);
-      });
-    });
   });
 
   describe('crushRule', () => {
@@ -751,8 +753,8 @@ describe('PoolFormComponent', () => {
     });
 
     it('should not show info per default', () => {
-      formHelper.expectElementVisible(fixture, '#crushRule', true);
-      formHelper.expectElementVisible(fixture, '#crush-info-block', false);
+      fixtureHelper.expectElementVisible('#crushRule', true);
+      fixtureHelper.expectElementVisible('#crush-info-block', false);
     });
 
     it('should show info if the info button is clicked', () => {
@@ -762,7 +764,7 @@ describe('PoolFormComponent', () => {
       expect(component.data.crushInfo).toBeTruthy();
       fixture.detectChanges();
       expect(infoButton.classes['active']).toBeTruthy();
-      formHelper.expectIdElementsVisible(fixture, ['crushRule', 'crush-info-block'], true);
+      fixtureHelper.expectIdElementsVisible(['crushRule', 'crush-info-block'], true);
     });
   });
 
@@ -777,8 +779,8 @@ describe('PoolFormComponent', () => {
     });
 
     it('should not show info per default', () => {
-      formHelper.expectElementVisible(fixture, '#erasureProfile', true);
-      formHelper.expectElementVisible(fixture, '#ecp-info-block', false);
+      fixtureHelper.expectElementVisible('#erasureProfile', true);
+      fixtureHelper.expectElementVisible('#ecp-info-block', false);
     });
 
     it('should show info if the info button is clicked', () => {
@@ -787,7 +789,7 @@ describe('PoolFormComponent', () => {
       expect(component.data.erasureInfo).toBeTruthy();
       fixture.detectChanges();
       expect(infoButton.classes['active']).toBeTruthy();
-      formHelper.expectIdElementsVisible(fixture, ['erasureProfile', 'ecp-info-block'], true);
+      fixtureHelper.expectIdElementsVisible(['erasureProfile', 'ecp-info-block'], true);
     });
 
     describe('ecp deletion', () => {
@@ -840,7 +842,7 @@ describe('PoolFormComponent', () => {
       });
     };
     const testCreate = (pool) => {
-      testSubmit(pool, 'pool/create', 'create');
+      expectValidSubmit(pool, 'pool/create', 'create');
     };
 
     beforeEach(() => {
@@ -891,6 +893,27 @@ describe('PoolFormComponent', () => {
           pool_type: 'erasure',
           pg_num: 32,
           flags: ['ec_overwrites']
+        });
+      });
+
+      it('with rbd qos settings', () => {
+        setMultipleValues({
+          name: 'replicatedRbdQos',
+          poolType: 'replicated',
+          size: 2,
+          pgNum: 32
+        });
+        component.currentConfigurationValues = {
+          rbd_qos_bps_limit: 55
+        };
+        testCreate({
+          pool: 'replicatedRbdQos',
+          pool_type: 'replicated',
+          size: 2,
+          pg_num: 32,
+          configuration: {
+            rbd_qos_bps_limit: 55
+          }
         });
       });
     });
@@ -974,6 +997,7 @@ describe('PoolFormComponent', () => {
       pool.options.compression_required_ratio = 0.8;
       pool.flags_names = 'someFlag1,someFlag2';
       pool.application_metadata = ['rbd', 'rgw'];
+
       createCrushRule({ name: 'someRule' });
       spyOn(poolService, 'get').and.callFake(() => of(pool));
     });
@@ -991,7 +1015,7 @@ describe('PoolFormComponent', () => {
     describe('after ngOnInit', () => {
       beforeEach(() => {
         component.editing = true;
-        component.ngOnInit();
+        fixture.detectChanges();
       });
 
       it('disabled inputs', () => {
@@ -1044,7 +1068,7 @@ describe('PoolFormComponent', () => {
         it(`always provides the application metadata array with submit even if it's empty`, () => {
           expect(form.get('mode').dirty).toBe(false);
           component.data.applications.selected = [];
-          testSubmit(
+          expectValidSubmit(
             {
               application_metadata: [],
               pool: 'somePoolName'
@@ -1058,7 +1082,7 @@ describe('PoolFormComponent', () => {
           formHelper.setValue('minBlobSize', '').markAsDirty();
           formHelper.setValue('maxBlobSize', '').markAsDirty();
           formHelper.setValue('ratio', '').markAsDirty();
-          testSubmit(
+          expectValidSubmit(
             {
               application_metadata: ['rbd', 'rgw'],
               compression_max_blob_size: 0,
@@ -1073,7 +1097,7 @@ describe('PoolFormComponent', () => {
 
         it(`will unset mode not used anymore`, () => {
           formHelper.setValue('mode', 'none').markAsDirty();
-          testSubmit(
+          expectValidSubmit(
             {
               application_metadata: ['rbd', 'rgw'],
               compression_mode: 'unset',
@@ -1084,6 +1108,31 @@ describe('PoolFormComponent', () => {
           );
         });
       });
+    });
+  });
+
+  describe('test pool configuration component', () => {
+    it('is visible for replicated pools with rbd application', () => {
+      const poolType = component.form.get('poolType');
+      poolType.markAsDirty();
+      poolType.setValue('replicated');
+      component.data.applications.selected = ['rbd'];
+      fixture.detectChanges();
+      expect(
+        fixture.debugElement.query(By.css('cd-rbd-configuration-form')).nativeElement.parentElement
+          .hidden
+      ).toBe(false);
+    });
+
+    it('is invisible for erasure coded pools', () => {
+      const poolType = component.form.get('poolType');
+      poolType.markAsDirty();
+      poolType.setValue('erasure');
+      fixture.detectChanges();
+      expect(
+        fixture.debugElement.query(By.css('cd-rbd-configuration-form')).nativeElement.parentElement
+          .hidden
+      ).toBe(true);
     });
   });
 });

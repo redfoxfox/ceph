@@ -105,7 +105,7 @@ int execute_move(const po::variables_map &vm,
 void get_remove_arguments(po::options_description *positional,
                           po::options_description *options) {
   positional->add_options()
-    (at::IMAGE_ID.c_str(), "image id\n(example: [<pool-name>/[<namespace-name>/]]<image-id>)");
+    (at::IMAGE_ID.c_str(), "image id\n(example: [<pool-name>/[<namespace>/]]<image-id>)");
   at::add_pool_option(options, at::ARGUMENT_MODIFIER_NONE);
   at::add_namespace_option(options, at::ARGUMENT_MODIFIER_NONE);
   at::add_image_id_option(options);
@@ -266,6 +266,9 @@ int do_list(librbd::RBD &rbd, librados::IoCtx& io_ctx, bool long_flag,
       case RBD_TRASH_IMAGE_SOURCE_MIGRATION:
         del_source = "MIGRATION";
         break;
+      case RBD_TRASH_IMAGE_SOURCE_REMOVING:
+        del_source = "REMOVING";
+        break;
     }
 
     std::string time_str = ctime(&entry.deletion_time);
@@ -330,8 +333,7 @@ int do_list(librbd::RBD &rbd, librados::IoCtx& io_ctx, bool long_flag,
 
 void get_list_arguments(po::options_description *positional,
                         po::options_description *options) {
-  at::add_pool_options(positional, options);
-  at::add_namespace_options(positional, options);
+  at::add_pool_options(positional, options, true);
   options->add_options()
     ("all,a", po::bool_switch(), "list images from all sources");
   options->add_options()
@@ -341,12 +343,17 @@ void get_list_arguments(po::options_description *positional,
 
 int execute_list(const po::variables_map &vm,
                  const std::vector<std::string> &ceph_global_init_args) {
+  std::string pool_name;
+  std::string namespace_name;
   size_t arg_index = 0;
-  std::string pool_name = utils::get_pool_name(vm, &arg_index);
-  std::string namespace_name = utils::get_namespace_name(vm, &arg_index);
+  int r = utils::get_pool_and_namespace_names(vm, true, false, &pool_name,
+                                              &namespace_name, &arg_index);
+  if (r < 0) {
+    return r;
+  }
 
   at::Format::Formatter formatter;
-  int r = utils::get_formatter(vm, &formatter);
+  r = utils::get_formatter(vm, &formatter);
   if (r < 0) {
     return r;
   }
@@ -373,8 +380,7 @@ int execute_list(const po::variables_map &vm,
 
 void get_purge_arguments(po::options_description *positional,
                             po::options_description *options) {
-  at::add_pool_options(positional, options);
-  at::add_namespace_options(positional, options);
+  at::add_pool_options(positional, options, true);
   at::add_no_progress_option(options);
 
   options->add_options()
@@ -388,9 +394,14 @@ void get_purge_arguments(po::options_description *positional,
 
 int execute_purge (const po::variables_map &vm,
                    const std::vector<std::string> &ceph_global_init_args) {
+  std::string pool_name;
+  std::string namespace_name;
   size_t arg_index = 0;
-  std::string pool_name = utils::get_pool_name(vm, &arg_index);
-  std::string namespace_name = utils::get_namespace_name(vm, &arg_index);
+  int r = utils::get_pool_and_namespace_names(vm, true, false, &pool_name,
+                                              &namespace_name, &arg_index);
+  if (r < 0) {
+    return r;
+  }
 
   utils::disable_cache();
 
@@ -398,7 +409,7 @@ int execute_purge (const po::variables_map &vm,
 
   librados::Rados rados;
   librados::IoCtx io_ctx;
-  int r = utils::init(pool_name, namespace_name, &rados, &io_ctx);
+  r = utils::init(pool_name, namespace_name, &rados, &io_ctx);
   if (r < 0) {
     return r;
   }

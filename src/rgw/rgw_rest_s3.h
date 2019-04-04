@@ -274,6 +274,7 @@ public:
 
   int init_dest_policy() override;
   int get_params() override;
+  int check_storage_class(const rgw_placement_rule& src_placement);
   void send_partial_response(off_t ofs) override;
   void send_response() override;
 };
@@ -298,7 +299,7 @@ public:
 
 class RGWGetLC_ObjStore_S3 : public RGWGetLC_ObjStore {
 protected:
-  RGWLifecycleConfiguration_S3  config;
+  RGWLifecycleConfiguration_S3 config;
 public:
   RGWGetLC_ObjStore_S3() {}
   ~RGWGetLC_ObjStore_S3() override {}
@@ -508,15 +509,13 @@ public:
   explicit RGWHandler_REST_S3(const rgw::auth::StrategyRegistry& auth_registry)
     : RGWHandler_REST(),
       auth_registry(auth_registry) {
-  }
+    }
   ~RGWHandler_REST_S3() override = default;
 
   int init(RGWRados *store,
            struct req_state *s,
            rgw::io::BasicClient *cio) override;
-  int authorize(const DoutPrefixProvider *dpp) override {
-    return RGW_Auth_S3::authorize(dpp, store, auth_registry, s);
-  }
+  int authorize(const DoutPrefixProvider *dpp) override;
   int postauth_init() override;
 };
 
@@ -555,6 +554,9 @@ protected:
   }
   bool is_policy_op() {
     return s->info.args.exists("policy");
+  }
+  bool is_tagging_op() const {
+    return s->info.args.exists("tagging");
   }
   RGWOp *get_obj_op(bool get_data);
 
@@ -856,6 +858,7 @@ public:
     return "rgw::auth::s3::LDAPEngine";
   }
 
+  static bool valid();
   static void shutdown();
 };
 

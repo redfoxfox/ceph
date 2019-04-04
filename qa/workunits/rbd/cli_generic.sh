@@ -125,6 +125,9 @@ test_others() {
     rbd info --snap=snap1 testimg1 2>&1 | grep 'error setting snapshot context: (2) No such file or directory'
     rbd info --snap=snap1 testimg-diff1 2>&1 | grep 'error setting snapshot context: (2) No such file or directory'
 
+    # sparsify
+    rbd sparsify testimg1
+
     remove_images
     rm -f $TMP_FILES
 }
@@ -552,6 +555,7 @@ test_clone_v2() {
     rbd clone --rbd-default-clone-format=1 test1@1 test4
 
     rbd children test1@1 | sort | tr '\n' ' ' | grep -E "test2.*test3.*test4"
+    rbd children --descendants test1 | sort | tr '\n' ' ' | grep -E "test2.*test3.*test4"
 
     rbd remove test4
     rbd snap unprotect test1@1
@@ -631,10 +635,10 @@ test_namespace() {
     remove_images
 
     rbd namespace ls | wc -l | grep '^0$'
-    rbd namespace create rbd test1
-    rbd namespace create --pool rbd test2
+    rbd namespace create rbd/test1
+    rbd namespace create --pool rbd --namespace test2
     rbd namespace create --namespace test3
-    expect_fail rbd namespace create rbd test3
+    expect_fail rbd namespace create rbd/test3
 
     rbd namespace list | grep 'test' | wc -l | grep '^3$'
 
@@ -662,7 +666,7 @@ test_namespace() {
     rbd rm rbd/image2
 
     rbd create $RBD_CREATE_ARGS --size 1G --namespace test1 image2
-    expect_fail rbd namespace remove --pool rbd test1
+    expect_fail rbd namespace remove rbd/test1
 
     rbd group create rbd/test1/group1
     rbd group image add rbd/test1/group1 rbd/test1/image1
@@ -674,11 +678,11 @@ test_namespace() {
 
     rbd remove rbd/test1/image2
 
-    rbd namespace remove --pool rbd test1
+    rbd namespace remove --pool rbd --namespace test1
     rbd namespace remove --namespace test3
 
     rbd namespace list | grep 'test' | wc -l | grep '^1$'
-    rbd namespace remove rbd test2
+    rbd namespace remove rbd/test2
 }
 
 get_migration_state() {
@@ -725,8 +729,8 @@ test_migration() {
     rbd migration commit test1
 
     # Migration to other namespace
-    rbd namespace create rbd2 ns1
-    rbd namespace create rbd2 ns2
+    rbd namespace create rbd2/ns1
+    rbd namespace create rbd2/ns2
     rbd migration prepare rbd2/test1 rbd2/ns1/test1
     test "$(get_migration_state rbd2/ns1/test1)" = prepared
     rbd migration execute rbd2/test1
@@ -750,6 +754,50 @@ test_migration() {
     expect_fail rbd trash rm $ID
     expect_fail rbd trash restore $ID
     rbd migration abort test1
+
+    # Migrate parent
+    rbd remove test1
+    dd if=/dev/urandom bs=1M count=1 | rbd --image-format 2 import - test1
+    md5sum=$(rbd export test1 - | md5sum)
+    rbd snap create test1@snap1
+    rbd snap protect test1@snap1
+    rbd snap create test1@snap2
+    rbd clone test1@snap1 clone_v1 --rbd_default_clone_format=1
+    rbd clone test1@snap2 clone_v2 --rbd_default_clone_format=2
+    rbd info clone_v1 | fgrep 'parent: rbd/test1@snap1'
+    rbd info clone_v2 | fgrep 'parent: rbd/test1@snap2'
+    rbd info clone_v2 |grep 'op_features: clone-child'
+    test "$(rbd export clone_v1 - | md5sum)" = "${md5sum}"
+    test "$(rbd export clone_v2 - | md5sum)" = "${md5sum}"
+    test "$(rbd children test1@snap1)" = "rbd/clone_v1"
+    test "$(rbd children test1@snap2)" = "rbd/clone_v2"
+    rbd migration prepare test1 rbd2/test2
+    rbd info clone_v1 | fgrep 'parent: rbd2/test2@snap1'
+    rbd info clone_v2 | fgrep 'parent: rbd2/test2@snap2'
+    rbd info clone_v2 | fgrep 'op_features: clone-child'
+    test "$(rbd children rbd2/test2@snap1)" = "rbd/clone_v1"
+    test "$(rbd children rbd2/test2@snap2)" = "rbd/clone_v2"
+    rbd migration execute test1
+    expect_fail rbd migration commit test1
+    rbd migration commit test1 --force
+    test "$(rbd export clone_v1 - | md5sum)" = "${md5sum}"
+    test "$(rbd export clone_v2 - | md5sum)" = "${md5sum}"
+    rbd migration prepare rbd2/test2 test1
+    rbd info clone_v1 | fgrep 'parent: rbd/test1@snap1'
+    rbd info clone_v2 | fgrep 'parent: rbd/test1@snap2'
+    rbd info clone_v2 | fgrep 'op_features: clone-child'
+    test "$(rbd children test1@snap1)" = "rbd/clone_v1"
+    test "$(rbd children test1@snap2)" = "rbd/clone_v2"
+    rbd migration execute test1
+    expect_fail rbd migration commit test1
+    rbd migration commit test1 --force
+    test "$(rbd export clone_v1 - | md5sum)" = "${md5sum}"
+    test "$(rbd export clone_v2 - | md5sum)" = "${md5sum}"
+    rbd remove clone_v1
+    rbd remove clone_v2
+    rbd snap unprotect test1@snap1
+    rbd snap purge test1
+    rbd rm test1
 
     for format in 1 2; do
         # Abort migration after successful prepare

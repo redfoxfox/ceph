@@ -96,13 +96,5 @@ if(WITH_MGR)
       message(WARNING "could not determine ssl version of python crypto lib")
     endif()
   endif(USE_OPENSSL)
-
-  # Location needs to match default setting for mgr_module_path, currently:
-  # OPTION(mgr_module_path, OPT_STR, CEPH_PKGLIBDIR "/mgr")
-  install(DIRECTORY
-    ${CMAKE_CURRENT_SOURCE_DIR}/mgr
-    DESTINATION ${CMAKE_INSTALL_PKGLIBDIR}
-    REGEX ".*/\\.gitignore" EXCLUDE
-    REGEX ".*/hello/.*" EXCLUDE)
   add_subdirectory(mgr)
 endif(WITH_MGR)

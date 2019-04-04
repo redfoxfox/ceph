@@ -193,6 +193,7 @@ void usage()
   cout << "  lc list                    list all bucket lifecycle progress\n";
   cout << "  lc get                     get a lifecycle bucket configuration\n";
   cout << "  lc process                 manually process lifecycle\n";
+  cout << "  lc reshard fix             fix LC for a resharded bucket\n";
   cout << "  metadata get               get metadata info\n";
   cout << "  metadata put               put metadata info\n";
   cout << "  metadata rm                remove metadata info\n";
@@ -289,6 +290,7 @@ void usage()
   cout << "   --read-only               set zone as read-only (when adding to zonegroup)\n";
   cout << "   --redirect-zone           specify zone id to redirect when response is 404 (not found)\n";
   cout << "   --placement-id            placement id for zonegroup placement commands\n";
+  cout << "   --storage-class           storage class for zonegroup placement commands\n";
   cout << "   --tags=<list>             list of tags for zonegroup placement add and modify commands\n";
   cout << "   --tags-add=<list>         list of tags to add for zonegroup placement modify command\n";
   cout << "   --tags-rm=<list>          list of tags to remove for zonegroup placement modify command\n";
@@ -354,6 +356,7 @@ void usage()
   cout << "   --orphan-stale-secs       num of seconds to wait before declaring an object to be an orphan (default: 86400)\n";
   cout << "   --job-id                  set the job id (for orphans find)\n";
   cout << "   --max-concurrent-ios      maximum concurrent ios for orphans find (default: 32)\n";
+  cout << "   --detail                  detailed mode, log and stat head objects as well\n";
   cout << "\nOrphans list-jobs options:\n";
   cout << "   --extra-info              provide extra info in job list\n";
   cout << "\nRole options:\n";
@@ -434,6 +437,7 @@ enum {
   OPT_LC_LIST,
   OPT_LC_GET,
   OPT_LC_PROCESS,
+  OPT_LC_RESHARD_FIX,
   OPT_ORPHANS_FIND,
   OPT_ORPHANS_FINISH,
   OPT_ORPHANS_LIST_JOBS,
@@ -489,6 +493,7 @@ enum {
   OPT_DATA_SYNC_RUN,
   OPT_DATALOG_LIST,
   OPT_DATALOG_STATUS,
+  OPT_DATALOG_AUTOTRIM,
   OPT_DATALOG_TRIM,
   OPT_REALM_CREATE,
   OPT_REALM_DELETE,
@@ -886,6 +891,10 @@ static int get_cmd(const char *cmd, const char *prev_cmd, const char *prev_prev_
       return OPT_LC_GET;
     if (strcmp(cmd, "process") == 0)
       return OPT_LC_PROCESS;
+  } else if ((prev_prev_cmd && strcmp(prev_prev_cmd, "lc") == 0) &&
+	     strcmp(prev_cmd, "reshard") == 0) {
+    if (strcmp(cmd, "fix") == 0)
+      return OPT_LC_RESHARD_FIX;
   } else if (strcmp(prev_cmd, "orphans") == 0) {
     if (strcmp(cmd, "find") == 0)
       return OPT_ORPHANS_FIND;
@@ -948,6 +957,8 @@ static int get_cmd(const char *cmd, const char *prev_cmd, const char *prev_prev_
   } else if (strcmp(prev_cmd, "datalog") == 0) {
     if (strcmp(cmd, "list") == 0)
       return OPT_DATALOG_LIST;
+    if (strcmp(cmd, "autotrim") == 0)
+      return OPT_DATALOG_AUTOTRIM;
     if (strcmp(cmd, "trim") == 0)
       return OPT_DATALOG_TRIM;
     if (strcmp(cmd, "status") == 0)
@@ -1138,7 +1149,7 @@ static void show_reshard_status(
     formatter->dump_string("reshard_status", to_string(entry.reshard_status));
     formatter->dump_string("new_bucket_instance_id",
 			   entry.new_bucket_instance_id);
-    formatter->dump_unsigned("num_shards", entry.num_shards);
+    formatter->dump_int("num_shards", entry.num_shards);
     formatter->close_section();
   }
   formatter->close_section();
@@ -1298,11 +1309,8 @@ static bool decode_dump(const char *field_name, bufferlist& bl, Formatter *f)
 
 static bool dump_string(const char *field_name, bufferlist& bl, Formatter *f)
 {
-  string val;
-  if (bl.length() > 0) {
-    val.assign(bl.c_str());
-  }
-  f->dump_string(field_name, val);
+  string val = bl.to_str();
+  f->dump_string(field_name, val.c_str() /* hide encoded null termination chars */);
 
   return true;
 }
@@ -2155,7 +2163,7 @@ static void get_data_sync_status(const string& source_zone, list<string>& status
     flush_ss(ss, status);
     return;
   }
-  RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone);
+  RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, nullptr);
 
   int ret = sync.init();
   if (ret < 0) {
@@ -2800,6 +2808,7 @@ int main(int argc, const char **argv)
   string quota_scope;
   string object_version;
   string placement_id;
+  string storage_class;
   list<string> tags;
   list<string> tags_add;
   list<string> tags_rm;
@@ -2831,6 +2840,7 @@ int main(int argc, const char **argv)
   bool num_shards_specified = false;
   int max_concurrent_ios = 32;
   uint64_t orphan_stale_secs = (24 * 3600);
+  int detail = false;
 
   std::string val;
   std::ostringstream errs;
@@ -3112,6 +3122,8 @@ int main(int argc, const char **argv)
       zonegroup_new_name = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--placement-id", (char*)NULL)) {
       placement_id = val;
+    } else if (ceph_argparse_witharg(args, i, &val, "--storage-class", (char*)NULL)) {
+      storage_class = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--tags", (char*)NULL)) {
       get_str_list(val, tags);
     } else if (ceph_argparse_witharg(args, i, &val, "--tags-add", (char*)NULL)) {
@@ -3203,6 +3215,8 @@ int main(int argc, const char **argv)
       event_id = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--event-type", "--event-types", (char*)NULL)) {
       get_str_set(val, ",", event_types);
+    } else if (ceph_argparse_binary_flag(args, i, &detail, NULL, "--detail", (char*)NULL)) {
+      // do nothing
     } else if (strncmp(*i, "-", 1) == 0) {
       cerr << "ERROR: invalid flag " << *i << std::endl;
       return EINVAL;
@@ -4289,6 +4303,17 @@ int main(int argc, const char **argv)
           return EINVAL;
         }
 
+        rgw_placement_rule rule;
+        rule.from_str(placement_id);
+
+        if (!rule.storage_class.empty() && !storage_class.empty() &&
+            rule.storage_class != storage_class) {
+          cerr << "ERROR: provided contradicting storage class configuration" << std::endl;
+          return EINVAL;
+        } else if (rule.storage_class.empty()) {
+          rule.storage_class = storage_class;
+        }
+
 	RGWZoneGroup zonegroup(zonegroup_id, zonegroup_name);
 	int ret = zonegroup.init(g_ceph_context, store->svc.sysobj);
 	if (ret < 0) {
@@ -4296,14 +4321,8 @@ int main(int argc, const char **argv)
 	  return -ret;
 	}
 
-        if (opt_cmd == OPT_ZONEGROUP_PLACEMENT_ADD) {
-          RGWZoneGroupPlacementTarget target;
-          target.name = placement_id;
-          for (auto& t : tags) {
-            target.tags.insert(t);
-          }
-          zonegroup.placement_targets[placement_id] = target;
-        } else if (opt_cmd == OPT_ZONEGROUP_PLACEMENT_MODIFY) {
+        if (opt_cmd == OPT_ZONEGROUP_PLACEMENT_ADD ||
+            opt_cmd == OPT_ZONEGROUP_PLACEMENT_MODIFY) {
           RGWZoneGroupPlacementTarget& target = zonegroup.placement_targets[placement_id];
           if (!tags.empty()) {
             target.tags.clear();
@@ -4318,6 +4337,7 @@ int main(int argc, const char **argv)
           for (auto& t : tags_add) {
             target.tags.insert(t);
           }
+          target.storage_classes.insert(rule.get_storage_class());
         } else if (opt_cmd == OPT_ZONEGROUP_PLACEMENT_RM) {
           zonegroup.placement_targets.erase(placement_id);
         } else if (opt_cmd == OPT_ZONEGROUP_PLACEMENT_DEFAULT) {
@@ -4326,7 +4346,7 @@ int main(int argc, const char **argv)
                 << placement_id << "'" << std::endl;
             return -ENOENT;
           }
-          zonegroup.default_placement = placement_id;
+          zonegroup.default_placement = rule;
         }
 
         zonegroup.post_process_params();
@@ -4759,58 +4779,64 @@ int main(int argc, const char **argv)
 	  return -ret;
 	}
 
-        if (opt_cmd == OPT_ZONE_PLACEMENT_ADD) {
-          // pool names are required
-          if (!index_pool || index_pool->empty() ||
-              !data_pool || data_pool->empty()) {
-            cerr << "ERROR: need to specify both --index-pool and --data-pool" << std::endl;
-            return EINVAL;
-          }
+        if (opt_cmd == OPT_ZONE_PLACEMENT_ADD ||
+	    opt_cmd == OPT_ZONE_PLACEMENT_MODIFY) {
+	  RGWZoneGroup zonegroup(zonegroup_id, zonegroup_name);
+	  ret = zonegroup.init(g_ceph_context, store->svc.sysobj);
+	  if (ret < 0) {
+	    cerr << "failed to init zonegroup: " << cpp_strerror(-ret) << std::endl;
+	    return -ret;
+	  }
+
+	  auto ptiter = zonegroup.placement_targets.find(placement_id);
+	  if (ptiter == zonegroup.placement_targets.end()) {
+	    cerr << "ERROR: placement id '" << placement_id << "' is not configured in zonegroup placement targets" << std::endl;
+	    return EINVAL;
+	  }
+
+	  storage_class = rgw_placement_rule::get_canonical_storage_class(storage_class);
+	  if (ptiter->second.storage_classes.find(storage_class) == ptiter->second.storage_classes.end()) {
+	    cerr << "ERROR: storage class '" << storage_class << "' is not defined in zonegroup '" << placement_id << "' placement target" << std::endl;
+	    return EINVAL;
+	  }
 
           RGWZonePlacementInfo& info = zone.placement_pools[placement_id];
 
-          info.index_pool = *index_pool;
-          info.data_pool = *data_pool;
+	  string opt_index_pool = index_pool.value_or(string());
+	  string opt_data_pool = data_pool.value_or(string());
+
+	  if (!opt_index_pool.empty()) {
+	    info.index_pool = opt_index_pool;
+	  }
+
+	  if (info.index_pool.empty()) {
+            cerr << "ERROR: index pool not configured, need to specify --index-pool" << std::endl;
+            return EINVAL;
+	  }
+
+	  if (opt_data_pool.empty()) {
+	    const RGWZoneStorageClass *porig_sc{nullptr};
+	    if (info.storage_classes.find(storage_class, &porig_sc)) {
+	      if (porig_sc->data_pool) {
+		opt_data_pool = porig_sc->data_pool->to_str();
+	      }
+	    }
+	    if (opt_data_pool.empty()) {
+	      cerr << "ERROR: data pool not configured, need to specify --data-pool" << std::endl;
+	      return EINVAL;
+	    }
+	  }
+
+          rgw_pool dp = opt_data_pool;
+          info.storage_classes.set_storage_class(storage_class, &dp, compression_type.get_ptr());
+
           if (data_extra_pool) {
             info.data_extra_pool = *data_extra_pool;
           }
           if (index_type_specified) {
-            info.index_type = placement_index_type;
-          }
-          if (compression_type) {
-            info.compression_type = *compression_type;
+	    info.index_type = placement_index_type;
           }
 
-          ret = check_pool_support_omap(info.get_data_extra_pool());
-          if (ret < 0) {
-             cerr << "ERROR: the data extra (non-ec) pool '" << info.get_data_extra_pool() 
-                 << "' does not support omap" << std::endl;
-             return ret;
-          }
-        } else if (opt_cmd == OPT_ZONE_PLACEMENT_MODIFY) {
-          auto p = zone.placement_pools.find(placement_id);
-          if (p == zone.placement_pools.end()) {
-            cerr << "ERROR: zone placement target '" << placement_id
-                << "' not found" << std::endl;
-            return -ENOENT;
-          }
-          auto& info = p->second;
-          if (index_pool && !index_pool->empty()) {
-            info.index_pool = *index_pool;
-          }
-          if (data_pool && !data_pool->empty()) {
-            info.data_pool = *data_pool;
-          }
-          if (data_extra_pool) {
-            info.data_extra_pool = *data_extra_pool;
-          }
-          if (index_type_specified) {
-            info.index_type = placement_index_type;
-          }
-          if (compression_type) {
-            info.compression_type = *compression_type;
-          }
-          
           ret = check_pool_support_omap(info.get_data_extra_pool());
           if (ret < 0) {
              cerr << "ERROR: the data extra (non-ec) pool '" << info.get_data_extra_pool() 
@@ -5816,7 +5842,7 @@ next:
 
     rgw_cls_bi_entry entry;
 
-    ret = store->bi_get(bucket, obj, bi_index_type, &entry);
+    ret = store->bi_get(bucket_info, obj, bi_index_type, &entry);
     if (ret < 0) {
       cerr << "ERROR: bi_get(): " << cpp_strerror(-ret) << std::endl;
       return -ret;
@@ -6333,7 +6359,7 @@ next:
     RGWReshard reshard(store);
 
     cls_rgw_reshard_entry entry;
-    //entry.tenant = tenant;
+    entry.tenant = tenant;
     entry.bucket_name = bucket_name;
     //entry.bucket_id = bucket_id;
 
@@ -6562,6 +6588,15 @@ next:
     }
   }
 
+
+  if (opt_cmd == OPT_LC_RESHARD_FIX) {
+    ret = RGWBucketAdminOp::fix_lc_shards(store, bucket_op,f);
+    if (ret < 0) {
+      cerr << "ERROR: listing stale instances" << cpp_strerror(-ret) << std::endl;
+    }
+
+  }
+
   if (opt_cmd == OPT_ORPHANS_FIND) {
     if (!yes_i_really_mean_it) {
       cerr << "accidental removal of active objects can not be reversed; "
@@ -6587,7 +6622,7 @@ next:
     info.job_name = job_id;
     info.num_shards = num_shards;
 
-    int ret = search.init(job_id, &info);
+    int ret = search.init(job_id, &info, detail);
     if (ret < 0) {
       cerr << "could not init search, ret=" << ret << std::endl;
       return -ret;
@@ -6999,7 +7034,7 @@ next:
       cerr << "ERROR: source zone not specified" << std::endl;
       return EINVAL;
     }
-    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone);
+    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, nullptr);
 
     int ret = sync.init();
     if (ret < 0) {
@@ -7063,7 +7098,7 @@ next:
       return EINVAL;
     }
 
-    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone);
+    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, nullptr);
 
     int ret = sync.init();
     if (ret < 0) {
@@ -7092,7 +7127,7 @@ next:
       return ret;
     }
 
-    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, sync_module);
+    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, nullptr, sync_module);
 
     ret = sync.init();
     if (ret < 0) {
@@ -7521,6 +7556,24 @@ next:
     formatter->flush(cout);
   }
 
+  if (opt_cmd == OPT_DATALOG_AUTOTRIM) {
+    RGWCoroutinesManager crs(store->ctx(), store->get_cr_registry());
+    RGWHTTPManager http(store->ctx(), crs.get_completion_mgr());
+    int ret = http.start();
+    if (ret < 0) {
+      cerr << "failed to initialize http client with " << cpp_strerror(ret) << std::endl;
+      return -ret;
+    }
+
+    auto num_shards = g_conf()->rgw_data_log_num_shards;
+    std::vector<std::string> markers(num_shards);
+    ret = crs.run(create_admin_data_log_trim_cr(store, &http, num_shards, markers));
+    if (ret < 0) {
+      cerr << "automated datalog trim failed with " << cpp_strerror(ret) << std::endl;
+      return -ret;
+    }
+  }
+
   if (opt_cmd == OPT_DATALOG_TRIM) {
     utime_t start_time, end_time;
 
@@ -7802,6 +7855,13 @@ next:
  }
 
  if (opt_cmd == OPT_RESHARD_STALE_INSTANCES_LIST) {
+   if (!store->svc.zone->can_reshard() && !yes_i_really_mean_it) {
+     cerr << "Resharding disabled in a multisite env, stale instances unlikely from resharding" << std::endl;
+     cerr << "These instances may not be safe to delete." << std::endl;
+     cerr << "Use --yes-i-really-mean-it to force displaying these instances." << std::endl;
+     return EINVAL;
+   }
+
    ret = RGWBucketAdminOp::list_stale_instances(store, bucket_op,f);
    if (ret < 0) {
      cerr << "ERROR: listing stale instances" << cpp_strerror(-ret) << std::endl;
@@ -7809,6 +7869,11 @@ next:
  }
 
  if (opt_cmd == OPT_RESHARD_STALE_INSTANCES_DELETE) {
+   if (!store->svc.zone->can_reshard()) {
+     cerr << "Resharding disabled in a multisite env. Stale instances are not safe to be deleted." << std::endl;
+     return EINVAL;
+   }
+
    ret = RGWBucketAdminOp::clear_stale_instances(store, bucket_op,f);
    if (ret < 0) {
      cerr << "ERROR: deleting stale instances" << cpp_strerror(-ret) << std::endl;

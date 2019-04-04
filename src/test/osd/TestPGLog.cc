@@ -2835,6 +2835,7 @@ TEST_F(PGLogTrimTest, TestTrimAll)
 {
   SetUp(1, 2, 20);
   PGLog::IndexedLog log;
+  EXPECT_EQ(0u, log.dup_index.size()); // Sanity check
   log.head = mk_evt(24, 0);
   log.skip_can_rollback_to_to_head();
   log.head = mk_evt(9, 0);
@@ -2857,6 +2858,7 @@ TEST_F(PGLogTrimTest, TestTrimAll)
   EXPECT_EQ(6u, trimmed.size());
   EXPECT_EQ(5u, log.dups.size());
   EXPECT_EQ(0u, trimmed_dups.size());
+  EXPECT_EQ(0u, log.dup_index.size()); // dup_index entry should be trimmed
 }
 
 
@@ -2937,6 +2939,7 @@ TEST_F(PGLogTest, _merge_object_divergent_entries) {
     _merge_object_divergent_entries(log, hoid,
                                     orig_entries, oinfo,
                                     log.get_can_rollback_to(),
+                                    log.get_can_rollback_to(),
                                     missing, &rollbacker,
                                     this);
     // No core dump
@@ -2962,6 +2965,7 @@ TEST_F(PGLogTest, _merge_object_divergent_entries) {
     LogHandler rollbacker;
     _merge_object_divergent_entries(log, hoid,
                                     orig_entries, oinfo,
+                                    log.get_can_rollback_to(),
                                     log.get_can_rollback_to(),
                                     missing, &rollbacker,
                                     this);

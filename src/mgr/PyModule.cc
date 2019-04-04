@@ -337,8 +337,8 @@ int PyModule::load(PyThreadState *pMainThreadState)
       PySys_SetArgv(1, (char**)argv);
 #endif
       // Configure sys.path to include mgr_module_path
-      string paths = (":" + get_site_packages() +
-		      ":" + g_conf().get_val<std::string>("mgr_module_path"));
+      string paths = (":" + g_conf().get_val<std::string>("mgr_module_path") +
+		      ":" + get_site_packages());
 #if PY_MAJOR_VERSION >= 3
       wstring sys_path(Py_GetPath() + wstring(begin(paths), end(paths)));
       PySys_SetPath(const_cast<wchar_t*>(sys_path.c_str()));
@@ -622,6 +622,8 @@ bool PyModule::is_option(const std::string &option_name)
 PyObject *PyModule::get_typed_option_value(const std::string& name,
 					   const std::string& value)
 {
+  // we don't need to hold a lock here because these MODULE_OPTIONS
+  // are set up exactly once during startup.
   auto p = options.find(name);
   if (p != options.end()) {
     switch (p->second.type) {

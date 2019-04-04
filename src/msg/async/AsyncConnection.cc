@@ -40,6 +40,7 @@ ostream& AsyncConnection::_conn_prefix(std::ostream *_dout) {
 		<< *peer_addrs << " conn(" << this
 		<< (msgr2 ? " msgr2=" : " legacy=")
 		<< protocol.get()
+		<< " " << ceph_con_mode_name(protocol->auth_meta->con_mode)
                 << " :" << port
                 << " s=" << get_state_name(state)
                 << " l=" << policy.lossy
@@ -123,6 +124,9 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
     msgr2(m2), state_offset(0),
     worker(w), center(&w->center),read_buffer(nullptr)
 {
+#ifdef UNIT_TESTS_BUILT
+  this->interceptor = m->interceptor;
+#endif
   read_handler = new C_handle_read(this);
   write_handler = new C_handle_write(this);
   write_callback_handler = new C_handle_write_callback(this);
@@ -145,6 +149,10 @@ AsyncConnection::~AsyncConnection()
   if (recv_buf)
     delete[] recv_buf;
   ceph_assert(!delay_state);
+}
+
+int AsyncConnection::get_con_mode() const {
+  return protocol->get_con_mode();
 }
 
 void AsyncConnection::maybe_start_delay_thread()
@@ -372,8 +380,8 @@ void AsyncConnection::process() {
 
       SocketOptions opts;
       opts.priority = async_msgr->get_socket_priority();
-      opts.connect_bind_addr = msgr->get_myaddr();
-      ssize_t r = worker->connect(get_peer_addr(), opts, &cs);
+      opts.connect_bind_addr = msgr->get_myaddrs().front();
+      ssize_t r = worker->connect(target_addr, opts, &cs);
       if (r < 0) {
         protocol->fault();
         return;
@@ -385,7 +393,8 @@ void AsyncConnection::process() {
     case STATE_CONNECTING_RE: {
       ssize_t r = cs.is_connected();
       if (r < 0) {
-        ldout(async_msgr->cct, 1) << __func__ << " reconnect failed " << dendl;
+        ldout(async_msgr->cct, 1) << __func__ << " reconnect failed to "
+                                  << target_addr << dendl;
         if (r == -ECONNREFUSED) {
           ldout(async_msgr->cct, 2)
               << __func__ << " connection refused!" << dendl;
@@ -502,12 +511,14 @@ int AsyncConnection::send_message(Message *m)
   m->get_header().src = async_msgr->get_myname();
   m->set_connection(this);
 
+#if defined(WITH_LTTNG) && defined(WITH_EVENTTRACE)
   if (m->get_type() == CEPH_MSG_OSD_OP)
     OID_EVENT_TRACE_WITH_MSG(m, "SEND_MSG_OSD_OP_BEGIN", true);
   else if (m->get_type() == CEPH_MSG_OSD_OPREPLY)
     OID_EVENT_TRACE_WITH_MSG(m, "SEND_MSG_OSD_OPREPLY_BEGIN", true);
+#endif
 
-  if (async_msgr->get_myaddrs() == get_peer_addrs()) { //loopback connection
+  if (is_loopback) { //loopback connection
     ldout(async_msgr->cct, 20) << __func__ << " " << *m << " local" << dendl;
     std::lock_guard<std::mutex> l(write_lock);
     if (protocol->is_connected()) {
@@ -528,6 +539,23 @@ int AsyncConnection::send_message(Message *m)
   return 0;
 }
 
+entity_addr_t AsyncConnection::_infer_target_addr(const entity_addrvec_t& av)
+{
+  // pick the first addr of the same address family as socket_addr.  it could be
+  // an any: or v2: addr, we don't care.  it should not be a v1 addr.
+  for (auto& i : av.v) {
+    if (i.is_legacy()) {
+      continue;
+    }
+    if (i.get_family() == socket_addr.get_family()) {
+      ldout(async_msgr->cct,10) << __func__ << " " << av << " -> " << i << dendl;
+      return i;
+    }
+  }
+  ldout(async_msgr->cct,10) << __func__ << " " << av << " -> nothing to match "
+			    << socket_addr << dendl;
+  return {};
+}
 
 void AsyncConnection::fault()
 {
@@ -650,7 +678,7 @@ void AsyncConnection::mark_down()
 
 void AsyncConnection::handle_write()
 {
-  ldout(async_msgr->cct, 4) << __func__ << dendl;
+  ldout(async_msgr->cct, 10) << __func__ << dendl;
   protocol->write_event();
 }
 

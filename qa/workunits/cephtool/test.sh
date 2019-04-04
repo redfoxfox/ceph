@@ -718,6 +718,15 @@ function test_mon_misc()
   ceph --concise osd dump | grep '^epoch'
 
   ceph osd df | grep 'MIN/MAX VAR'
+  osd_class=$(ceph osd crush get-device-class 0)
+  ceph osd df tree class $osd_class | grep 'osd.0'
+  ceph osd crush rm-device-class 0
+  # create class first in case old device class may
+  # have already been automatically destroyed
+  ceph osd crush class create $osd_class
+  ceph osd df tree class $osd_class | expect_false grep 'osd.0'
+  ceph osd crush set-device-class $osd_class 0
+  ceph osd df tree name osd.0 | grep 'osd.0'
 
   # df
   ceph df > $TMPFILE
@@ -1168,6 +1177,19 @@ function test_mon_mon()
   expect_false ceph mon feature set abcd --yes-i-really-mean-it
 }
 
+function test_mon_priority_and_weight()
+{
+    for i in 0 1 65535; do
+      ceph mon set-weight a $i
+      w=$(ceph mon dump --format=json-pretty 2>/dev/null | jq '.mons[0].weight')
+      [[ "$w" == "$i" ]]
+    done
+
+    for i in -1 65536; do
+      expect_false ceph mon set-weight a $i
+    done
+}
+
 function gen_secrets_file()
 {
   # lets assume we can have the following types
@@ -1439,21 +1461,39 @@ function test_mon_osd()
   ceph osd deep-scrub 0
   ceph osd repair 0
 
-  for f in noup nodown noin noout noscrub nodeep-scrub nobackfill norebalance norecover notieragent full
+  # pool scrub, force-recovery/backfill
+  pool_names=`rados lspools`
+  for pool_name in $pool_names
+  do
+    ceph osd pool scrub $pool_name
+    ceph osd pool deep-scrub $pool_name
+    ceph osd pool repair $pool_name
+    ceph osd pool force-recovery $pool_name
+    ceph osd pool cancel-force-recovery $pool_name
+    ceph osd pool force-backfill $pool_name
+    ceph osd pool cancel-force-backfill $pool_name
+  done
+
+  for f in noup nodown noin noout noscrub nodeep-scrub nobackfill \
+	  norebalance norecover notieragent full
   do
     ceph osd set $f
     ceph osd unset $f
   done
-  expect_false ceph osd unset sortbitwise  # cannot be unset
   expect_false ceph osd set bogus
   expect_false ceph osd unset bogus
-  ceph osd require-osd-release nautilus
-  # can't lower (or use new command for anything but jewel)
-  expect_false ceph osd require-osd-release jewel
+  for f in sortbitwise recover_deletes require_jewel_osds \
+	  require_kraken_osds
+  do
+	expect_false ceph osd set $f
+	expect_false ceph osd unset $f
+  done
+  ceph osd require-osd-release octopus
+  # can't lower
+  expect_false ceph osd require-osd-release nautilus
+  expect_false ceph osd require-osd-release mimic
+  expect_false ceph osd require-osd-release luminous
   # these are no-ops but should succeed.
-  ceph osd set require_jewel_osds
-  ceph osd set require_kraken_osds
-  expect_false ceph osd unset require_jewel_osds
 
   ceph osd set noup
   ceph osd down 0
@@ -1999,6 +2039,8 @@ function test_mon_osd_pool_set()
   ceph osd pool get $TEST_POOL_GETSET recovery_priority | grep 'recovery_priority: 5'
   ceph osd pool set $TEST_POOL_GETSET recovery_priority 0
   ceph osd pool get $TEST_POOL_GETSET recovery_priority | expect_false grep '.'
+  expect_false ceph osd pool set $TEST_POOL_GETSET recovery_priority -1
+  expect_false ceph osd pool set $TEST_POOL_GETSET recovery_priority 30
 
   ceph osd pool get $TEST_POOL_GETSET recovery_op_priority | expect_false grep '.'
   ceph osd pool set $TEST_POOL_GETSET recovery_op_priority 5 
@@ -2204,6 +2246,16 @@ function test_mon_osd_erasure_code()
   # clean up
   ceph osd erasure-code-profile rm fooprofile
   ceph osd erasure-code-profile rm barprofile
+
+  # try weird k and m values
+  expect_false ceph osd erasure-code-profile set badk k=1 m=1
+  expect_false ceph osd erasure-code-profile set badk k=1 m=2
+  expect_false ceph osd erasure-code-profile set badk k=0 m=2
+  expect_false ceph osd erasure-code-profile set badk k=-1 m=2
+  expect_false ceph osd erasure-code-profile set badm k=2 m=0
+  expect_false ceph osd erasure-code-profile set badm k=2 m=-1
+  ceph osd erasure-code-profile set good k=2 m=1
+  ceph osd erasure-code-profile rm good
 }
 
 function test_mon_osd_misc()

@@ -36,7 +36,7 @@ class RGWSI_Zone : public RGWServiceInstance
 
   RGWRESTConn *rest_master_conn{nullptr};
   map<string, RGWRESTConn *> zone_conn_map;
-  map<string, RGWRESTConn *> zone_data_sync_from_map;
+  std::vector<const RGWZone*> data_sync_source_zones;
   map<string, RGWRESTConn *> zone_data_notify_to_map;
   map<string, RGWRESTConn *> zonegroup_conn_map;
 
@@ -89,8 +89,8 @@ public:
     return zone_conn_map;
   }
 
-  map<string, RGWRESTConn *>& get_zone_data_sync_from_map() {
-    return zone_data_sync_from_map;
+  std::vector<const RGWZone*>& get_data_sync_source_zones() {
+    return data_sync_source_zones;
   }
 
   map<string, RGWRESTConn *>& get_zone_data_notify_to_map() {
@@ -103,12 +103,14 @@ public:
   RGWRESTConn *get_zone_conn_by_name(const string& name);
   bool find_zone_id_by_name(const string& name, string *id);
 
-  int select_bucket_placement(const RGWUserInfo& user_info, const string& zonegroup_id, const string& rule,
-                              string *pselected_rule_name, RGWZonePlacementInfo *rule_info);
+  int select_bucket_placement(const RGWUserInfo& user_info, const string& zonegroup_id,
+                              const rgw_placement_rule& rule,
+                              rgw_placement_rule *pselected_rule, RGWZonePlacementInfo *rule_info);
   int select_legacy_bucket_placement(RGWZonePlacementInfo *rule_info);
-  int select_new_bucket_location(const RGWUserInfo& user_info, const string& zonegroup_id, const string& rule,
-                                 string *pselected_rule_name, RGWZonePlacementInfo *rule_info);
-  int select_bucket_location_by_rule(const string& location_rule, RGWZonePlacementInfo *rule_info);
+  int select_new_bucket_location(const RGWUserInfo& user_info, const string& zonegroup_id,
+                                 const rgw_placement_rule& rule,
+                                 rgw_placement_rule *pselected_rule_name, RGWZonePlacementInfo *rule_info);
+  int select_bucket_location_by_rule(const rgw_placement_rule& location_rule, RGWZonePlacementInfo *rule_info);
 
   int add_bucket_placement(const rgw_pool& new_pool);
   int remove_bucket_placement(const rgw_pool& old_pool);

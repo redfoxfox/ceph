@@ -450,7 +450,7 @@ int PoolReplayer<I>::init_rados(const std::string &cluster_name,
     }
   }
 
-  cct->_conf.parse_env();
+  cct->_conf.parse_env(cct->get_module_type());
 
   // librados::Rados::conf_parse_env
   std::vector<const char*> args;
@@ -461,7 +461,7 @@ int PoolReplayer<I>::init_rados(const std::string &cluster_name,
     cct->put();
     return r;
   }
-  cct->_conf.parse_env();
+  cct->_conf.parse_env(cct->get_module_type());
 
   if (!m_args.empty()) {
     // librados::Rados::conf_parse_argv
@@ -849,7 +849,13 @@ template <typename I>
 void PoolReplayer<I>::handle_init_remote_pool_watcher(
     int r, Context *on_finish) {
   dout(10) << "r=" << r << dendl;
-  if (r < 0) {
+  if (r == -ENOENT) {
+    // Technically nothing to do since the other side doesn't
+    // have mirroring enabled. Eventually the remote pool watcher will
+    // detect images (if mirroring is enabled), so no point propagating
+    // an error which would just busy-spin the state machines.
+    dout(0) << "remote peer does not have mirroring configured" << dendl;
+  } else if (r < 0) {
     derr << "failed to retrieve remote images: " << cpp_strerror(r) << dendl;
     on_finish = new FunctionContext([on_finish, r](int) {
         on_finish->complete(r);

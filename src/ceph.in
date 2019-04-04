@@ -22,7 +22,9 @@ Foundation.  See file COPYING.
 from __future__ import print_function
 from time import sleep
 import codecs
+import grp
 import os
+import pwd
 import sys
 import time
 import platform
@@ -37,12 +39,6 @@ CEPH_GIT_NICE_VER = "@CEPH_GIT_NICE_VER@"
 CEPH_RELEASE = "@CEPH_RELEASE@"
 CEPH_RELEASE_NAME = "@CEPH_RELEASE_NAME@"
 CEPH_RELEASE_TYPE = "@CEPH_RELEASE_TYPE@"
-
-# Flags from src/mon/Monitor.h
-FLAG_NOFORWARD = (1 << 0)
-FLAG_OBSOLETE = (1 << 1)
-FLAG_DEPRECATED = (1 << 2)
-FLAG_POLL = (1 << 4)
 
 # priorities from src/common/perf_counters.h
 PRIO_CRITICAL = 10
@@ -100,24 +96,28 @@ def get_pythonlib_dir():
     return "lib.{version[0]}".format(version=sys.version_info)
 
 
-def get_cmake_variables(names):
+def get_cmake_variables(*names):
     vars = dict((name, None) for name in names)
     for line in open(os.path.join(MYPDIR, "CMakeCache.txt")):
         # parse lines like "WITH_ASAN:BOOL=ON"
         for name in names:
             if line.startswith("{}:".format(name)):
-                vars[name] = line.split("=")[1].strip()
+                type_value = line.split(":")[1].strip()
+                t, v = type_value.split("=")
+                if t == 'BOOL':
+                    v = v.upper() in ('TRUE', '1', 'Y', 'YES', 'ON')
+                vars[name] = v
                 break
         if all(vars.values()):
             break
-    return vars
+    return [vars[name] for name in names]
 
 
 if os.path.exists(os.path.join(MYPDIR, "CMakeCache.txt")) \
      and os.path.exists(os.path.join(MYPDIR, "bin/init-ceph")):
-    vars = get_cmake_variables(["ceph_SOURCE_DIR", "ASAN_LIBRARY"])
-    src_path = vars["ceph_SOURCE_DIR"]
-    asan_lib_path = vars["ASAN_LIBRARY"]
+    src_path, build_type, with_seastar, with_asan, asan_lib_path = \
+        get_cmake_variables("ceph_SOURCE_DIR", "CMAKE_BUILD_TYPE",
+                            "WITH_SEASTAR", "WITH_ASAN", "ASAN_LIBRARY")
     if src_path is None:
         # Huh, maybe we're not really in a cmake environment?
         pass
@@ -129,8 +129,10 @@ if os.path.exists(os.path.join(MYPDIR, "CMakeCache.txt")) \
         pythonlib_path = os.path.join(lib_path,
                                       "cython_modules",
                                       get_pythonlib_dir())
-
-        respawn_in_path(lib_path, pybind_path, pythonlib_path, asan_lib_path)
+        if with_seastar and build_type == 'Debug':
+            with_asan = True
+        respawn_in_path(lib_path, pybind_path, pythonlib_path,
+                        asan_lib_path if with_asan else None)
 
         if 'PATH' in os.environ and bin_path not in os.environ['PATH']:
             os.environ['PATH'] = os.pathsep.join([bin_path, os.environ['PATH']])
@@ -147,7 +149,7 @@ import subprocess
 from ceph_argparse import \
     concise_sig, descsort_key, parse_json_funcsigs, \
     validate_command, find_cmd_target, \
-    json_command, run_in_thread
+    json_command, run_in_thread, Flag
 
 from ceph_daemon import admin_socket, DaemonWatcher, Termsize
 
@@ -294,7 +296,10 @@ def parse_cmdargs(args=None, target=''):
                         help='input file, or "-" for stdin')
     parser.add_argument('-o', '--out-file', dest='output_file',
                         help='output file, or "-" for stdout')
-
+    parser.add_argument('--setuser', dest='setuser',
+                        help='set user file permission')
+    parser.add_argument('--setgroup', dest='setgroup',
+                        help='set group file permission')
     parser.add_argument('--id', '--user', dest='client_id',
                         help='client id for authentication')
     parser.add_argument('--name', '-n', dest='client_name',
@@ -477,7 +482,7 @@ def format_help(cmddict, partial=None):
         if not cmd['help']:
             continue
         flags = cmd.get('flags', 0)
-        if flags & (FLAG_OBSOLETE | FLAG_DEPRECATED):
+        if flags & (Flag.OBSOLETE | Flag.DEPRECATED | Flag.HIDDEN):
             continue
         concise = concise_sig(cmd['sig'])
         if partial and not concise.startswith(partial):
@@ -620,9 +625,9 @@ def new_style_command(parsed_args, cmdargs, target, sigdict, inbuf, verbose):
             ret, outbuf, outs = do_command(parsed_args, target, cmdargs, sigdict, inbuf, verbose)
         else:
             # Interactive mode (ceph cli)
-            if sys.stdin.isatty():  
-                # do the command-interpreter looping    
-                # for input to do readline cmd editing    
+            if sys.stdin.isatty():
+                # do the command-interpreter looping
+                # for input to do readline cmd editing
                 import readline  # noqa
 
             while True:
@@ -1066,6 +1071,8 @@ def main():
         # an awfully simple callback
         def watch_cb(arg, line, channel, name, who, stamp_sec, stamp_nsec, seq, level, msg):
             # Filter on channel
+            if sys.version_info[0] >= 3:
+                channel = channel.decode('utf-8')
             if (channel == parsed_args.watch_channel or \
                            parsed_args.watch_channel == "*"):
                 print(line.decode('utf-8'))
@@ -1112,6 +1119,20 @@ def main():
         except Exception as e:
             print('Can\'t open output file {0}: {1}'.format(parsed_args.output_file, e), file=sys.stderr)
             return 1
+        if parsed_args.setuser:
+            try:
+                ownerid = pwd.getpwnam(parsed_args.setuser).pw_uid
+                os.fchown(outf.fileno(), ownerid, -1)
+            except OSError as e:
+                print('Failed to change user ownership of {0} to {1}: {2}'.format(outf, parsed_args.setuser, e))
+                return 1
+        if parsed_args.setgroup:
+            try:
+                groupid = grp.getgrnam(parsed_args.setgroup).gr_gid
+                os.fchown(outf.fileno(), -1, groupid)
+            except OSError as e:
+                print('Failed to change group ownership of {0} to {1}: {2}'.format(outf, parsed_args.setgroup, e))
+                return 1
 
     # -s behaves like a command (ceph status).
     if parsed_args.status:

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.5.1)
 
 project(ceph CXX C ASM)
-set(VERSION 13.1.0)
+set(VERSION 15.0.0)
 
 if(POLICY CMP0028)
   cmake_policy(SET CMP0028 NEW)
@@ -58,7 +58,7 @@ endif(WITH_CCACHE)
 option(WITH_MANPAGE "Build man pages." ON)
 if(WITH_MANPAGE)
   find_program(SPHINX_BUILD
-    sphinx-build)
+    NAMES sphinx-build sphinx-build-3)
   if(NOT SPHINX_BUILD)
     message(FATAL_ERROR "Can't find sphinx-build.")
   endif(NOT SPHINX_BUILD)
@@ -232,7 +232,7 @@ if(WITH_OPENLDAP)
   set(HAVE_OPENLDAP ${OPENLDAP_FOUND})
 endif()
 
-option(WITH_GSSAPI "GSSAPI/KRB5 is here" ON)
+option(WITH_GSSAPI "GSSAPI/KRB5 is here" OFF)
 if(WITH_GSSAPI)
   find_package(GSSApi REQUIRED)
   set(HAVE_GSSAPI ${GSSApi_FOUND})
@@ -403,12 +403,6 @@ set(USE_NSS 1)
 set(USE_OPENSSL 1)
 set(CRYPTO_LIBS ${NSS_LIBRARIES} ${NSPR_LIBRARIES} OpenSSL::Crypto)
 
-option(WITH_XIO "Enable XIO messaging" OFF)
-if(WITH_XIO)
-  find_package(xio REQUIRED)
-  set(HAVE_XIO ${XIO_FOUND})
-endif()
-
 option(WITH_DPDK "Enable DPDK messaging" OFF)
 if(WITH_DPDK)
   find_package(dpdk)
@@ -435,6 +429,7 @@ option(WITH_RADOSGW "Rados Gateway is enabled" ON)
 option(WITH_RADOSGW_FCGI_FRONTEND "Rados Gateway's FCGI frontend is enabled" OFF)
 option(WITH_RADOSGW_BEAST_FRONTEND "Rados Gateway's Beast frontend is enabled" ON)
 option(WITH_RADOSGW_BEAST_OPENSSL "Rados Gateway's Beast frontend uses OpenSSL" ON)
+option(WITH_RADOSGW_AMQP_ENDPOINT "Rados Gateway's pubsub support for AMQP push endpoint" ON)
 
 if(WITH_RADOSGW)
   find_package(EXPAT REQUIRED)
@@ -571,6 +566,7 @@ option(ENABLE_COVERAGE "Coverage is enabled" OFF)
 option(PG_DEBUG_REFS "PG Ref debugging is enabled" OFF)
 
 option(WITH_TESTS "enable the build of ceph-test package scripts/binaries" ON)
+set(UNIT_TESTS_BUILT ${WITH_TESTS})
 set(CEPH_TEST_TIMEOUT 3600 CACHE STRING 
   "Maximum time before a CTest gets killed" )
 
@@ -580,7 +576,10 @@ option(WITH_SYSTEM_FIO "require and build with system fio" OFF)
 if(WITH_SYSTEM_FIO)
   find_package(fio REQUIRED)
 elseif(WITH_FIO)
-  set(FIO_INCLUDE_DIR ${CMAKE_BINARY_DIR}/src/fio)
+  if (NOT FIO_INCLUDE_DIR)
+    # Use local external fio if include directory is not set
+    set(FIO_INCLUDE_DIR ${CMAKE_BINARY_DIR}/src/fio)
+  endif()
   include(BuildFIO)
   build_fio()
 endif()
@@ -683,7 +682,7 @@ endif()
 include_directories(SYSTEM ${PROJECT_BINARY_DIR}/include)
 
 find_package(Threads REQUIRED)
-
+find_package(StdFilesystem)
 
 option(WITH_SELINUX "build SELinux policy" OFF)
 if(WITH_SELINUX)

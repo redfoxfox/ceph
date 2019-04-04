@@ -59,11 +59,6 @@ class FlagSetHandler : public FileSystemCommandHandler
         return r;
       }
 
-      bool jewel = mon->get_quorum_con_features() & CEPH_FEATURE_SERVER_JEWEL;
-      if (flag_bool && !jewel) {
-        ss << "Multiple-filesystems are forbidden until all mons are updated";
-        return -EINVAL;
-      }
       if (!sure) {
 	ss << EXPERIMENTAL_WARNING;
       }
@@ -73,6 +68,63 @@ class FlagSetHandler : public FileSystemCommandHandler
       ss << "Unknown flag '" << flag_name << "'";
       return -EINVAL;
     }
+  }
+};
+
+class FailHandler : public FileSystemCommandHandler
+{
+  public:
+  FailHandler()
+    : FileSystemCommandHandler("fs fail")
+  {
+  }
+
+  int handle(
+      Monitor* mon,
+      FSMap& fsmap,
+      MonOpRequestRef op,
+      const cmdmap_t& cmdmap,
+      std::stringstream& ss) override
+  {
+    if (!mon->osdmon()->is_writeable()) {
+      // not allowed to write yet, so retry when we can
+      mon->osdmon()->wait_for_writeable(op, new PaxosService::C_RetryMessage(mon->mdsmon(), op));
+      return -EAGAIN;
+    }
+
+    std::string fs_name;
+    if (!cmd_getval(g_ceph_context, cmdmap, "fs_name", fs_name) || fs_name.empty()) {
+      ss << "Missing filesystem name";
+      return -EINVAL;
+    }
+
+    auto fs = fsmap.get_filesystem(fs_name);
+    if (fs == nullptr) {
+      ss << "Not found: '" << fs_name << "'";
+      return -ENOENT;
+    }
+
+    auto f = [](auto fs) {
+      fs->mds_map.set_flag(CEPH_MDSMAP_NOT_JOINABLE);
+    };
+    fsmap.modify_filesystem(fs->fscid, std::move(f));
+
+    std::vector<mds_gid_t> to_fail;
+    for (const auto& p : fs->mds_map.get_mds_info()) {
+      to_fail.push_back(p.first);
+    }
+
+    for (const auto& gid : to_fail) {
+      mon->mdsmon()->fail_mds_gid(fsmap, gid);
+    }
+    if (!to_fail.empty()) {
+      mon->osdmon()->propose_pending();
+    }
+
+    ss << fs_name;
+    ss << " marked not joinable; MDS cannot join the cluster. All MDS ranks marked failed.";
+
+    return 0;
   }
 };
 
@@ -160,7 +212,7 @@ class FsNewHandler : public FileSystemCommandHandler
       return -EINVAL;
     }
 
-    for (auto fs : fsmap.get_filesystems()) {
+    for (auto& fs : fsmap.get_filesystems()) {
       const std::vector<int64_t> &data_pools = fs->mds_map.get_data_pools();
 
       bool sure = false;
@@ -205,21 +257,20 @@ class FsNewHandler : public FileSystemCommandHandler
     mon->osdmon()->propose_pending();
 
     // All checks passed, go ahead and create.
-    auto fs = fsmap.create_filesystem(fs_name, metadata, data,
+    auto&& fs = fsmap.create_filesystem(fs_name, metadata, data,
         mon->get_quorum_con_features());
 
     ss << "new fs with metadata pool " << metadata << " and data pool " << data;
 
     // assign a standby to rank 0 to avoid health warnings
     std::string _name;
-    mds_gid_t gid = fsmap.find_replacement_for({fs->fscid, 0}, _name,
-        g_conf()->mon_force_standby_active);
+    mds_gid_t gid = fsmap.find_replacement_for({fs->fscid, 0}, _name);
 
     if (gid != MDS_GID_NONE) {
       const auto &info = fsmap.get_info_gid(gid);
       mon->clog->info() << info.human_name() << " assigned to filesystem "
           << fs_name << " as rank 0";
-      fsmap.promote(gid, fs, 0);
+      fsmap.promote(gid, *fs, 0);
     }
 
     return 0;
@@ -532,6 +583,21 @@ public:
       {
         fs->mds_map.set_session_autoclose((uint32_t)n);
       });
+    } else if (var == "allow_standby_replay") {
+      bool allow = false;
+      int r = parse_bool(val, &allow, ss);
+      if (r != 0) {
+        return r;
+      }
+
+      auto f = [allow](auto& fs) {
+        if (allow) {
+          fs->mds_map.set_standby_replay_allowed();
+        } else {
+          fs->mds_map.clear_standby_replay_allowed();
+        }
+      };
+      fsmap.modify_filesystem(fs->fscid, std::move(f));
     } else if (var == "min_compat_client") {
       int vno = ceph_release_from_name(val.c_str());
       if (vno <= 0) {
@@ -677,6 +743,13 @@ class RemoveFilesystemHandler : public FileSystemCommandHandler
       const cmdmap_t& cmdmap,
       std::stringstream &ss) override
   {
+    /* We may need to blacklist ranks. */
+    if (!mon->osdmon()->is_writeable()) {
+      // not allowed to write yet, so retry when we can
+      mon->osdmon()->wait_for_writeable(op, new PaxosService::C_RetryMessage(mon->mdsmon(), op));
+      return -EAGAIN;
+    }
+
     // Check caller has correctly named the FS to delete
     // (redundant while there is only one FS, but command
     //  syntax should apply to multi-FS future)
@@ -691,7 +764,7 @@ class RemoveFilesystemHandler : public FileSystemCommandHandler
 
     // Check that no MDS daemons are active
     if (fs->mds_map.get_num_up_mds() > 0) {
-      ss << "all MDS daemons must be inactive before removing filesystem";
+      ss << "all MDS daemons must be inactive/failed before removing filesystem. See `ceph fs fail`.";
       return -EINVAL;
     }
 
@@ -719,6 +792,9 @@ class RemoveFilesystemHandler : public FileSystemCommandHandler
       // Standby replays don't write, so it isn't important to
       // wait for an osdmap propose here: ignore return value.
       mon->mdsmon()->fail_mds_gid(fsmap, gid);
+    }
+    if (!to_fail.empty()) {
+      mon->osdmon()->propose_pending(); /* maybe new blacklists */
     }
 
     fsmap.erase_filesystem(fs->fscid);
@@ -878,6 +954,7 @@ FileSystemCommandHandler::load(Paxos *paxos)
   std::list<std::shared_ptr<FileSystemCommandHandler> > handlers;
 
   handlers.push_back(std::make_shared<SetHandler>());
+  handlers.push_back(std::make_shared<FailHandler>());
   handlers.push_back(std::make_shared<FlagSetHandler>());
   handlers.push_back(std::make_shared<AddDataPoolHandler>(paxos));
   handlers.push_back(std::make_shared<RemoveDataPoolHandler>());
@@ -890,30 +967,6 @@ FileSystemCommandHandler::load(Paxos *paxos)
         "fs set_default"));
 
   return handlers;
-}
-
-int FileSystemCommandHandler::parse_bool(
-      const std::string &bool_str,
-      bool *result,
-      std::ostream &ss)
-{
-  ceph_assert(result != nullptr);
-
-  string interr;
-  int64_t n = strict_strtoll(bool_str.c_str(), 10, &interr);
-
-  if (bool_str == "false" || bool_str == "no"
-      || (interr.length() == 0 && n == 0)) {
-    *result = false;
-    return 0;
-  } else if (bool_str == "true" || bool_str == "yes"
-      || (interr.length() == 0 && n == 1)) {
-    *result = true;
-    return 0;
-  } else {
-    ss << "value must be false|no|0 or true|yes|1";
-    return -EINVAL;
-  }
 }
 
 int FileSystemCommandHandler::_check_pool(

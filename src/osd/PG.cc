@@ -152,7 +152,10 @@ void PGStateHistory::dump(Formatter* f) const {
 
 void PG::get(const char* tag)
 {
-  ref++;
+  int after = ++ref;
+  lgeneric_subdout(cct, refs, 5) << "PG::get " << this << " "
+				 << "tag " << (tag ? tag : "(none") << " "
+				 << (after - 1) << " -> " << after << dendl;
 #ifdef PG_DEBUG_REFS
   std::lock_guard l(_ref_id_lock);
   _tag_counts[tag]++;
@@ -172,7 +175,13 @@ void PG::put(const char* tag)
     }
   }
 #endif
-  if (--ref== 0)
+  auto local_cct = cct;
+  int after = --ref;
+  lgeneric_subdout(local_cct, refs, 5) << "PG::put " << this << " "
+				       << "tag " << (tag ? tag : "(none") << " "
+				       << (after + 1) << " -> " << after
+				       << dendl;
+  if (after == 0)
     delete this;
 }
 
@@ -185,7 +194,10 @@ uint64_t PG::get_with_id()
   BackTrace bt(0);
   stringstream ss;
   bt.print(ss);
-  dout(20) << __func__ << ": " << info.pgid << " got id " << id << " (new) ref==" << ref << dendl;
+  lgeneric_subdout(cct, refs, 5) << "PG::get " << this << " " << info.pgid
+				 << " got id " << id << " "
+				 << (ref - 1) << " -> " << ref
+				 << dendl;
   ceph_assert(!_live_ids.count(id));
   _live_ids.insert(make_pair(id, ss.str()));
   return id;
@@ -193,13 +205,17 @@ uint64_t PG::get_with_id()
 
 void PG::put_with_id(uint64_t id)
 {
-  dout(20) << __func__ << ": " << info.pgid << " put id " << id << " (current) ref==" << ref << dendl;
+  int newref = --ref;
+  lgeneric_subdout(cct, refs, 5) << "PG::put " << this << " " << info.pgid
+				 << " put id " << id << " "
+				 << (newref + 1) << " -> " << newref
+				 << dendl;
   {
     std::lock_guard l(_ref_id_lock);
     ceph_assert(_live_ids.count(id));
     _live_ids.erase(id);
   }
-  if (--ref == 0)
+  if (newref)
     delete this;
 }
 
@@ -578,14 +594,13 @@ bool PG::search_for_missing(
       oinfo.last_update != eversion_t()) {
     pg_info_t tinfo(oinfo);
     tinfo.pgid.shard = pg_whoami.shard;
-    (*(ctx->info_map))[from.osd].push_back(
-      make_pair(
+    (*(ctx->info_map))[from.osd].emplace_back(
 	pg_notify_t(
 	  from.shard, pg_whoami.shard,
 	  get_osdmap_epoch(),
 	  get_osdmap_epoch(),
 	  tinfo),
-	past_intervals));
+	past_intervals);
   }
   return found_missing;
 }
@@ -697,12 +712,10 @@ bool PG::MissingLoc::add_source_info(
 			 << ")" << dendl;
       continue;
     }
-    if (oinfo.last_complete < need) {
-      if (omissing.is_missing(soid)) {
-	ldout(pg->cct, 10) << "search_for_missing " << soid << " " << need
-			   << " also missing on osd." << fromosd << dendl;
-	continue;
-      }
+    if (omissing.is_missing(soid)) {
+      ldout(pg->cct, 10) << "search_for_missing " << soid << " " << need
+			 << " also missing on osd." << fromosd << dendl;
+      continue;
     }
 
     ldout(pg->cct, 10) << "search_for_missing " << soid << " " << need
@@ -966,6 +979,7 @@ void PG::remove_down_peer_info(const OSDMapRef osdmap)
       peer_missing.erase(p->first);
       peer_log_requested.erase(p->first);
       peer_missing_requested.erase(p->first);
+      peer_purged.erase(p->first); // so we can re-purge if necessary
       peer_info.erase(p++);
       removed = true;
     } else
@@ -1074,6 +1088,7 @@ void PG::clear_primary_state()
   peer_log_requested.clear();
   peer_missing_requested.clear();
   peer_info.clear();
+  peer_bytes.clear();
   peer_missing.clear();
   need_up_thru = false;
   peer_last_complete_ondisk.clear();
@@ -1108,6 +1123,8 @@ PG::Scrubber::Scrubber()
    shallow_errors(0), deep_errors(0), fixed(0),
    must_scrub(false), must_deep_scrub(false), must_repair(false),
    auto_repair(false),
+   check_repair(false),
+   deep_scrub_on_error(false),
    num_digest_updates_pending(0),
    state(INACTIVE),
    deep(false)
@@ -1427,7 +1444,7 @@ void PG::calc_replicated_acting(
       ss << " shard " << acting_cand << " (acting) REJECTED "
 	 << cur_info << std::endl;
     } else {
-      candidate_by_last_update.push_back(make_pair(cur_info.last_update, i));
+      candidate_by_last_update.emplace_back(cur_info.last_update, i);
     }
   }
 
@@ -1473,8 +1490,7 @@ void PG::calc_replicated_acting(
       ss << " shard " << i.first << " (stray) REJECTED " << i.second
          << std::endl;
     } else {
-      candidate_by_last_update.push_back(
-        make_pair(i.second.last_update, i.first.osd));
+      candidate_by_last_update.emplace_back(i.second.last_update, i.first.osd);
     }
   }
 
@@ -1571,7 +1587,7 @@ void PG::choose_async_recovery_ec(const map<pg_shard_t, pg_info_t> &all_info,
     }
     if (static_cast<uint64_t>(approx_missing_objects) >
 	cct->_conf.get_val<uint64_t>("osd_async_recovery_min_cost")) {
-      candidates_by_cost.insert(make_pair(approx_missing_objects, shard_i));
+      candidates_by_cost.emplace(approx_missing_objects, shard_i);
     }
   }
 
@@ -1624,7 +1640,7 @@ void PG::choose_async_recovery_replicated(const map<pg_shard_t, pg_info_t> &all_
     }
     if (static_cast<uint64_t>(approx_missing_objects)  >
 	cct->_conf.get_val<uint64_t>("osd_async_recovery_min_cost")) {
-      candidates_by_cost.insert(make_pair(approx_missing_objects, shard_i));
+      candidates_by_cost.emplace(approx_missing_objects, shard_i);
     }
   }
 
@@ -1704,7 +1720,7 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id,
   set<pg_shard_t> want_backfill, want_acting_backfill;
   vector<int> want;
   stringstream ss;
-  if (!pool.info.is_erasure())
+  if (pool.info.is_replicated())
     calc_replicated_acting(
       auth_log_shard,
       cct->_conf.get_val<uint64_t>(
@@ -1752,14 +1768,16 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id,
 	     << ", requesting pg_temp change" << dendl;
     want_acting = want;
 
-    if (want_acting == up) {
-      // There can't be any pending backfill if
-      // want is the same as crush map up OSDs.
-      ceph_assert(want_backfill.empty());
-      vector<int> empty;
-      osd->queue_want_pg_temp(info.pgid.pgid, empty);
-    } else
-      osd->queue_want_pg_temp(info.pgid.pgid, want);
+    if (!cct->_conf->osd_debug_no_acting_change) {
+      if (want_acting == up) {
+	// There can't be any pending backfill if
+	// want is the same as crush map up OSDs.
+	ceph_assert(want_backfill.empty());
+	vector<int> empty;
+	osd->queue_want_pg_temp(info.pgid.pgid, empty);
+      } else
+	osd->queue_want_pg_temp(info.pgid.pgid, want);
+    }
     return false;
   }
   want_acting.clear();
@@ -1964,14 +1982,13 @@ void PG::activate(ObjectStore::Transaction& t,
 			    << " to " << info.last_update;
 	if (!pi.is_empty() && activator_map) {
 	  dout(10) << "activate peer osd." << peer << " is up to date, queueing in pending_activators" << dendl;
-	  (*activator_map)[peer.osd].push_back(
-	    make_pair(
+	  (*activator_map)[peer.osd].emplace_back(
 	      pg_notify_t(
 		peer.shard, pg_whoami.shard,
 		get_osdmap_epoch(),
 		get_osdmap_epoch(),
 		info),
-	      past_intervals));
+	      past_intervals);
 	} else {
 	  dout(10) << "activate peer osd." << peer << " is up to date, but sending pg_log anyway" << dendl;
 	  m = new MOSDPGLog(
@@ -2004,7 +2021,9 @@ void PG::activate(ObjectStore::Transaction& t,
 	pi.last_interval_started = info.last_interval_started;
 	pi.history = info.history;
 	pi.hit_set = info.hit_set;
-	pi.stats.stats.clear();
+        // Save num_bytes for reservation request, can't be negative
+        peer_bytes[peer] = std::max<int64_t>(0, pi.stats.stats.sum.num_bytes);
+        pi.stats.stats.clear();
 
 	// initialize peer with our purged_snaps.
 	pi.purged_snaps = info.purged_snaps;
@@ -2231,7 +2250,7 @@ void PG::_activate_committed(epoch_t epoch, epoch_t activation_epoch)
       state_set(PG_STATE_PEERED);
     }
 
-    m->pg_list.push_back(make_pair(i, PastIntervals()));
+    m->pg_list.emplace_back(i, PastIntervals());
     osd->send_message_osd_cluster(get_primary().osd, m, get_osdmap_epoch());
 
     // waiters
@@ -2314,6 +2333,8 @@ bool PG::queue_scrub()
   if (is_scrubbing()) {
     return false;
   }
+  // An interrupted recovery repair could leave this set.
+  state_clear(PG_STATE_REPAIR);
   scrubber.priority = scrubber.must_scrub ?
          cct->_conf->osd_requested_scrub_priority : get_scrub_priority();
   scrubber.must_scrub = false;
@@ -2359,11 +2380,12 @@ void PG::try_mark_clean()
 	if (target) {
 	  ldout(cct, 10) << "ready to merge (target)" << dendl;
 	  osd->set_ready_to_merge_target(this,
+					 info.last_update,
 					 info.history.last_epoch_started,
 					 info.history.last_epoch_clean);
 	} else {
 	  ldout(cct, 10) << "ready to merge (source)" << dendl;
-	  osd->set_ready_to_merge_source(this);
+	  osd->set_ready_to_merge_source(this, info.last_update);
 	}
       }
     } else {
@@ -2398,6 +2420,10 @@ bool PG::set_force_recovery(bool b)
     publish_stats_to_osd();
     did = true;
   }
+  if (did) {
+    dout(20) << __func__ << " state " << pgstate_history.get_current_state() << dendl;
+    osd->local_reserver.update_priority(info.pgid, get_recovery_priority());
+  }
   return did;
 }
 
@@ -2405,20 +2431,24 @@ bool PG::set_force_backfill(bool b)
 {
   bool did = false;
   if (b) {
-    if (!(state & PG_STATE_FORCED_RECOVERY) &&
+    if (!(state & PG_STATE_FORCED_BACKFILL) &&
 	(state & (PG_STATE_DEGRADED |
 		  PG_STATE_BACKFILL_WAIT |
 		  PG_STATE_BACKFILLING))) {
       dout(10) << __func__ << " set" << dendl;
-      state_set(PG_STATE_FORCED_RECOVERY);
+      state_set(PG_STATE_FORCED_BACKFILL);
       publish_stats_to_osd();
       did = true;
     }
-  } else if (state & PG_STATE_FORCED_RECOVERY) {
+  } else if (state & PG_STATE_FORCED_BACKFILL) {
     dout(10) << __func__ << " clear" << dendl;
-    state_clear(PG_STATE_FORCED_RECOVERY);
+    state_clear(PG_STATE_FORCED_BACKFILL);
     publish_stats_to_osd();
     did = true;
+  }
+  if (did) {
+    dout(20) << __func__ << " state " << pgstate_history.get_current_state() << dendl;
+    osd->local_reserver.update_priority(info.pgid, get_backfill_priority());
   }
   return did;
 }
@@ -2458,7 +2488,7 @@ unsigned PG::get_backfill_priority()
   // a higher value -> a higher priority
   int ret = OSD_BACKFILL_PRIORITY_BASE;
   if (state & PG_STATE_FORCED_BACKFILL) {
-    ret = OSD_RECOVERY_PRIORITY_FORCED;
+    ret = OSD_BACKFILL_PRIORITY_FORCED;
   } else {
     if (acting.size() < pool.info.min_size) {
       // inactive: no. of replicas < min_size, highest priority since it blocks IO
@@ -2514,6 +2544,8 @@ Context *PG::finish_recovery()
 void PG::_finish_recovery(Context *c)
 {
   lock();
+  // When recovery is initiated by a repair, that flag is left on
+  state_clear(PG_STATE_REPAIR);
   if (deleting) {
     unlock();
     return;
@@ -2529,6 +2561,7 @@ void PG::_finish_recovery(Context *c)
       dout(10) << "_finish_recovery requeueing for scrub" << dendl;
       scrub_after_recovery = false;
       scrubber.must_deep_scrub = true;
+      scrubber.check_repair = true;
       queue_scrub();
     }
   } else {
@@ -2679,8 +2712,7 @@ void PG::finish_split_stats(const object_stat_sum_t& stats, ObjectStore::Transac
 
 void PG::merge_from(map<spg_t,PGRef>& sources, RecoveryCtx *rctx,
 		    unsigned split_bits,
-		    epoch_t dec_last_epoch_started,
-		    epoch_t dec_last_epoch_clean)
+		    const pg_merge_meta_t& last_pg_merge_meta)
 {
   dout(10) << __func__ << " from " << sources << " split_bits " << split_bits
 	   << dendl;
@@ -2690,6 +2722,20 @@ void PG::merge_from(map<spg_t,PGRef>& sources, RecoveryCtx *rctx,
       info.dne()) {
     dout(10) << __func__ << " target incomplete" << dendl;
     incomplete = true;
+  }
+  if (last_pg_merge_meta.source_pgid != pg_t()) {
+    if (info.pgid.pgid != last_pg_merge_meta.source_pgid.get_parent()) {
+      dout(10) << __func__ << " target doesn't match expected parent "
+	       << last_pg_merge_meta.source_pgid.get_parent()
+	       << " of source_pgid " << last_pg_merge_meta.source_pgid
+	       << dendl;
+      incomplete = true;
+    }
+    if (info.last_update != last_pg_merge_meta.target_version) {
+      dout(10) << __func__ << " target version doesn't match expected "
+	       << last_pg_merge_meta.target_version << dendl;
+      incomplete = true;
+    }
   }
 
   PGLogEntryHandler handler{this, rctx->transaction};
@@ -2713,6 +2759,19 @@ void PG::merge_from(map<spg_t,PGRef>& sources, RecoveryCtx *rctx,
       dout(10) << __func__ << " source " << source->pg_id << " incomplete"
 	       << dendl;
       incomplete = true;
+    }
+    if (last_pg_merge_meta.source_pgid != pg_t()) {
+      if (source->info.pgid.pgid != last_pg_merge_meta.source_pgid) {
+	dout(10) << __func__ << " source " << source->info.pgid.pgid
+		 << " doesn't match expected source pgid "
+		 << last_pg_merge_meta.source_pgid << dendl;
+	incomplete = true;
+      }
+      if (source->info.last_update != last_pg_merge_meta.source_version) {
+	dout(10) << __func__ << " source version doesn't match expected "
+		 << last_pg_merge_meta.target_version << dendl;
+	incomplete = true;
+      }
     }
 
     // prepare log
@@ -2765,9 +2824,25 @@ void PG::merge_from(map<spg_t,PGRef>& sources, RecoveryCtx *rctx,
     // remapped in concert with each other...
     info.history = sources.begin()->second->info.history;
 
-    // if the past_intervals start is later than last_epoch_clean, it implies
-    // the source repeered again but the target didn't.  avoid the discrepancy
-    // but adjusting the interval start backwards to match.
+    // we use the last_epoch_{started,clean} we got from
+    // the caller, which are the epochs that were reported by the PGs were
+    // found to be ready for merge.
+    info.history.last_epoch_clean = last_pg_merge_meta.last_epoch_clean;
+    info.history.last_epoch_started = last_pg_merge_meta.last_epoch_started;
+    info.last_epoch_started = last_pg_merge_meta.last_epoch_started;
+    dout(10) << __func__
+	     << " set les/c to " << last_pg_merge_meta.last_epoch_started << "/"
+	     << last_pg_merge_meta.last_epoch_clean
+	     << " from pool last_dec_*, source pg history was "
+	     << sources.begin()->second->info.history
+	     << dendl;
+
+    // if the past_intervals start is later than last_epoch_clean, it
+    // implies the source repeered again but the target didn't, or
+    // that the source became clean in a later epoch than the target.
+    // avoid the discrepancy but adjusting the interval start
+    // backwards to match so that check_past_interval_bounds() will
+    // not complain.
     auto pib = past_intervals.get_bounds();
     if (info.history.last_epoch_clean < pib.first) {
       dout(10) << __func__ << " last_epoch_clean "
@@ -2776,21 +2851,25 @@ void PG::merge_from(map<spg_t,PGRef>& sources, RecoveryCtx *rctx,
       past_intervals.adjust_start_backwards(info.history.last_epoch_clean);
     }
 
-    // we use the pg_num_dec_last_epoch_clean we got from the caller, which is
-    // the epoch that was clean according to the target pg whe it requested
-    // the mon decrement pg_num.
-    info.history.last_epoch_clean = dec_last_epoch_clean;
-
-    // use last_epoch_clean value for last_epoch_started, though--we must be
-    // conservative here to avoid breaking peering, calc_acting, etc.
-    info.history.last_epoch_started = dec_last_epoch_started;
-    info.last_epoch_started = dec_last_epoch_started;
-    dout(10) << __func__
-	     << " set les/c to " << dec_last_epoch_started << "/"
-	     << dec_last_epoch_clean
-	     << " from pool last_dec_*, source pg history was "
-	     << sources.begin()->second->info.history
-	     << dendl;
+    // Similarly, if the same_interval_since value is later than
+    // last_epoch_clean, the next interval change will result in a
+    // past_interval start that is later than last_epoch_clean.  This
+    // can happen if we use the pg_history values from the merge
+    // source.  Adjust the same_interval_since value backwards if that
+    // happens.  (We trust the les and lec values more because they came from
+    // the real target, whereas the history value we stole from the source.)
+    if (info.history.last_epoch_started < info.history.same_interval_since) {
+      dout(10) << __func__ << " last_epoch_started "
+	       << info.history.last_epoch_started << " < same_interval_since "
+	       << info.history.same_interval_since
+	       << ", adjusting pg_history backwards" << dendl;
+      info.history.same_interval_since = info.history.last_epoch_clean;
+      // make sure same_{up,primary}_since are <= same_interval_since
+      info.history.same_up_since = std::min(
+	info.history.same_up_since, info.history.same_interval_since);
+      info.history.same_primary_since = std::min(
+	info.history.same_primary_since, info.history.same_interval_since);
+    }
   }
 
   dirty_info = true;
@@ -2970,6 +3049,9 @@ void PG::purge_strays()
 	     << dendl;
     return;
   }
+  if (cct->_conf.get_val<bool>("osd_debug_no_purge_strays")) {
+    return;
+  }
   dout(10) << "purge_strays " << stray_set << dendl;
   
   bool removed = false;
@@ -3147,9 +3229,9 @@ void PG::_update_calc_stats()
       missing = pg_log.get_missing().num_missing();
       ceph_assert(acting_recovery_backfill.count(pg_whoami));
       if (upset.count(pg_whoami)) {
-        missing_target_objects.insert(make_pair(missing, pg_whoami));
+        missing_target_objects.emplace(missing, pg_whoami);
       } else {
-        acting_source_objects.insert(make_pair(missing, pg_whoami));
+        acting_source_objects.emplace(missing, pg_whoami);
       }
       info.stats.stats.sum.num_objects_missing_on_primary = missing;
       dout(20) << __func__ << " shard " << pg_whoami
@@ -3180,9 +3262,9 @@ void PG::_update_calc_stats()
         }
       }
       if (upset.count(peer.first)) {
-	missing_target_objects.insert(make_pair(missing, peer.first));
+	missing_target_objects.emplace(missing, peer.first);
       } else if (actingset.count(peer.first)) {
-	acting_source_objects.insert(make_pair(missing, peer.first));
+	acting_source_objects.emplace(missing, peer.first);
       }
       peer.second.stats.stats.sum.num_objects_missing = missing;
       dout(20) << __func__ << " shard " << peer.first
@@ -3201,14 +3283,14 @@ void PG::_update_calc_stats()
         for (auto& ml: sml.second) {
           int missing_shards;
           if (sml.first == shard_id_t::NO_SHARD) {
-            dout(0) << __func__ << " ml " << ml.second << " upset size " << upset.size() << " up " << ml.first.up << dendl;
+            dout(20) << __func__ << " ml " << ml.second << " upset size " << upset.size() << " up " << ml.first.up << dendl;
             missing_shards = (int)upset.size() - ml.first.up;
           } else {
 	    // Handle shards not even in upset below
             if (!find_shard(upset, sml.first))
 	      continue;
 	    missing_shards = std::max(0, 1 - ml.first.up);
-            dout(0) << __func__ << " shard " << sml.first << " ml " << ml.second << " missing shards " << missing_shards << dendl;
+            dout(20) << __func__ << " shard " << sml.first << " ml " << ml.second << " missing shards " << missing_shards << dendl;
           }
           int odegraded = ml.second * missing_shards;
           // Copies on other osds but limited to the possible degraded
@@ -3264,7 +3346,7 @@ void PG::_update_calc_stats()
       ceph_assert(target >= missing_target_objects.size());
       unsigned needed = target - missing_target_objects.size();
       if (needed)
-        missing_target_objects.insert(make_pair(num_objects * needed, pg_shard_t(pg_shard_t::NO_OSD)));
+        missing_target_objects.emplace(num_objects * needed, pg_shard_t(pg_shard_t::NO_OSD));
     } else {
       for (unsigned i = 0 ; i < num_shards; ++i) {
         shard_id_t shard(i);
@@ -3276,7 +3358,7 @@ void PG::_update_calc_stats()
 	  }
 	}
 	if (!found)
-	  missing_target_objects.insert(make_pair(num_objects, pg_shard_t(pg_shard_t::NO_OSD,shard)));
+	  missing_target_objects.emplace(num_objects, pg_shard_t(pg_shard_t::NO_OSD,shard));
       }
     }
 
@@ -3369,8 +3451,10 @@ void PG::publish_stats_to_osd()
 
   if (info.stats.stats.sum.num_scrub_errors)
     state_set(PG_STATE_INCONSISTENT);
-  else
+  else {
     state_clear(PG_STATE_INCONSISTENT);
+    state_clear(PG_STATE_FAILED_REPAIR);
+  }
 
   utime_t now = ceph_clock_now();
   if (info.stats.state != state) {
@@ -3810,11 +3894,16 @@ void PG::append_log(
 
   PGLogEntryHandler handler{this, &t};
   if (!transaction_applied) {
-     /* We must be a backfill peer, so it's ok if we apply
+     /* We must be a backfill or async recovery peer, so it's ok if we apply
       * out-of-turn since we won't be considered when
       * determining a min possible last_update.
+      *
+      * We skip_rollforward() here, which advances the crt, without
+      * doing an actual rollforward. This avoids cleaning up entries
+      * from the backend and we do not end up in a situation, where the
+      * object is deleted before we can _merge_object_divergent_entries().
       */
-    pg_log.roll_forward(&handler);
+    pg_log.skip_rollforward();
   }
 
   for (vector<pg_log_entry_t>::const_iterator p = logv.begin();
@@ -4232,19 +4321,23 @@ bool PG::sched_scrub()
     }
   }
 
+  // Clear these in case user issues the scrub/repair command during
+  // the scheduling of the scrub/repair (e.g. request reservation)
+  scrubber.deep_scrub_on_error = false;
+  scrubber.auto_repair = false;
   if (cct->_conf->osd_scrub_auto_repair
       && get_pgbackend()->auto_repair_supported()
-      && time_for_deep
       // respect the command from user, and not do auto-repair
       && !scrubber.must_repair
       && !scrubber.must_scrub
       && !scrubber.must_deep_scrub) {
-    dout(20) << __func__ << ": auto repair with deep scrubbing" << dendl;
-    scrubber.auto_repair = true;
-  } else {
-    // this happens when user issue the scrub/repair command during
-    // the scheduling of the scrub/repair (e.g. request reservation)
-    scrubber.auto_repair = false;
+    if (time_for_deep) {
+      dout(20) << __func__ << ": auto repair with deep scrubbing" << dendl;
+      scrubber.auto_repair = true;
+    } else {
+      dout(20) << __func__ << ": auto repair with scrubbing, rescrub if errors found" << dendl;
+      scrubber.deep_scrub_on_error = true;
+    }
   }
 
   bool ret = true;
@@ -4469,8 +4562,25 @@ void PG::handle_scrub_reserve_release(OpRequestRef op)
   clear_scrub_reserved();
 }
 
+// We can zero the value of primary num_bytes as just an atomic.
+// However, setting above zero reserves space for backfill and requires
+// the OSDService::stat_lock which protects all OSD usage
+void PG::set_reserved_num_bytes(int64_t primary, int64_t local) {
+  ceph_assert(osd->stat_lock.is_locked_by_me());
+  primary_num_bytes.store(primary);
+  local_num_bytes.store(local);
+  return;
+}
+
+void PG::clear_reserved_num_bytes() {
+  primary_num_bytes.store(0);
+  local_num_bytes.store(0);
+  return;
+}
+
 void PG::reject_reservation()
 {
+  clear_reserved_num_bytes();
   osd->send_message_osd_cluster(
     primary.osd,
     new MBackfillReserve(
@@ -4553,12 +4663,12 @@ void PG::_scan_rollback_obs(const vector<ghobject_t> &rollback_obs)
        i != rollback_obs.end();
        ++i) {
     if (i->generation < trimmed_to.version) {
-      osd->clog->error() << "osd." << osd->whoami
-			<< " pg " << info.pgid
-			<< " found obsolete rollback obj "
-			<< *i << " generation < trimmed_to "
-			<< trimmed_to
-			<< "...repaired";
+      dout(10) << __func__ << "osd." << osd->whoami
+	       << " pg " << info.pgid
+	       << " found obsolete rollback obj "
+	       << *i << " generation < trimmed_to "
+	       << trimmed_to
+	       << "...repaired" << dendl;
       t.remove(coll, *i);
     }
   }
@@ -5437,11 +5547,12 @@ bool PG::range_intersects_scrub(const hobject_t &start, const hobject_t& end)
 	  end >= scrubber.start);
 }
 
-void PG::scrub_clear_state()
+void PG::scrub_clear_state(bool has_error)
 {
   ceph_assert(is_locked());
   state_clear(PG_STATE_SCRUBBING);
-  state_clear(PG_STATE_REPAIR);
+  if (!has_error)
+    state_clear(PG_STATE_REPAIR);
   state_clear(PG_STATE_DEEP_SCRUB);
   publish_stats_to_osd();
 
@@ -5488,8 +5599,9 @@ void PG::scrub_compare_maps()
   }
 
   stringstream ss;
-  get_pgbackend()->be_large_omap_check(maps, master_set,
-                                       scrubber.large_omap_objects, ss);
+  get_pgbackend()->be_omap_checks(maps, master_set,
+                                  scrubber.omap_stats, ss);
+
   if (!ss.str().empty()) {
     osd->clog->warn(ss);
   }
@@ -5532,12 +5644,9 @@ void PG::scrub_compare_maps()
       for (list<pg_shard_t>::const_iterator j = i->second.begin();
 	   j != i->second.end();
 	   ++j) {
-	good_peers.push_back(make_pair(maps[*j]->objects[i->first], *j));
+	good_peers.emplace_back(maps[*j]->objects[i->first], *j);
       }
-      scrubber.authoritative.insert(
-	make_pair(
-	  i->first,
-	  good_peers));
+      scrubber.authoritative.emplace(i->first, good_peers);
     }
 
     for (map<hobject_t, list<pg_shard_t>>::iterator i = authoritative.begin();
@@ -5628,7 +5737,9 @@ bool PG::ops_blocked_by_scrub() const {
 // the part that actually finalizes a scrub
 void PG::scrub_finish() 
 {
+  dout(20) << __func__ << dendl;
   bool repair = state_test(PG_STATE_REPAIR);
+  bool do_deep_scrub = false;
   // if the repair request comes from auto-repair and large number of errors,
   // we would like to cancel auto-repair
   if (repair && scrubber.auto_repair
@@ -5638,6 +5749,15 @@ void PG::scrub_finish()
   }
   bool deep_scrub = state_test(PG_STATE_DEEP_SCRUB);
   const char *mode = (repair ? "repair": (deep_scrub ? "deep-scrub" : "scrub"));
+
+  // if a regular scrub had errors within the limit, do a deep scrub to auto repair.
+  if (scrubber.deep_scrub_on_error
+      && scrubber.authoritative.size() <= cct->_conf->osd_scrub_auto_repair_num_errors) {
+    ceph_assert(!deep_scrub);
+    scrubber.deep_scrub_on_error = false;
+    do_deep_scrub = true;
+    dout(20) << __func__ << " Try to auto repair after scrub errors" << dendl;
+  }
 
   // type-specific finish (can tally more errors)
   _scrub_finish();
@@ -5678,9 +5798,17 @@ void PG::scrub_finish()
     if (scrubber.fixed == scrubber.shallow_errors + scrubber.deep_errors) {
       ceph_assert(deep_scrub);
       scrubber.shallow_errors = scrubber.deep_errors = 0;
-    } else {
+      dout(20) << __func__ << " All may be fixed" << dendl;
+    } else if (has_error) {
       // Deep scrub in order to get corrected error counts
       scrub_after_recovery = true;
+      dout(20) << __func__ << " Set scrub_after_recovery" << dendl;
+    } else if (scrubber.shallow_errors || scrubber.deep_errors) {
+      // We have errors but nothing can be fixed, so there is no repair
+      // possible.
+      state_set(PG_STATE_FAILED_REPAIR);
+      dout(10) << __func__ << " " << (scrubber.shallow_errors + scrubber.deep_errors)
+	       << " error(s) present with no repair possible" << dendl;
     }
   }
   if (deep_scrub) {
@@ -5688,7 +5816,12 @@ void PG::scrub_finish()
       info.history.last_clean_scrub_stamp = now;
     info.stats.stats.sum.num_shallow_scrub_errors = scrubber.shallow_errors;
     info.stats.stats.sum.num_deep_scrub_errors = scrubber.deep_errors;
-    info.stats.stats.sum.num_large_omap_objects = scrubber.large_omap_objects;
+    info.stats.stats.sum.num_large_omap_objects = scrubber.omap_stats.large_omap_objects;
+    info.stats.stats.sum.num_omap_bytes = scrubber.omap_stats.omap_bytes;
+    info.stats.stats.sum.num_omap_keys = scrubber.omap_stats.omap_keys;
+    dout(25) << __func__ << " shard " << pg_whoami << " num_omap_bytes = "
+             << info.stats.stats.sum.num_omap_bytes << " num_omap_keys = "
+             << info.stats.stats.sum.num_omap_keys << dendl;
   } else {
     info.stats.stats.sum.num_shallow_scrub_errors = scrubber.shallow_errors;
     // XXX: last_clean_scrub_stamp doesn't mean the pg is not inconsistent
@@ -5699,6 +5832,22 @@ void PG::scrub_finish()
   info.stats.stats.sum.num_scrub_errors = 
     info.stats.stats.sum.num_shallow_scrub_errors +
     info.stats.stats.sum.num_deep_scrub_errors;
+  if (scrubber.check_repair) {
+    scrubber.check_repair = false;
+    if (info.stats.stats.sum.num_scrub_errors) {
+      state_set(PG_STATE_FAILED_REPAIR);
+      dout(10) << __func__ << " " << info.stats.stats.sum.num_scrub_errors
+	       << " error(s) still present after re-scrub" << dendl;
+    }
+  }
+  publish_stats_to_osd();
+  if (do_deep_scrub) {
+    // XXX: Auto scrub won't activate if must_scrub is set, but
+    // setting the scrub stamps affects what users see.
+    utime_t stamp = utime_t(0,1);
+    set_last_scrub_stamp(stamp);
+    set_last_deep_scrub_stamp(stamp);
+  }
   reg_next_scrub();
 
   {
@@ -5719,7 +5868,7 @@ void PG::scrub_finish()
 	  DoRecovery())));
   }
 
-  scrub_clear_state();
+  scrub_clear_state(has_error);
   scrub_unreserve_replicas();
 
   if (is_active() && is_primary()) {
@@ -5745,14 +5894,13 @@ void PG::share_pg_info()
       peer->second.history.merge(info.history);
     }
     MOSDPGInfo *m = new MOSDPGInfo(get_osdmap_epoch());
-    m->pg_list.push_back(
-      make_pair(
+    m->pg_list.emplace_back(
 	pg_notify_t(
 	  pg_shard.shard, pg_whoami.shard,
 	  get_osdmap_epoch(),
 	  get_osdmap_epoch(),
 	  info),
-	past_intervals));
+	past_intervals);
     osd->send_message_osd_cluster(pg_shard.osd, m, get_osdmap_epoch());
   }
 }
@@ -6361,6 +6509,10 @@ ostream& operator<<(ostream& out, const PG& pg)
     out << " MUST_REPAIR";
   if (pg.scrubber.auto_repair)
     out << " AUTO_REPAIR";
+  if (pg.scrubber.check_repair)
+    out << " CHECK_REPAIR";
+  if (pg.scrubber.deep_scrub_on_error)
+    out << " DEEP_SCRUB_ON_ERROR";
   if (pg.scrubber.must_deep_scrub)
     out << " MUST_DEEP_SCRUB";
   if (pg.scrubber.must_scrub)
@@ -6836,6 +6988,41 @@ void PG::_delete_some(ObjectStore::Transaction *t)
   }
 }
 
+// Compute pending backfill data
+static int64_t pending_backfill(CephContext *cct, int64_t bf_bytes, int64_t local_bytes)
+{
+    lgeneric_dout(cct, 20) << __func__ << " Adjust local usage " << (local_bytes >> 10) << "KiB"
+		               << " primary usage " << (bf_bytes >> 10) << "KiB" << dendl;
+    return std::max((int64_t)0, bf_bytes - local_bytes);
+}
+
+int PG::pg_stat_adjust(osd_stat_t *ns)
+{
+  osd_stat_t &new_stat = *ns;
+  if (is_primary()) {
+    return 0;
+  }
+  // Adjust the kb_used by adding pending backfill data
+  uint64_t reserved_num_bytes = get_reserved_num_bytes();
+
+  // For now we don't consider projected space gains here
+  // I suggest we have an optional 2 pass backfill that frees up
+  // space in a first pass.  This could be triggered when at nearfull
+  // or near to backfillfull.
+  if (reserved_num_bytes > 0) {
+    // TODO: Handle compression by adjusting by the PGs average
+    // compression precentage.
+    dout(20) << __func__ << " reserved_num_bytes " << (reserved_num_bytes >> 10) << "KiB"
+             << " Before kb_used " << new_stat.statfs.kb_used() << "KiB" << dendl;
+    if (new_stat.statfs.available > reserved_num_bytes)
+      new_stat.statfs.available -= reserved_num_bytes;
+    else
+      new_stat.statfs.available = 0;
+    dout(20) << __func__ << " After kb_used " << new_stat.statfs.kb_used() << "KiB" << dendl;
+    return 1;
+  }
+  return 0;
+}
 
 
 /*------------ Recovery State Machine----------------*/
@@ -7353,7 +7540,12 @@ PG::RecoveryState::Backfilling::react(const RemoteReservationRevoked &)
   PG *pg = context< RecoveryMachine >().pg;
   pg->state_set(PG_STATE_BACKFILL_WAIT);
   cancel_backfill();
-  return transit<WaitLocalBackfillReserved>();
+  if (pg->needs_backfill()) {
+    return transit<WaitLocalBackfillReserved>();
+  } else {
+    // raced with MOSDPGBackfill::OP_BACKFILL_FINISH, ignore
+    return discard_event();
+  }
 }
 
 void PG::RecoveryState::Backfilling::exit()
@@ -7387,6 +7579,8 @@ PG::RecoveryState::WaitRemoteBackfillReserved::react(const RemoteBackfillReserve
 {
   PG *pg = context< RecoveryMachine >().pg;
 
+  int64_t num_bytes = pg->info.stats.stats.sum.num_bytes;
+  ldout(pg->cct, 10) << __func__ << " num_bytes " << num_bytes << dendl;
   if (backfill_osd_it != context< Active >().remote_shards_to_reserve_backfill.end()) {
     //The primary never backfills itself
     ceph_assert(*backfill_osd_it != pg->pg_whoami);
@@ -7398,11 +7592,14 @@ PG::RecoveryState::WaitRemoteBackfillReserved::react(const RemoteBackfillReserve
 	MBackfillReserve::REQUEST,
 	spg_t(pg->info.pgid.pgid, backfill_osd_it->shard),
 	pg->get_osdmap_epoch(),
-	pg->get_backfill_priority()),
+	pg->get_backfill_priority(),
+        num_bytes,
+        pg->peer_bytes[*backfill_osd_it]),
       con.get());
     }
     ++backfill_osd_it;
   } else {
+    pg->peer_bytes.clear();
     post_event(AllBackfillsReserved());
   }
   return discard_event();
@@ -7497,6 +7694,7 @@ PG::RecoveryState::NotBackfilling::NotBackfilling(my_context ctx)
 {
   context< RecoveryMachine >().log_enter(state_name);
   PG *pg = context< RecoveryMachine >().pg;
+  pg->state_clear(PG_STATE_REPAIR);
   pg->publish_stats_to_osd();
 }
 
@@ -7592,6 +7790,7 @@ PG::RecoveryState::RepWaitRecoveryReserved::react(
   const RemoteReservationCanceled &evt)
 {
   PG *pg = context< RecoveryMachine >().pg;
+  pg->clear_reserved_num_bytes();
   pg->osd->remote_reserver.cancel_reservation(pg->info.pgid);
   return transit<RepNotRecovering>();
 }
@@ -7616,18 +7815,64 @@ boost::statechart::result
 PG::RecoveryState::RepNotRecovering::react(const RequestBackfillPrio &evt)
 {
   PG *pg = context< RecoveryMachine >().pg;
+  // Use tentative_bacfill_full() to make sure enough
+  // space is available to handle target bytes from primary.
+
+  // TODO: If we passed num_objects from primary we could account for
+  // an estimate of the metadata overhead.
+
+  // TODO: If we had compressed_allocated and compressed_original from primary
+  // we could compute compression ratio and adjust accordingly.
+
+  // XXX: There is no way to get omap overhead and this would only apply
+  // to whatever possibly different partition that is storing the database.
+
+  // update_osd_stat() from heartbeat will do this on a new
+  // statfs using pg->primary_num_bytes.
+  uint64_t pending_adjustment = 0;
+  int64_t primary_num_bytes = evt.primary_num_bytes;
+  int64_t local_num_bytes = evt.local_num_bytes;
+  if (primary_num_bytes) {
+    // For erasure coded pool overestimate by a full stripe per object
+    // because we don't know how each objected rounded to the nearest stripe
+    if (pg->pool.info.is_erasure()) {
+      primary_num_bytes /= (int)pg->get_pgbackend()->get_ec_data_chunk_count();
+      primary_num_bytes += pg->get_pgbackend()->get_ec_stripe_chunk_size() * pg->info.stats.stats.sum.num_objects;
+      local_num_bytes /= (int)pg->get_pgbackend()->get_ec_data_chunk_count();
+      local_num_bytes += pg->get_pgbackend()->get_ec_stripe_chunk_size() * pg->info.stats.stats.sum.num_objects;
+    }
+    pending_adjustment = pending_backfill(pg->cct, primary_num_bytes, local_num_bytes);
+    ldout(pg->cct, 10) << __func__ << " primary_num_bytes " << (primary_num_bytes >> 10) << "KiB"
+                       << " local " << (local_num_bytes >> 10) << "KiB"
+                       << " pending_adjustments " << (pending_adjustment >> 10) << "KiB"
+                       << dendl;
+  }
+  // This lock protects not only the stats OSDService but also setting the pg primary_num_bytes
+  // That's why we don't immediately unlock
+  Mutex::Locker l(pg->osd->stat_lock);
+  osd_stat_t cur_stat = pg->osd->osd_stat;
   if (pg->cct->_conf->osd_debug_reject_backfill_probability > 0 &&
       (rand()%1000 < (pg->cct->_conf->osd_debug_reject_backfill_probability*1000.0))) {
     ldout(pg->cct, 10) << "backfill reservation rejected: failure injection"
 		       << dendl;
     post_event(RejectRemoteReservation());
   } else if (!pg->cct->_conf->osd_debug_skip_full_check_in_backfill_reservation &&
-      pg->osd->check_backfill_full(pg)) {
+      pg->osd->tentative_backfill_full(pg, pending_adjustment, cur_stat)) {
     ldout(pg->cct, 10) << "backfill reservation rejected: backfill full"
 		       << dendl;
     post_event(RejectRemoteReservation());
   } else {
     Context *preempt = nullptr;
+    // Don't reserve space if skipped reservation check, this is used
+    // to test the other backfill full check AND in case a corruption
+    // of num_bytes requires ignoring that value and trying the
+    // backfill anyway.
+    if (primary_num_bytes && !pg->cct->_conf->osd_debug_skip_full_check_in_backfill_reservation)
+      pg->set_reserved_num_bytes(primary_num_bytes, local_num_bytes);
+    else
+      pg->clear_reserved_num_bytes();
+    // Use un-ec-adjusted bytes for stats.
+    pg->info.stats.stats.sum.num_bytes = evt.local_num_bytes;
     if (HAVE_FEATURE(pg->upacting_features, RECOVERY_RESERVATION_2)) {
       // older peers will interpret preemption as TOOFULL
       preempt = new QueuePeeringEvt<RemoteBackfillPreempted>(
@@ -7685,28 +7930,14 @@ PG::RecoveryState::RepWaitBackfillReserved::react(const RemoteBackfillReserved &
 {
   PG *pg = context< RecoveryMachine >().pg;
 
-  if (pg->cct->_conf->osd_debug_reject_backfill_probability > 0 &&
-      (rand()%1000 < (pg->cct->_conf->osd_debug_reject_backfill_probability*1000.0))) {
-    ldout(pg->cct, 10) << "backfill reservation rejected after reservation: "
-		       << "failure injection" << dendl;
-    post_event(RejectRemoteReservation());
-    return discard_event();
-  } else if (!pg->cct->_conf->osd_debug_skip_full_check_in_backfill_reservation &&
-	     pg->osd->check_backfill_full(pg)) {
-    ldout(pg->cct, 10) << "backfill reservation rejected after reservation: backfill full"
-		       << dendl;
-    post_event(RejectRemoteReservation());
-    return discard_event();
-  } else {
-    pg->osd->send_message_osd_cluster(
+  pg->osd->send_message_osd_cluster(
       pg->primary.osd,
       new MBackfillReserve(
 	MBackfillReserve::GRANT,
 	spg_t(pg->info.pgid.pgid, pg->primary.shard),
 	pg->get_osdmap_epoch()),
       pg->get_osdmap_epoch());
-    return transit<RepRecovering>();
-  }
+  return transit<RepRecovering>();
 }
 
 boost::statechart::result
@@ -7724,6 +7955,7 @@ PG::RecoveryState::RepWaitBackfillReserved::react(
   const RemoteReservationRejected &evt)
 {
   PG *pg = context< RecoveryMachine >().pg;
+  pg->clear_reserved_num_bytes();
   pg->osd->remote_reserver.cancel_reservation(pg->info.pgid);
   return transit<RepNotRecovering>();
 }
@@ -7733,14 +7965,7 @@ PG::RecoveryState::RepWaitBackfillReserved::react(
   const RemoteReservationCanceled &evt)
 {
   PG *pg = context< RecoveryMachine >().pg;
-  pg->osd->remote_reserver.cancel_reservation(pg->info.pgid);
-  return transit<RepNotRecovering>();
-}
-
-boost::statechart::result
-PG::RecoveryState::RepWaitBackfillReserved::react(const RecoveryDone&)
-{
-  PG *pg = context< RecoveryMachine >().pg;
+  pg->clear_reserved_num_bytes();
   pg->osd->remote_reserver.cancel_reservation(pg->info.pgid);
   return transit<RepNotRecovering>();
 }
@@ -7757,6 +7982,7 @@ boost::statechart::result
 PG::RecoveryState::RepRecovering::react(const RemoteRecoveryPreempted &)
 {
   PG *pg = context< RecoveryMachine >().pg;
+  pg->clear_reserved_num_bytes();
   pg->osd->send_message_osd_cluster(
     pg->primary.osd,
     new MRecoveryReserve(
@@ -7771,6 +7997,7 @@ boost::statechart::result
 PG::RecoveryState::RepRecovering::react(const BackfillTooFull &)
 {
   PG *pg = context< RecoveryMachine >().pg;
+  pg->clear_reserved_num_bytes();
   pg->osd->send_message_osd_cluster(
     pg->primary.osd,
     new MBackfillReserve(
@@ -7785,6 +8012,7 @@ boost::statechart::result
 PG::RecoveryState::RepRecovering::react(const RemoteBackfillPreempted &)
 {
   PG *pg = context< RecoveryMachine >().pg;
+  pg->clear_reserved_num_bytes();
   pg->osd->send_message_osd_cluster(
     pg->primary.osd,
     new MBackfillReserve(
@@ -7799,6 +8027,7 @@ void PG::RecoveryState::RepRecovering::exit()
 {
   context< RecoveryMachine >().log_exit(state_name, enter_time);
   PG *pg = context< RecoveryMachine >().pg;
+  pg->clear_reserved_num_bytes();
   pg->osd->remote_reserver.cancel_reservation(pg->info.pgid);
   utime_t dur = ceph_clock_now() - enter_time;
   pg->osd->recoverystate_perf->tinc(rs_reprecovering_latency, dur);
@@ -8625,6 +8854,7 @@ void PG::RecoveryState::ReplicaActive::exit()
 {
   context< RecoveryMachine >().log_exit(state_name, enter_time);
   PG *pg = context< RecoveryMachine >().pg;
+  pg->clear_reserved_num_bytes();
   pg->osd->remote_reserver.cancel_reservation(pg->info.pgid);
   utime_t dur = ceph_clock_now() - enter_time;
   pg->osd->recoverystate_perf->tinc(rs_replicaactive_latency, dur);
@@ -9054,7 +9284,7 @@ boost::statechart::result PG::RecoveryState::GetLog::react(const MLogRec& logevt
 		       << "non-auth_log_shard osd." << logevt.from << dendl;
     return discard_event();
   }
-  ldout(pg->cct, 10) << "GetLog: received master log from osd"
+  ldout(pg->cct, 10) << "GetLog: received master log from osd."
 		     << logevt.from << dendl;
   msg = logevt.msg;
   post_event(GotLog());

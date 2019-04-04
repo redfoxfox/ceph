@@ -222,11 +222,31 @@ class Module(MgrModule):
             'runtime': True,
         },
         {
+            'name': 'begin_weekday',
+            'type': 'uint',
+            'default': 0,
+            'min': 0,
+            'max': 7,
+            'desc': 'Restrict automatic balancing to this day of the week or later',
+            'long_desc': '0 or 7 = Sunday, 1 = Monday, etc.',
+            'runtime': True,
+        },
+        {
+            'name': 'end_weekday',
+            'type': 'uint',
+            'default': 7,
+            'min': 0,
+            'max': 7,
+            'desc': 'Restrict automatic balancing to days of the week earlier than this',
+            'long_desc': '0 or 7 = Sunday, 1 = Monday, etc.',
+            'runtime': True,
+        },
+        {
             'name': 'crush_compat_max_iterations',
             'type': 'uint',
             'default': 25,
-            'min': '1',
-            'max': '250',
+            'min': 1,
+            'max': 250,
             'desc': 'maximum number of iterations to attempt optimization',
             'runtime': True,
         },
@@ -242,8 +262,8 @@ class Module(MgrModule):
             'name': 'crush_compat_step',
             'type': 'float',
             'default': .5,
-            'min': '.001',
-            'max': '.999',
+            'min': .001,
+            'max': .999,
             'desc': 'aggressiveness of optimization',
             'long_desc': '.99 is very aggressive, .01 is less aggressive',
             'runtime': True,
@@ -542,24 +562,45 @@ class Module(MgrModule):
         self.run = False
         self.event.set()
 
-    def time_in_interval(self, tod, begin, end):
-        if begin <= end:
-            return tod >= begin and tod < end
+    def time_permit(self):
+        local_time = time.localtime()
+        time_of_day = time.strftime('%H%M', local_time)
+        weekday = (local_time.tm_wday + 1) % 7 # be compatible with C
+        permit = False
+
+        begin_time = self.get_module_option('begin_time')
+        end_time = self.get_module_option('end_time')
+        if begin_time <= end_time:
+            permit = begin_time <= time_of_day < end_time
         else:
-            return tod >= begin or tod < end
+            permit = time_of_day >= begin_time or time_of_day < end_time
+        if not permit:
+            self.log.debug("should run between %s - %s, now %s, skipping",
+                           begin_time, end_time, time_of_day)
+            return False
+
+        begin_weekday = self.get_module_option('begin_weekday')
+        end_weekday = self.get_module_option('end_weekday')
+        if begin_weekday <= end_weekday:
+            permit = begin_weekday <= weekday < end_weekday
+        else:
+            permit = weekday >= begin_weekday or weekday < end_weekday
+        if not permit:
+            self.log.debug("should run between weekday %d - %d, now %d, skipping",
+                           begin_weekday, end_weekday, weekday)
+            return False
+
+        return True
 
     def serve(self):
         self.log.info('Starting')
         while self.run:
             self.active = self.get_module_option('active')
-            begin_time = self.get_module_option('begin_time')
-            end_time = self.get_module_option('end_time')
-            timeofday = time.strftime('%H%M', time.localtime())
-            self.log.debug('Waking up [%s, scheduled for %s-%s, now %s]',
-                           "active" if self.active else "inactive",
-                           begin_time, end_time, timeofday)
             sleep_interval = self.get_module_option('sleep_interval')
-            if self.active and self.time_in_interval(timeofday, begin_time, end_time):
+            self.log.debug('Waking up [%s, now %s]',
+                           "active" if self.active else "inactive",
+                           time.strftime(TIME_FORMAT, time.localtime()))
+            if self.active and self.time_permit():
                 self.log.debug('Running')
                 name = 'auto_%s' % time.strftime(TIME_FORMAT, time.gmtime())
                 osdmap = self.get_osdmap()
@@ -867,20 +908,31 @@ class Module(MgrModule):
             detail = 'No pools available'
             self.log.info(detail)
             return -errno.ENOENT, detail
-        # shuffle pool list so they all get equal (in)attention
-        random.shuffle(pools)
-        self.log.info('pools %s' % pools)
 
         inc = plan.inc
         total_did = 0
         left = max_iterations
-        pools_with_pg_merge = [p['pool_name'] for p in self.get_osdmap().dump().get('pools', [])
+        osdmap_dump = self.get_osdmap().dump()
+        pools_with_pg_merge = [p['pool_name'] for p in osdmap_dump.get('pools', [])
                                if p['pg_num'] > p['pg_num_target']]
+        crush_rule_by_pool_name = dict((p['pool_name'], p['crush_rule']) for p in osdmap_dump.get('pools', []))
+        pools_by_crush_rule = {} # group pools by crush_rule
         for pool in pools:
+            if pool not in crush_rule_by_pool_name:
+                self.log.info('pool %s does not exist' % pool)
+                continue
             if pool in pools_with_pg_merge:
                 self.log.info('pool %s has pending PG(s) for merging, skipping for now' % pool)
                 continue
-            did = ms.osdmap.calc_pg_upmaps(inc, max_deviation, left, [pool])
+            crush_rule = crush_rule_by_pool_name[pool]
+            if crush_rule not in pools_by_crush_rule:
+                pools_by_crush_rule[crush_rule] = []
+            pools_by_crush_rule[crush_rule].append(pool)
+        classified_pools = list(pools_by_crush_rule.values())
+        # shuffle so all pools get equal (in)attention
+        random.shuffle(classified_pools)
+        for it in classified_pools:
+            did = ms.osdmap.calc_pg_upmaps(inc, max_deviation, left, it)
             total_did += did
             left -= did
             if left <= 0:

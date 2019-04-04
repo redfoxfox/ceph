@@ -2546,27 +2546,28 @@ PrimaryLogPG::cache_result_t PrimaryLogPG::maybe_handle_manifest_detail(
 struct C_ManifestFlush : public Context {
   PrimaryLogPGRef pg;
   hobject_t oid;
-  epoch_t last_peering_reset;
+  epoch_t lpr;
   ceph_tid_t tid;
   utime_t start;
   uint64_t offset;
   uint64_t last_offset;
-  C_ManifestFlush(PrimaryLogPG *p, hobject_t o, epoch_t lpr)
-    : pg(p), oid(o), last_peering_reset(lpr),
+  C_ManifestFlush(PrimaryLogPG *p, hobject_t o, epoch_t e)
+    : pg(p), oid(o), lpr(e),
       tid(0), start(ceph_clock_now())
   {}
   void finish(int r) override {
     if (r == -ECANCELED)
       return;
     pg->lock();
-    pg->handle_manifest_flush(oid, tid, r, offset, last_offset);
+    pg->handle_manifest_flush(oid, tid, r, offset, last_offset, lpr);
     pg->osd->logger->tinc(l_osd_tier_flush_lat, ceph_clock_now() - start);
     pg->unlock();
   }
 };
 
 void PrimaryLogPG::handle_manifest_flush(hobject_t oid, ceph_tid_t tid, int r,
-					 uint64_t offset, uint64_t last_offset)
+                                         uint64_t offset, uint64_t last_offset,
+                                         epoch_t lpr)
 {
   map<hobject_t,FlushOpRef>::iterator p = flush_ops.find(oid);
   if (p == flush_ops.end()) {
@@ -2585,7 +2586,7 @@ void PrimaryLogPG::handle_manifest_flush(hobject_t oid, ceph_tid_t tid, int r,
     }
   }
   if (p->second->chunks == p->second->io_results.size()) {
-    if (last_peering_reset == get_last_peering_reset()) {
+    if (lpr == get_last_peering_reset()) {
       ceph_assert(p->second->obc);
       finish_manifest_flush(oid, tid, r, p->second->obc, last_offset);
     }
@@ -4310,7 +4311,19 @@ void PrimaryLogPG::do_backfill(OpRequestRef op)
       ceph_assert(cct->_conf->osd_kill_backfill_at != 2);
 
       info.set_last_backfill(m->last_backfill);
-      info.stats = m->stats;
+      // During backfill submit_push_data() tracks num_bytes which is needed in case
+      // backfill stops and starts again.  We want to know how many bytes this
+      // pg is consuming on the disk in order to compute amount of new data
+      // reserved to hold backfill if it won't fit.
+      if (m->op == MOSDPGBackfill::OP_BACKFILL_PROGRESS) {
+        dout(0) << __func__ << " primary " << m->stats.stats.sum.num_bytes << " local " << info.stats.stats.sum.num_bytes << dendl;
+        int64_t bytes = info.stats.stats.sum.num_bytes;
+        info.stats = m->stats;
+        info.stats.stats.sum.num_bytes = bytes;
+      } else {
+        dout(0) << __func__ << " final " << m->stats.stats.sum.num_bytes << " replaces local " << info.stats.stats.sum.num_bytes << dendl;
+        info.stats = m->stats;
+      }
 
       ObjectStore::Transaction t;
       dirty_info = true;
@@ -4341,6 +4354,38 @@ void PrimaryLogPG::do_backfill_remove(OpRequestRef op)
 
   ObjectStore::Transaction t;
   for (auto& p : m->ls) {
+    if (is_remote_backfilling()) {
+      struct stat st;
+      int r = osd->store->stat(ch, ghobject_t(p.first, ghobject_t::NO_GEN,
+                               pg_whoami.shard) , &st);
+      if (r == 0) {
+        sub_local_num_bytes(st.st_size);
+        int64_t usersize;
+        if (pool.info.is_erasure()) {
+          bufferlist bv;
+	  int r = osd->store->getattr(
+	      ch,
+              ghobject_t(p.first, ghobject_t::NO_GEN, pg_whoami.shard),
+	      OI_ATTR,
+	      bv);
+	  if (r >= 0) {
+	    object_info_t oi(bv);
+            usersize = oi.size * pgbackend->get_ec_data_chunk_count();
+          } else {
+            dout(0) << __func__ << " " << ghobject_t(p.first, ghobject_t::NO_GEN, pg_whoami.shard)
+                    << " can't get object info" << dendl;
+            usersize = 0;
+          }
+        } else {
+          usersize = st.st_size;
+        }
+        sub_num_bytes(usersize);
+        dout(10) << __func__ << " " << ghobject_t(p.first, ghobject_t::NO_GEN, pg_whoami.shard)
+                 << " sub actual data by " << st.st_size
+                 << " sub num_bytes by " << usersize
+                 << dendl;
+      }
+    }
     remove_snap_mapped_object(t, p.first);
   }
   int r = osd->store->queue_transaction(ch, std::move(t), NULL);
@@ -8566,6 +8611,7 @@ void PrimaryLogPG::apply_stats(
   const object_stat_sum_t &delta_stats) {
 
   info.stats.stats.add(delta_stats);
+  info.stats.stats.floor(0);
 
   for (set<pg_shard_t>::iterator i = backfill_targets.begin();
        i != backfill_targets.end();
@@ -8641,7 +8687,7 @@ struct C_Copyfrom : public Context {
   hobject_t oid;
   epoch_t last_peering_reset;
   ceph_tid_t tid;
-  PrimaryLogPG::CopyOpRef cop;
+  PrimaryLogPG::CopyOpRef cop;	// used for keeping the cop alive
   C_Copyfrom(PrimaryLogPG *p, hobject_t o, epoch_t lpr,
 	     const PrimaryLogPG::CopyOpRef& c)
     : pg(p), oid(o), last_peering_reset(lpr),
@@ -8653,6 +8699,7 @@ struct C_Copyfrom : public Context {
     pg->lock();
     if (last_peering_reset == pg->get_last_peering_reset()) {
       pg->process_copy_chunk(oid, tid, r);
+      cop.reset();
     }
     pg->unlock();
   }
@@ -8685,7 +8732,7 @@ struct C_CopyChunk : public Context {
   hobject_t oid;
   epoch_t last_peering_reset;
   ceph_tid_t tid;
-  PrimaryLogPG::CopyOpRef cop;
+  PrimaryLogPG::CopyOpRef cop;	// used for keeping the cop alive
   uint64_t offset = 0;
   C_CopyChunk(PrimaryLogPG *p, hobject_t o, epoch_t lpr,
 	     const PrimaryLogPG::CopyOpRef& c)
@@ -8698,6 +8745,7 @@ struct C_CopyChunk : public Context {
     pg->lock();
     if (last_peering_reset == pg->get_last_peering_reset()) {
       pg->process_copy_chunk_manifest(oid, tid, r, offset);
+      cop.reset();
     }
     pg->unlock();
   }
@@ -10866,6 +10914,10 @@ void PrimaryLogPG::handle_watch_timeout(WatchRef watch)
     dout(10) << "handle_watch_timeout not active, no-op" << dendl;
     return;
   }
+  if (!obc->obs.exists) {
+    dout(10) << __func__ << " object " << obc->obs.oi.soid << " dne" << dendl;
+    return;
+  }
   if (is_degraded_or_backfilling_object(obc->obs.oi.soid)) {
     callbacks_for_degraded_object[obc->obs.oi.soid].push_back(
       watch->get_delayed_cb()
@@ -11443,6 +11495,8 @@ int PrimaryLogPG::recover_missing(
 	 if (!object_missing) {
 	   object_stat_sum_t stat_diff;
 	   stat_diff.num_objects_recovered = 1;
+	   if (scrub_after_recovery)
+	     stat_diff.num_objects_repaired = 1;
 	   on_global_recover(soid, stat_diff, true);
 	 } else {
 	   auto recovery_handle = pgbackend->open_recovery_op();
@@ -12393,15 +12447,14 @@ bool PrimaryLogPG::start_recovery_ops(
 
   const auto &missing = pg_log.get_missing();
 
-  unsigned int num_missing = missing.num_missing();
   uint64_t num_unfound = get_num_unfound();
 
-  if (num_missing == 0) {
+  if (!missing.have_missing()) {
     info.last_complete = info.last_update;
   }
 
-  if (num_missing == num_unfound) {
-    // All of the missing objects we have are unfound.
+  if (!missing.have_missing() || // Primary does not have missing
+      all_missing_unfound()) { // or all of the missing objects are unfound.
     // Recover the replicas.
     started = recover_replicas(max, handle, &recovery_started);
   }
@@ -15180,6 +15233,7 @@ int PrimaryLogPG::rep_repair_primary_object(const hobject_t& soid, OpContext *ct
   if (!eio_errors_to_process) {
     eio_errors_to_process = true;
     ceph_assert(is_clean());
+    state_set(PG_STATE_REPAIR);
     queue_peering_event(
         PGPeeringEventRef(
 	  std::make_shared<PGPeeringEvent>(

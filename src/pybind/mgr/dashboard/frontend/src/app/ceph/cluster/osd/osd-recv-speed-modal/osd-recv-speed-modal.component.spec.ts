@@ -1,27 +1,26 @@
 import { HttpClientTestingModule } from '@angular/common/http/testing';
-import { ComponentFixture, fakeAsync, TestBed, tick } from '@angular/core/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ReactiveFormsModule } from '@angular/forms';
+import { RouterTestingModule } from '@angular/router/testing';
 
 import * as _ from 'lodash';
 import { ToastModule } from 'ng2-toastr';
 import { BsModalRef, ModalModule } from 'ngx-bootstrap/modal';
-import { of } from 'rxjs';
 
 import { configureTestBed, i18nProviders } from '../../../../../testing/unit-test-helper';
-import { ConfigurationService } from '../../../../shared/api/configuration.service';
 import { SharedModule } from '../../../../shared/shared.module';
 import { OsdRecvSpeedModalComponent } from './osd-recv-speed-modal.component';
 
 describe('OsdRecvSpeedModalComponent', () => {
   let component: OsdRecvSpeedModalComponent;
   let fixture: ComponentFixture<OsdRecvSpeedModalComponent>;
-  let configService: ConfigurationService;
 
   configureTestBed({
     imports: [
       HttpClientTestingModule,
       ModalModule.forRoot(),
       ReactiveFormsModule,
+      RouterTestingModule,
       SharedModule,
       ToastModule.forRoot()
     ],
@@ -29,11 +28,39 @@ describe('OsdRecvSpeedModalComponent', () => {
     providers: [BsModalRef, i18nProviders]
   });
 
+  let configOptions = [];
+
   beforeEach(() => {
     fixture = TestBed.createComponent(OsdRecvSpeedModalComponent);
     component = fixture.componentInstance;
-    configService = TestBed.get(ConfigurationService);
     fixture.detectChanges();
+
+    configOptions = [
+      {
+        name: 'osd_max_backfills',
+        desc: '',
+        type: 'uint',
+        default: 1
+      },
+      {
+        name: 'osd_recovery_max_active',
+        desc: '',
+        type: 'uint',
+        default: 3
+      },
+      {
+        name: 'osd_recovery_max_single_start',
+        desc: '',
+        type: 'uint',
+        default: 1
+      },
+      {
+        name: 'osd_recovery_sleep',
+        desc: 'Time in seconds to sleep before next recovery or backfill op',
+        type: 'float',
+        default: 0
+      }
+    ];
   });
 
   it('should create', () => {
@@ -94,271 +121,163 @@ describe('OsdRecvSpeedModalComponent', () => {
     });
   });
 
-  describe('getStoredPriority', () => {
-    const configOptionsLow = [
-      {
-        name: 'osd_max_backfills',
-        value: [
-          {
-            section: 'osd',
-            value: '1'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_max_active',
-        value: [
-          {
-            section: 'osd',
-            value: '1'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_max_single_start',
-        value: [
-          {
-            section: 'osd',
-            value: '1'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_sleep',
-        value: [
-          {
-            section: 'osd',
-            value: '0.5'
-          }
-        ]
-      }
-    ];
+  describe('detectPriority', () => {
+    const configOptionsLow = {
+      osd_max_backfills: 1,
+      osd_recovery_max_active: 1,
+      osd_recovery_max_single_start: 1,
+      osd_recovery_sleep: 0.5
+    };
 
-    const configOptionsDefault = [
-      {
-        name: 'osd_max_backfills',
-        value: [
-          {
-            section: 'osd',
-            value: '1'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_max_active',
-        value: [
-          {
-            section: 'osd',
-            value: '3'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_max_single_start',
-        value: [
-          {
-            section: 'osd',
-            value: '1'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_sleep',
-        value: [
-          {
-            section: 'osd',
-            value: '0'
-          }
-        ]
-      }
-    ];
+    const configOptionsDefault = {
+      osd_max_backfills: 1,
+      osd_recovery_max_active: 3,
+      osd_recovery_max_single_start: 1,
+      osd_recovery_sleep: 0
+    };
 
-    const configOptionsHigh = [
-      {
-        name: 'osd_max_backfills',
-        value: [
-          {
-            section: 'osd',
-            value: '4'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_max_active',
-        value: [
-          {
-            section: 'osd',
-            value: '4'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_max_single_start',
-        value: [
-          {
-            section: 'osd',
-            value: '4'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_sleep',
-        value: [
-          {
-            section: 'osd',
-            value: '0'
-          }
-        ]
-      }
-    ];
+    const configOptionsHigh = {
+      osd_max_backfills: 4,
+      osd_recovery_max_active: 4,
+      osd_recovery_max_single_start: 4,
+      osd_recovery_sleep: 0
+    };
 
-    const configOptionsCustom = [
-      {
-        name: 'osd_max_backfills',
-        value: [
-          {
-            section: 'osd',
-            value: '1'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_max_active',
-        value: [
-          {
-            section: 'osd',
-            value: '2'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_max_single_start',
-        value: [
-          {
-            section: 'osd',
-            value: '1'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_sleep',
-        value: [
-          {
-            section: 'osd',
-            value: '0'
-          }
-        ]
-      }
-    ];
+    const configOptionsCustom = {
+      osd_max_backfills: 1,
+      osd_recovery_max_active: 2,
+      osd_recovery_max_single_start: 1,
+      osd_recovery_sleep: 0
+    };
 
-    const configOptionsIncomplete = [
-      {
-        name: 'osd_max_backfills',
-        value: [
-          {
-            section: 'osd',
-            value: '1'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_max_single_start',
-        value: [
-          {
-            section: 'osd',
-            value: '1'
-          }
-        ]
-      },
-      {
-        name: 'osd_recovery_sleep',
-        value: [
-          {
-            section: 'osd',
-            value: '0'
-          }
-        ]
-      }
-    ];
+    const configOptionsIncomplete = {
+      osd_max_backfills: 1,
+      osd_recovery_max_single_start: 1,
+      osd_recovery_sleep: 0
+    };
 
-    it('should return priority "low" if the config option values have been set accordingly', fakeAsync(() => {
-      spyOn(configService, 'get').and.callFake((configOptionName: string) => {
-        const result = _.find(configOptionsLow, (configOption) => {
-          return configOption.name === configOptionName;
-        });
-        return of(result);
-      });
-
-      component.getStoredPriority((priority) => {
+    it('should return priority "low" if the config option values have been set accordingly', () => {
+      component.detectPriority(configOptionsLow, (priority) => {
         expect(priority.name).toBe('low');
       });
-      tick();
-
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeFalsy();
-    }));
+    });
 
-    it('should return priority "default" if the config option values have been set accordingly', fakeAsync(() => {
-      spyOn(configService, 'get').and.callFake((configOptionName: string) => {
-        const result = _.find(configOptionsDefault, (configOption) => {
-          return configOption.name === configOptionName;
-        });
-        return of(result);
-      });
-
-      component.getStoredPriority((priority) => {
+    it('should return priority "default" if the config option values have been set accordingly', () => {
+      component.detectPriority(configOptionsDefault, (priority) => {
         expect(priority.name).toBe('default');
       });
-      tick();
-
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeFalsy();
-    }));
+    });
 
-    it('should return priority "high" if the config option values have been set accordingly', fakeAsync(() => {
-      spyOn(configService, 'get').and.callFake((configOptionName: string) => {
-        const result = _.find(configOptionsHigh, (configOption) => {
-          return configOption.name === configOptionName;
-        });
-        return of(result);
-      });
-
-      component.getStoredPriority((priority) => {
+    it('should return priority "high" if the config option values have been set accordingly', () => {
+      component.detectPriority(configOptionsHigh, (priority) => {
         expect(priority.name).toBe('high');
       });
-      tick();
-
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeFalsy();
-    }));
+    });
 
-    it('should return priority "custom" if the config option values do not match any priority', fakeAsync(() => {
-      spyOn(configService, 'get').and.callFake((configOptionName: string) => {
-        const result = _.find(configOptionsCustom, (configOption) => {
-          return configOption.name === configOptionName;
-        });
-        return of(result);
-      });
-
-      component.getStoredPriority((priority) => {
+    it('should return priority "custom" if the config option values do not match any priority', () => {
+      component.detectPriority(configOptionsCustom, (priority) => {
         expect(priority.name).toBe('custom');
       });
-      tick();
-
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeTruthy();
-    }));
+    });
 
-    it('should return no priority if the config option values are incomplete', fakeAsync(() => {
-      spyOn(configService, 'get').and.callFake((configOptionName: string) => {
-        const result = _.find(configOptionsIncomplete, (configOption) => {
-          return configOption.name === configOptionName;
-        });
-        return of(result);
-      });
-
-      component.getStoredPriority((priority) => {
+    it('should return no priority if the config option values are incomplete', () => {
+      component.detectPriority(configOptionsIncomplete, (priority) => {
         expect(priority.name).toBeNull();
       });
-      tick();
-
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeFalsy();
-    }));
+    });
+  });
+
+  describe('getCurrentValues', () => {
+    it('should return default values if no value has been set by the user', () => {
+      const currentValues = component.getCurrentValues(configOptions);
+      configOptions.forEach((configOption) => {
+        const configOptionValue = currentValues.values[configOption.name];
+        expect(configOptionValue).toBe(configOption.default);
+      });
+    });
+
+    it('should return the values set by the user if they exist', () => {
+      configOptions.forEach((configOption) => {
+        configOption['value'] = [{ section: 'osd', value: 7 }];
+      });
+
+      const currentValues = component.getCurrentValues(configOptions);
+      Object.values(currentValues.values).forEach((configValue) => {
+        expect(configValue).toBe(7);
+      });
+    });
+
+    it('should return the default value if one is missing', () => {
+      for (let i = 1; i < configOptions.length; i++) {
+        configOptions[i]['value'] = [{ section: 'osd', value: 7 }];
+      }
+
+      const currentValues = component.getCurrentValues(configOptions);
+      Object.entries(currentValues.values).forEach(([configName, configValue]) => {
+        if (configName === 'osd_max_backfills') {
+          expect(configValue).toBe(1);
+        } else {
+          expect(configValue).toBe(7);
+        }
+      });
+    });
+
+    it('should return nothing if neither value nor default value is given', () => {
+      configOptions[0].default = null;
+      const currentValues = component.getCurrentValues(configOptions);
+      expect(currentValues.values).not.toContain('osd_max_backfills');
+    });
+  });
+
+  describe('setDescription', () => {
+    it('should set the description if one is given', () => {
+      component.setDescription(configOptions);
+      Object.keys(component.priorityAttrs).forEach((configOptionName) => {
+        if (configOptionName === 'osd_recovery_sleep') {
+          expect(component.priorityAttrs[configOptionName].desc).toBe(
+            'Time in seconds to sleep before next recovery or backfill op'
+          );
+        } else {
+          expect(component.priorityAttrs[configOptionName].desc).toBe('');
+        }
+      });
+    });
+  });
+
+  describe('setValidators', () => {
+    it('should set needed validators for config option', () => {
+      component.setValidators(configOptions);
+      configOptions.forEach((configOption) => {
+        const control = component.osdRecvSpeedForm.controls[configOption.name];
+
+        if (configOption.type === 'float') {
+          expect(component.priorityAttrs[configOption.name].patternHelpText).toBe(
+            'The entered value needs to be a number or decimal.'
+          );
+        } else {
+          expect(component.priorityAttrs[configOption.name].minValue).toBe(0);
+          expect(component.priorityAttrs[configOption.name].patternHelpText).toBe(
+            'The entered value needs to be an unsigned number.'
+          );
+
+          control.setValue(-1);
+          expect(control.hasError('min')).toBeTruthy();
+        }
+
+        control.setValue(null);
+        expect(control.hasError('required')).toBeTruthy();
+        control.setValue('E');
+        expect(control.hasError('pattern')).toBeTruthy();
+        control.setValue(3);
+        expect(control.hasError('required')).toBeFalsy();
+        expect(control.hasError('min')).toBeFalsy();
+        expect(control.hasError('pattern')).toBeFalsy();
+      });
+    });
   });
 });

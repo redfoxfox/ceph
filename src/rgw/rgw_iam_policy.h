@@ -113,7 +113,9 @@ static constexpr std::uint64_t iamListRolePolicies = 66;
 static constexpr std::uint64_t iamDeleteRolePolicy = 67;
 static constexpr std::uint64_t iamAll = 68;
 static constexpr std::uint64_t stsAssumeRole = 69;
-static constexpr std::uint64_t stsAll = 70;
+static constexpr std::uint64_t stsAssumeRoleWithWebIdentity = 70;
+static constexpr std::uint64_t stsGetSessionToken = 71;
+static constexpr std::uint64_t stsAll = 72;
 
 static constexpr std::uint64_t s3Count = s3DeleteObjectVersionTagging + 1;
 static constexpr std::uint64_t allCount = stsAll + 1;
@@ -124,11 +126,13 @@ using NotAction_t = Action_t;
 static const Action_t None(0);
 static const Action_t s3AllValue("111111111111111111111111111111111111111111111111111111");
 static const Action_t iamAllValue("11111111111110000000000000000000000000000000000000000000000000000000");
-static const Action_t stsAllValue("1000000000000000000000000000000000000000000000000000000000000000000000");
+static const Action_t stsAllValue("111000000000000000000000000000000000000000000000000000000000000000000000");
 //Modify allValue if more Actions are added
-static const Action_t allValue("11111111111111111111111111111111111111111111111111111111111111111111111");
+static const Action_t allValue("1111111111111111111111111111111111111111111111111111111111111111111111111");
 
 namespace {
+// Please update the table in doc/radosgw/s3/authentication.rst if you
+// modify this function.
 inline int op_to_perm(std::uint64_t op) {
   switch (op) {
   case s3GetObject:
@@ -465,6 +469,8 @@ struct Statement {
 
   Effect eval_principal(const Environment& e,
 		       boost::optional<const rgw::auth::Identity&> ida) const;
+
+  Effect eval_conditions(const Environment& e) const;
 };
 
 std::ostream& operator <<(ostream& m, const Statement& s);
@@ -495,6 +501,8 @@ struct Policy {
 
   Effect eval_principal(const Environment& e,
 	      boost::optional<const rgw::auth::Identity&> ida) const;
+
+  Effect eval_conditions(const Environment& e) const;
 
   template <typename F>
   bool has_conditional(const string& conditional, F p) const {

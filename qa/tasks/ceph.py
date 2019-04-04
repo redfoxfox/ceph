@@ -410,16 +410,14 @@ def cephfs_setup(ctx, config):
         fs = Filesystem(ctx, name='cephfs', create=True,
                         ec_profile=config.get('cephfs_ec_profile', None))
 
-        is_active_mds = lambda role: 'mds.' in role and not role.endswith('-s') and '-s-' not in role
-        all_roles = [item for remote_roles in mdss.remotes.values() for item in remote_roles]
-        num_active = len([r for r in all_roles if is_active_mds(r)])
-
-        fs.set_max_mds(config.get('max_mds', num_active))
+        max_mds = config.get('max_mds', 1)
+        if max_mds > 1:
+            fs.set_max_mds(max_mds)
 
     yield
 
 
-def get_mons(roles, ips,
+def get_mons(roles, ips, cluster_name,
              mon_bind_msgr2=False,
              mon_bind_addrvec=False):
     """
@@ -429,7 +427,7 @@ def get_mons(roles, ips,
     v1_ports = {}
     v2_ports = {}
     mon_id = 0
-    is_mon = teuthology.is_type('mon')
+    is_mon = teuthology.is_type('mon', cluster_name)
     for idx, roles in enumerate(roles):
         for role in roles:
             if not is_mon(role):
@@ -445,13 +443,13 @@ def get_mons(roles, ips,
                 else:
                     assert mon_bind_addrvec
                     v2_ports[ips[idx]] += 1
-                    addr = 'v2:{ip}:{port2},v1:{ip}:{port1}'.format(
+                    addr = '[v2:{ip}:{port2},v1:{ip}:{port1}]'.format(
                         ip=ips[idx],
                         port2=v2_ports[ips[idx]],
                         port1=v1_ports[ips[idx]],
                     )
             elif mon_bind_addrvec:
-                addr = 'v1:{ip}:{port}'.format(
+                addr = '[v1:{ip}:{port}]'.format(
                     ip=ips[idx],
                     port=v1_ports[ips[idx]],
                 )
@@ -494,9 +492,6 @@ def skeleton_config(ctx, roles, ips, mons, cluster='ceph'):
             if is_mds(role):
                 name = teuthology.ceph_role(role)
                 conf.setdefault(name, {})
-                if '-s-' in name:
-                    standby_mds = name[name.find('-s-') + 3:]
-                    conf[name]['mds standby for name'] = standby_mds
     return conf
 
 def create_simple_monmap(ctx, remote, conf, mons,
@@ -528,8 +523,8 @@ def create_simple_monmap(ctx, remote, conf, mons,
     ]
     if mon_bind_addrvec:
         args.extend(['--enable-all-features'])
-    for (name, addr) in addresses:
-        n = name[4:]
+    for (role, addr) in addresses:
+        _, _, n = teuthology.split_role(role)
         if mon_bind_addrvec and (',' in addr or 'v' in addr or ':' in addr):
             args.extend(('--addv', n, addr))
         else:
@@ -652,7 +647,7 @@ def cluster(ctx, config):
     ips = [host for (host, port) in
            (remote.ssh.get_transport().getpeername() for (remote, role_list) in remotes_and_roles)]
     mons = get_mons(
-        roles, ips,
+        roles, ips, cluster_name,
         mon_bind_msgr2=config.get('mon_bind_msgr2'),
         mon_bind_addrvec=config.get('mon_bind_addrvec'),
         )

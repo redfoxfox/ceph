@@ -50,6 +50,7 @@ set(librbd_internal_srcs
   exclusive_lock/PostAcquireRequest.cc
   exclusive_lock/PreReleaseRequest.cc
   exclusive_lock/StandardPolicy.cc
+  image/AttachChildRequest.cc
   image/AttachParentRequest.cc
   image/CloneRequest.cc
   image/CloseRequest.cc
@@ -58,11 +59,13 @@ set(librbd_internal_srcs
   image/DetachParentRequest.cc
   image/ListWatchersRequest.cc
   image/OpenRequest.cc
+  image/PreRemoveRequest.cc
   image/RefreshParentRequest.cc
   image/RefreshRequest.cc
   image/RemoveRequest.cc
   image/SetFlagsRequest.cc
   image/SetSnapRequest.cc
+  image/ValidatePoolRequest.cc
   image_watcher/NotifyLockOwner.cc
   io/AioCompletion.cc
   io/AsyncOperation.cc
@@ -75,6 +78,7 @@ set(librbd_internal_srcs
   io/ObjectDispatcher.cc
   io/ObjectRequest.cc
   io/ReadResult.cc
+  io/SimpleSchedulerObjectDispatch.cc
   io/Utils.cc
   journal/CreateRequest.cc
   journal/DemoteRequest.cc
@@ -128,6 +132,7 @@ set(librbd_internal_srcs
   operation/SnapshotRollbackRequest.cc
   operation/SnapshotUnprotectRequest.cc
   operation/SnapshotLimitRequest.cc
+  operation/SparsifyRequest.cc
   operation/TrimRequest.cc
   trash/MoveRequest.cc
   watcher/Notifier.cc
@@ -160,7 +165,7 @@ target_link_libraries(librbd PRIVATE
   rbd_internal
   rbd_types
   journal
-  librados-cxx
+  librados
   cls_rbd_client 
   cls_lock_client 
   cls_journal_client 

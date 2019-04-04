@@ -2,12 +2,16 @@ import { Component, OnInit } from '@angular/core';
 import { AbstractControl, AsyncValidatorFn, ValidationErrors, Validators } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 
+import { I18n } from '@ngx-translate/i18n-polyfill';
 import * as _ from 'lodash';
 
 import { RgwBucketService } from '../../../shared/api/rgw-bucket.service';
 import { RgwUserService } from '../../../shared/api/rgw-user.service';
+import { ActionLabelsI18n, URLVerbs } from '../../../shared/constants/app.constants';
+import { NotificationType } from '../../../shared/enum/notification-type.enum';
 import { CdFormBuilder } from '../../../shared/forms/cd-form-builder';
 import { CdFormGroup } from '../../../shared/forms/cd-form-group';
+import { NotificationService } from '../../../shared/services/notification.service';
 
 @Component({
   selector: 'cd-rgw-bucket-form',
@@ -20,14 +24,22 @@ export class RgwBucketFormComponent implements OnInit {
   error = false;
   loading = false;
   owners = null;
+  action: string;
+  resource: string;
 
   constructor(
     private route: ActivatedRoute,
     private router: Router,
     private formBuilder: CdFormBuilder,
     private rgwBucketService: RgwBucketService,
-    private rgwUserService: RgwUserService
+    private rgwUserService: RgwUserService,
+    private notificationService: NotificationService,
+    private i18n: I18n,
+    public actionLabels: ActionLabelsI18n
   ) {
+    this.editing = this.router.url.startsWith(`/rgw/bucket/${URLVerbs.EDIT}`);
+    this.action = this.editing ? this.actionLabels.EDIT : this.actionLabels.CREATE;
+    this.resource = this.i18n('bucket');
     this.createForm();
   }
 
@@ -53,8 +65,7 @@ export class RgwBucketFormComponent implements OnInit {
         }
         const bid = decodeURIComponent(params.bid);
         this.loading = true;
-        // Load the bucket data in 'edit' mode.
-        this.editing = true;
+
         this.rgwBucketService.get(bid).subscribe((resp: object) => {
           this.loading = false;
           // Get the default values.
@@ -81,6 +92,7 @@ export class RgwBucketFormComponent implements OnInit {
     // Exit immediately if the form isn't dirty.
     if (this.bucketForm.pristine) {
       this.goToListView();
+      return;
     }
     const bidCtl = this.bucketForm.get('bid');
     const ownerCtl = this.bucketForm.get('owner');
@@ -89,6 +101,10 @@ export class RgwBucketFormComponent implements OnInit {
       const idCtl = this.bucketForm.get('id');
       this.rgwBucketService.update(bidCtl.value, idCtl.value, ownerCtl.value).subscribe(
         () => {
+          this.notificationService.show(
+            NotificationType.success,
+            this.i18n('Updated Object Gateway bucket "{{bid}}"', { bid: bidCtl.value })
+          );
           this.goToListView();
         },
         () => {
@@ -100,6 +116,10 @@ export class RgwBucketFormComponent implements OnInit {
       // Add
       this.rgwBucketService.create(bidCtl.value, ownerCtl.value).subscribe(
         () => {
+          this.notificationService.show(
+            NotificationType.success,
+            this.i18n('Created Object Gateway bucket "{{bid}}"', { bid: bidCtl.value })
+          );
           this.goToListView();
         },
         () => {

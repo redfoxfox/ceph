@@ -30,6 +30,9 @@ namespace ceph {
       ObjectSection(Formatter& f, const char *name) : formatter(f) {
         formatter.open_object_section(name);
       }
+      ObjectSection(Formatter& f, const char *name, const char *ns) : formatter(f) {
+        formatter.open_object_section_in_ns(name, ns);
+      }
       ~ObjectSection() {
         formatter.close_section();
       }
@@ -40,6 +43,9 @@ namespace ceph {
     public:
       ArraySection(Formatter& f, const char *name) : formatter(f) {
         formatter.open_array_section(name);
+      }
+      ArraySection(Formatter& f, const char *name, const char *ns) : formatter(f) {
+        formatter.open_array_section_in_ns(name, ns);
       }
       ~ArraySection() {
         formatter.close_section();
@@ -139,7 +145,7 @@ namespace ceph {
     void open_object_section_in_ns(const char *name, const char *ns) override;
     void close_section() override;
     void dump_unsigned(const char *name, uint64_t u) override;
-    void dump_int(const char *name, int64_t u) override;
+    void dump_int(const char *name, int64_t s) override;
     void dump_float(const char *name, double d) override;
     void dump_string(const char *name, std::string_view s) override;
     std::ostream& dump_stream(const char *name) override;
@@ -209,7 +215,7 @@ namespace ceph {
     void open_object_section_in_ns(const char *name, const char *ns) override;
     void close_section() override;
     void dump_unsigned(const char *name, uint64_t u) override;
-    void dump_int(const char *name, int64_t u) override;
+    void dump_int(const char *name, int64_t s) override;
     void dump_float(const char *name, double d) override;
     void dump_string(const char *name, std::string_view s) override;
     std::ostream& dump_stream(const char *name) override;
@@ -237,6 +243,9 @@ namespace ceph {
     std::string m_pending_string_name;
     bool m_header_done;
     bool m_line_break_enabled = false;
+  private:
+    template <class T>
+    void add_value(const char *name, T val);
   };
 
   class TableFormatter : public Formatter {
@@ -260,7 +269,7 @@ namespace ceph {
 
     void close_section() override;
     void dump_unsigned(const char *name, uint64_t u) override;
-    void dump_int(const char *name, int64_t u) override;
+    void dump_int(const char *name, int64_t s) override;
     void dump_float(const char *name, double d) override;
     void dump_string(const char *name, std::string_view s) override;
     void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap) override;
@@ -272,6 +281,8 @@ namespace ceph {
     void get_attrs_str(const FormatterAttrs *attrs, std::string& attrs_str);
 
   private:
+    template <class T>
+    void add_value(const char *name, T val);
     void open_section_in_ns(const char *name, const char *ns, const FormatterAttrs *attrs);
     std::vector< std::vector<std::pair<std::string, std::string> > > m_vec;
     std::stringstream m_ss;

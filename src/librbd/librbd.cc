@@ -69,8 +69,8 @@ namespace {
 
 TracepointProvider::Traits tracepoint_traits("librbd_tp.so", "rbd_tracing");
 
-buffer::raw* create_write_raw(librbd::ImageCtx *ictx, const char *buf,
-                              size_t len) {
+static auto create_write_raw(librbd::ImageCtx *ictx, const char *buf,
+                             size_t len) {
   // TODO: until librados can guarantee memory won't be referenced after
   // it ACKs a request, always make a copy of the user-provided memory
   return buffer::copy(buf, len);
@@ -574,7 +574,7 @@ namespace librbd {
     TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
     tracepoint(librbd, remove_enter, io_ctx.get_pool_name().c_str(), io_ctx.get_id(), name);
     librbd::NoOpProgressContext prog_ctx;
-    int r = librbd::api::Image<>::remove(io_ctx, name, "", prog_ctx);
+    int r = librbd::api::Image<>::remove(io_ctx, name, prog_ctx);
     tracepoint(librbd, remove_exit, r);
     return r;
   }
@@ -584,7 +584,7 @@ namespace librbd {
   {
     TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
     tracepoint(librbd, remove_enter, io_ctx.get_pool_name().c_str(), io_ctx.get_id(), name);
-    int r = librbd::api::Image<>::remove(io_ctx, name, "", pctx);
+    int r = librbd::api::Image<>::remove(io_ctx, name, pctx);
     tracepoint(librbd, remove_exit, r);
     return r;
   }
@@ -607,7 +607,7 @@ namespace librbd {
     TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
     tracepoint(librbd, trash_list_enter,
                io_ctx.get_pool_name().c_str(), io_ctx.get_id());
-    int r = librbd::api::Trash<>::list(io_ctx, entries);
+    int r = librbd::api::Trash<>::list(io_ctx, entries, true);
 #ifdef WITH_LTTNG
     if (r >= 0) {
       for (const auto& entry : entries) {
@@ -1732,6 +1732,28 @@ namespace librbd {
     return r;
   }
 
+  int Image::sparsify(size_t sparse_size)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    tracepoint(librbd, sparsify_enter, ictx, ictx->name.c_str(), sparse_size,
+               ictx->id.c_str());
+    librbd::NoOpProgressContext prog_ctx;
+    int r = ictx->operations->sparsify(sparse_size, prog_ctx);
+    tracepoint(librbd, sparsify_exit, r);
+    return r;
+  }
+
+  int Image::sparsify_with_progress(size_t sparse_size,
+                                    librbd::ProgressContext& prog_ctx)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    tracepoint(librbd, sparsify_enter, ictx, ictx->name.c_str(), sparse_size,
+               ictx->id.c_str());
+    int r = ictx->operations->sparsify(sparse_size, prog_ctx);
+    tracepoint(librbd, sparsify_exit, r);
+    return r;
+  }
+
   int Image::list_children(set<pair<string, string> > *children)
   {
     std::vector<linked_image_spec_t> images;
@@ -1782,6 +1804,15 @@ namespace librbd {
     }
 
     tracepoint(librbd, list_children_exit, r);
+    return r;
+  }
+
+  int Image::list_descendants(std::vector<linked_image_spec_t> *images)
+  {
+    auto ictx = reinterpret_cast<ImageCtx*>(ctx);
+
+    images->clear();
+    int r = librbd::api::Image<>::list_descendants(ictx, {}, images);
     return r;
   }
 
@@ -2174,7 +2205,8 @@ namespace librbd {
         tracepoint(librbd, discard_exit, -EINVAL);
         return -EINVAL;
     }
-    int r = ictx->io_work_queue->discard(ofs, len, ictx->skip_partial_discard);
+    int r = ictx->io_work_queue->discard(
+      ofs, len, ictx->discard_granularity_bytes);
     tracepoint(librbd, discard_exit, r);
     return r;
   }
@@ -2193,7 +2225,7 @@ namespace librbd {
 
     bool discard_zero = ictx->config.get_val<bool>("rbd_discard_on_zeroed_write_same");
     if (discard_zero && mem_is_zero(bl.c_str(), bl.length())) {
-      int r = ictx->io_work_queue->discard(ofs, len, false);
+      int r = ictx->io_work_queue->discard(ofs, len, 0);
       tracepoint(librbd, writesame_exit, r);
       return r;
     }
@@ -2264,7 +2296,8 @@ namespace librbd {
   {
     ImageCtx *ictx = (ImageCtx *)ctx;
     tracepoint(librbd, aio_discard_enter, ictx, ictx->name.c_str(), ictx->snap_name.c_str(), ictx->read_only, off, len, c->pc);
-    ictx->io_work_queue->aio_discard(get_aio_completion(c), off, len, ictx->skip_partial_discard);
+    ictx->io_work_queue->aio_discard(
+      get_aio_completion(c), off, len, ictx->discard_granularity_bytes);
     tracepoint(librbd, aio_discard_exit, 0);
     return 0;
   }
@@ -2330,7 +2363,7 @@ namespace librbd {
 
     bool discard_zero = ictx->config.get_val<bool>("rbd_discard_on_zeroed_write_same");
     if (discard_zero && mem_is_zero(bl.c_str(), bl.length())) {
-      ictx->io_work_queue->aio_discard(get_aio_completion(c), off, len, false);
+      ictx->io_work_queue->aio_discard(get_aio_completion(c), off, len, 0);
       tracepoint(librbd, aio_writesame_exit, 0);
       return 0;
     }
@@ -3114,7 +3147,7 @@ extern "C" int rbd_remove(rados_ioctx_t p, const char *name)
   TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
   tracepoint(librbd, remove_enter, io_ctx.get_pool_name().c_str(), io_ctx.get_id(), name);
   librbd::NoOpProgressContext prog_ctx;
-  int r = librbd::api::Image<>::remove(io_ctx, name, "", prog_ctx);
+  int r = librbd::api::Image<>::remove(io_ctx, name, prog_ctx);
   tracepoint(librbd, remove_exit, r);
   return r;
 }
@@ -3127,7 +3160,7 @@ extern "C" int rbd_remove_with_progress(rados_ioctx_t p, const char *name,
   TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
   tracepoint(librbd, remove_enter, io_ctx.get_pool_name().c_str(), io_ctx.get_id(), name);
   librbd::CProgressContext prog_ctx(cb, cbdata);
-  int r = librbd::api::Image<>::remove(io_ctx, name, "", prog_ctx);
+  int r = librbd::api::Image<>::remove(io_ctx, name, prog_ctx);
   tracepoint(librbd, remove_exit, r);
   return r;
 }
@@ -3175,7 +3208,7 @@ extern "C" int rbd_trash_list(rados_ioctx_t p, rbd_trash_image_info_t *entries,
   memset(entries, 0, sizeof(*entries) * *num_entries);
 
   vector<librbd::trash_image_info_t> cpp_entries;
-  int r = librbd::api::Trash<>::list(io_ctx, cpp_entries);
+  int r = librbd::api::Trash<>::list(io_ctx, cpp_entries, true);
   if (r < 0) {
     tracepoint(librbd, trash_list_exit, r, *num_entries);
     return r;
@@ -3536,6 +3569,29 @@ extern "C" int rbd_flatten_with_progress(rbd_image_t image,
   librbd::CProgressContext prog_ctx(cb, cbdata);
   int r = ictx->operations->flatten(prog_ctx);
   tracepoint(librbd, flatten_exit, r);
+  return r;
+}
+
+extern "C" int rbd_sparsify(rbd_image_t image, size_t sparse_size)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  tracepoint(librbd, sparsify_enter, ictx, ictx->name.c_str(), sparse_size,
+             ictx->id.c_str());
+  librbd::NoOpProgressContext prog_ctx;
+  int r = ictx->operations->sparsify(sparse_size, prog_ctx);
+  tracepoint(librbd, sparsify_exit, r);
+  return r;
+}
+
+extern "C" int rbd_sparsify_with_progress(rbd_image_t image, size_t sparse_size,
+                                          librbd_progress_fn_t cb, void *cbdata)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  tracepoint(librbd, sparsify_enter, ictx, ictx->name.c_str(), sparse_size,
+             ictx->id.c_str());
+  librbd::CProgressContext prog_ctx(cb, cbdata);
+  int r = ictx->operations->sparsify(sparse_size, prog_ctx);
+  tracepoint(librbd, sparsify_exit, r);
   return r;
 }
 
@@ -4805,6 +4861,37 @@ extern "C" int rbd_list_children3(rbd_image_t image,
   return 0;
 }
 
+extern "C" int rbd_list_descendants(rbd_image_t image,
+                                    rbd_linked_image_spec_t *images,
+                                    size_t *max_images)
+{
+  auto ictx = reinterpret_cast<librbd::ImageCtx*>(image);
+  memset(images, 0, sizeof(*images) * *max_images);
+
+  std::vector<librbd::linked_image_spec_t> cpp_children;
+  int r = librbd::api::Image<>::list_descendants(ictx, {}, &cpp_children);
+  if (r < 0) {
+    return r;
+  }
+
+  if (*max_images < cpp_children.size()) {
+    *max_images = cpp_children.size();
+    return -ERANGE;
+  }
+
+  *max_images = cpp_children.size();
+  for (size_t idx = 0; idx < cpp_children.size(); ++idx) {
+    images[idx] = {
+      .pool_id = cpp_children[idx].pool_id,
+      .pool_name = strdup(cpp_children[idx].pool_name.c_str()),
+      .pool_namespace = strdup(cpp_children[idx].pool_namespace.c_str()),
+      .image_id = strdup(cpp_children[idx].image_id.c_str()),
+      .image_name = strdup(cpp_children[idx].image_name.c_str()),
+      .trash = cpp_children[idx].trash};
+  }
+  return 0;
+}
+
 extern "C" ssize_t rbd_list_lockers(rbd_image_t image, int *exclusive,
 				    char *tag, size_t *tag_len,
 				    char *clients, size_t *clients_len,
@@ -5034,7 +5121,8 @@ extern "C" int rbd_discard(rbd_image_t image, uint64_t ofs, uint64_t len)
     return -EINVAL;
   }
 
-  int r = ictx->io_work_queue->discard(ofs, len, ictx->skip_partial_discard);
+  int r = ictx->io_work_queue->discard(
+    ofs, len, ictx->discard_granularity_bytes);
   tracepoint(librbd, discard_exit, r);
   return r;
 }
@@ -5054,7 +5142,7 @@ extern "C" ssize_t rbd_writesame(rbd_image_t image, uint64_t ofs, size_t len,
 
   bool discard_zero = ictx->config.get_val<bool>("rbd_discard_on_zeroed_write_same");
   if (discard_zero && mem_is_zero(buf, data_len)) {
-    int r = ictx->io_work_queue->discard(ofs, len, false);
+    int r = ictx->io_work_queue->discard(ofs, len, 0);
     tracepoint(librbd, writesame_exit, r);
     return r;
   }
@@ -5173,7 +5261,8 @@ extern "C" int rbd_aio_discard(rbd_image_t image, uint64_t off, uint64_t len,
   librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
   librbd::RBD::AioCompletion *comp = (librbd::RBD::AioCompletion *)c;
   tracepoint(librbd, aio_discard_enter, ictx, ictx->name.c_str(), ictx->snap_name.c_str(), ictx->read_only, off, len, comp->pc);
-  ictx->io_work_queue->aio_discard(get_aio_completion(comp), off, len, ictx->skip_partial_discard);
+  ictx->io_work_queue->aio_discard(
+    get_aio_completion(comp), off, len, ictx->discard_granularity_bytes);
   tracepoint(librbd, aio_discard_exit, 0);
   return 0;
 }
@@ -5276,7 +5365,7 @@ extern "C" int rbd_aio_writesame(rbd_image_t image, uint64_t off, size_t len,
 
   bool discard_zero = ictx->config.get_val<bool>("rbd_discard_on_zeroed_write_same");
   if (discard_zero && mem_is_zero(buf, data_len)) {
-    ictx->io_work_queue->aio_discard(get_aio_completion(comp), off, len, false);
+    ictx->io_work_queue->aio_discard(get_aio_completion(comp), off, len, 0);
     tracepoint(librbd, aio_writesame_exit, 0);
     return 0;
   }
@@ -5793,6 +5882,7 @@ extern "C" int rbd_group_image_list(rados_ioctx_t group_p,
 
   if (r == -ENOENT) {
     tracepoint(librbd, group_image_list_exit, 0);
+    *image_size = 0;
     return 0;
   }
 

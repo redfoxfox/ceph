@@ -161,6 +161,9 @@ class PosixConnectedSocketImpl final : public ConnectedSocketImpl {
   int fd() const override {
     return _fd;
   }
+  int socket_fd() const override {
+    return _fd;
+  }
   friend class PosixServerSocketImpl;
   friend class PosixNetworkStack;
 };
@@ -286,14 +289,4 @@ int PosixWorker::connect(const entity_addr_t &addr, const SocketOptions &opts, C
 PosixNetworkStack::PosixNetworkStack(CephContext *c, const string &t)
     : NetworkStack(c, t)
 {
-  vector<string> corestrs;
-  get_str_vec(cct->_conf->ms_async_affinity_cores, corestrs);
-  for (auto & corestr : corestrs) {
-    string err;
-    int coreid = strict_strtol(corestr.c_str(), 10, &err);
-    if (err == "")
-      coreids.push_back(coreid);
-    else
-      lderr(cct) << __func__ << " failed to parse " << corestr << " in " << cct->_conf->ms_async_affinity_cores << dendl;
-  }
 }

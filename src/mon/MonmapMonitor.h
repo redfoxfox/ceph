@@ -29,10 +29,6 @@
 #include "MonMap.h"
 #include "MonitorDBStore.h"
 
-class MMonMap;
-class MMonCommand;
-class MMonJoin;
-
 class MonmapMonitor : public PaxosService {
  public:
   MonmapMonitor(Monitor *mn, Paxos *p, const string& service_name)
@@ -52,7 +48,8 @@ class MonmapMonitor : public PaxosService {
   void encode_full(MonitorDBStore::TransactionRef t) override { }
 
   void on_active() override;
-  void apply_mon_features(const mon_feature_t& features);
+  void apply_mon_features(const mon_feature_t& features,
+			  int min_mon_release);
 
   void dump_info(Formatter *f);
 

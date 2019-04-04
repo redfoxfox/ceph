@@ -33,12 +33,35 @@ function install_seastar_deps {
 }
 
 function munge_ceph_spec_in {
-    # http://rpm.org/user_doc/conditional_builds.html
+    local for_make_check=$1
+    shift
     local OUTFILE=$1
-    sed -e 's/@//g' -e 's/%bcond_with make_check/%bcond_without make_check/g' < ceph.spec.in > $OUTFILE
+    sed -e 's/@//g' < ceph.spec.in > $OUTFILE
+    # http://rpm.org/user_doc/conditional_builds.html
     if [ $WITH_SEASTAR ]; then
         sed -i -e 's/%bcond_with seastar/%bcond_without seastar/g' $OUTFILE
     fi
+    if $for_make_check; then
+        sed -i -e 's/%bcond_with make_check/%bcond_without make_check/g' $OUTFILE
+    fi
+}
+
+function munge_debian_control {
+    local version=$1
+    shift
+    local for_make_check=$1
+    shift
+    local control=$1
+    case "$version" in
+        *squeeze*|*wheezy*)
+	    control="/tmp/control.$$"
+	    grep -v babeltrace debian/control > $control
+	    ;;
+    esac
+    if $for_make_check; then
+        sed -i 's/^# Make-Check[[:space:]]/             /g' $control
+    fi
+    echo $control
 }
 
 function ensure_decent_gcc_on_ubuntu {
@@ -160,11 +183,11 @@ function ensure_decent_gcc_on_rh {
 	    cat <<EOF
 Your GCC is too old. Please run following command to add DTS to your environment:
 
-scl enable devtoolset-7 bash
+scl enable devtoolset-8 bash
 
 Or add following line to the end of ~/.bashrc to add it permanently:
 
-source scl_source enable devtoolset-7
+source scl_source enable devtoolset-8
 
 see https://www.softwarecollections.org/en/scls/rhscl/devtoolset-7/ for more details.
 EOF
@@ -178,6 +201,7 @@ EOF
 if [ x$(uname)x = xFreeBSDx ]; then
     $SUDO pkg install -yq \
         devel/babeltrace \
+        devel/binutils \
         devel/git \
         devel/gperf \
         devel/gmake \
@@ -233,6 +257,15 @@ if [ x$(uname)x = xFreeBSDx ]; then
 
     exit
 else
+    for_make_check=false
+    if tty -s; then
+        # interactive
+        for_make_check=true
+    elif [ $FOR_MAKE_CHECK ]; then
+        for_make_check=true
+    else
+        for_make_check=false
+    fi
     source /etc/os-release
     case $ID in
     debian|ubuntu|devuan)
@@ -261,11 +294,9 @@ else
         touch $DIR/status
 
 	backports=""
-	control="debian/control"
+	control=$(munge_debian_control "$VERSION" "$for_make_check" "debian/control")
         case "$VERSION" in
             *squeeze*|*wheezy*)
-		control="/tmp/control.$$"
-		grep -v babeltrace debian/control > $control
                 backports="-t $codename-backports"
                 ;;
         esac
@@ -276,7 +307,7 @@ else
 	$SUDO env DEBIAN_FRONTEND=noninteractive mk-build-deps --install --remove --tool="apt-get -y --no-install-recommends $backports" $control || exit 1
 	$SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y remove ceph-build-deps
 	install_seastar_deps
-	if [ -n "$backports" ] ; then rm $control; fi
+	if [ "$control" != "debian/control" ] ; then rm $control; fi
 	$SUDO apt-get install -y libxmlsec1 libxmlsec1-nss libxmlsec1-openssl libxmlsec1-dev
         ;;
     centos|fedora|rhel|ol|virtuozzo)
@@ -299,34 +330,37 @@ else
                 fi
                 ;;
             centos|rhel|ol|virtuozzo)
+                MAJOR_VERSION="$(echo $VERSION_ID | cut -d. -f1)"
                 $SUDO yum install -y yum-utils
                 if test $ID = rhel ; then
-                    $SUDO yum-config-manager --enable rhel-$VERSION_ID-server-optional-rpms
+                    $SUDO yum-config-manager --enable rhel-$MAJOR_VERSION-server-optional-rpms
                 fi
-                $SUDO yum-config-manager --add-repo https://dl.fedoraproject.org/pub/epel/$VERSION_ID/x86_64/
+                $SUDO yum-config-manager --add-repo https://dl.fedoraproject.org/pub/epel/$MAJOR_VERSION/x86_64/
                 $SUDO yum install --nogpgcheck -y epel-release
-                $SUDO rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-$VERSION_ID
+                $SUDO rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-$MAJOR_VERSION
                 $SUDO rm -f /etc/yum.repos.d/dl.fedoraproject.org*
-                if test $ID = centos -a $VERSION_ID = 7 ; then
+                if test $ID = centos -a $MAJOR_VERSION = 7 ; then
 		    case $(uname -m) in
 			x86_64)
 			    $SUDO yum -y install centos-release-scl
-			    dts_ver=7
+			    dts_ver=8
 			    ;;
 			aarch64)
 			    $SUDO yum -y install centos-release-scl-rh
 			    $SUDO yum-config-manager --disable centos-sclo-rh
 			    $SUDO yum-config-manager --enable centos-sclo-rh-testing
-			    dts_ver=7
+			    dts_ver=8
 			    ;;
 		    esac
                 elif test $ID = rhel -a $MAJOR_VERSION = 7 ; then
-                    $SUDO yum-config-manager --enable rhel-server-rhscl-7-rpms
-                    dts_ver=7
+                    $SUDO yum-config-manager \
+			  --enable rhel-server-rhscl-7-rpms \
+			  --enable rhel-7-server-devtools-rpms
+                    dts_ver=8
                 fi
                 ;;
         esac
-        munge_ceph_spec_in $DIR/ceph.spec
+        munge_ceph_spec_in $for_make_check $DIR/ceph.spec
         $SUDO $builddepcmd $DIR/ceph.spec 2>&1 | tee $DIR/yum-builddep.out
         [ ${PIPESTATUS[0]} -ne 0 ] && exit 1
 	if [ -n "$dts_ver" ]; then
@@ -340,7 +374,7 @@ else
         echo "Using zypper to install dependencies"
         zypp_install="zypper --gpg-auto-import-keys --non-interactive install --no-recommends"
         $SUDO $zypp_install systemd-rpm-macros
-        munge_ceph_spec_in $DIR/ceph.spec
+        munge_ceph_spec_in $for_make_check $DIR/ceph.spec
         $SUDO $zypp_install $(rpmspec -q --buildrequires $DIR/ceph.spec) || exit 1
         $SUDO $zypp_install libxmlsec1-1 libxmlsec1-nss1 libxmlsec1-openssl1 xmlsec1-devel xmlsec1-openssl-devel
         ;;
@@ -369,8 +403,7 @@ function populate_wheelhouse() {
 
     # although pip comes with virtualenv, having a recent version
     # of pip matters when it comes to using wheel packages
-    # workaround of https://github.com/pypa/setuptools/issues/1042
-    pip --timeout 300 $install 'setuptools >= 0.8,< 36' 'pip >= 7.0' 'wheel >= 0.24' || return 1
+    pip --timeout 300 $install 'setuptools >= 0.8' 'pip >= 7.0' 'wheel >= 0.24' || return 1
     if test $# != 0 ; then
         pip --timeout 300 $install $@ || return 1
     fi

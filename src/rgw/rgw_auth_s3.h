@@ -17,7 +17,6 @@
 #include "common/sstring.hh"
 #include "rgw_common.h"
 #include "rgw_rest_s3.h"
-
 #include "rgw_auth.h"
 #include "rgw_auth_filters.h"
 #include "rgw_auth_keystone.h"
@@ -71,6 +70,7 @@ class STSAuthStrategy : public rgw::auth::Strategy,
       rgw::auth::RoleApplier(cct, role_name, user_id, role_policies));
     return aplptr_t(new decltype(apl)(std::move(apl)));
   }
+
 public:
   STSAuthStrategy(CephContext* const cct,
                        RGWRados* const store,
@@ -97,6 +97,7 @@ class ExternalAuthStrategy : public rgw::auth::Strategy,
 
   using keystone_config_t = rgw::keystone::CephCtxConfig;
   using keystone_cache_t = rgw::keystone::TokenCache;
+  using secret_cache_t = rgw::auth::keystone::SecretCache;
   using EC2Engine = rgw::auth::keystone::EC2Engine;
 
   boost::optional <EC2Engine> keystone_engine;
@@ -128,13 +129,13 @@ public:
       keystone_engine.emplace(cct, ver_abstractor,
                               static_cast<rgw::auth::RemoteApplier::Factory*>(this),
                               keystone_config_t::get_instance(),
-                              keystone_cache_t::get_instance<keystone_config_t>());
+                              keystone_cache_t::get_instance<keystone_config_t>(),
+			      secret_cache_t::get_instance());
       add_engine(Control::SUFFICIENT, *keystone_engine);
 
     }
 
-    if (cct->_conf->rgw_s3_auth_use_ldap &&
-        ! cct->_conf->rgw_ldap_uri.empty()) {
+    if (ldap_engine.valid()) {
       add_engine(Control::SUFFICIENT, ldap_engine);
     }
   }
@@ -256,8 +257,7 @@ class AWSv4ComplMulti : public rgw::auth::Completer,
                         public rgw::io::DecoratedRestfulClient<rgw::io::RestfulClient*>,
                         public std::enable_shared_from_this<AWSv4ComplMulti> {
   using io_base_t = rgw::io::DecoratedRestfulClient<rgw::io::RestfulClient*>;
-  using signing_key_t = std::array<unsigned char,
-                                   CEPH_CRYPTO_HMACSHA256_DIGESTSIZE>;
+  using signing_key_t = sha256_digest_t;
 
   CephContext* const cct;
 
@@ -511,6 +511,14 @@ static inline std::string get_v4_canonical_uri(const req_info& info) {
   }
 
   return canonical_uri;
+}
+
+static inline const string calc_v4_payload_hash(const string& payload)
+{
+  ceph::crypto::SHA256* sha256_hash = calc_hash_sha256_open_stream();
+  calc_hash_sha256_update_stream(sha256_hash, payload.c_str(), payload.length());
+  const auto payload_hash = calc_hash_sha256_close_stream(&sha256_hash);
+  return payload_hash;
 }
 
 static inline const char* get_v4_exp_payload_hash(const req_info& info)

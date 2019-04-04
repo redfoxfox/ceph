@@ -1,5 +1,11 @@
 export enum SupportedLanguages {
-  'en-US' = 'English',
+  'cs' = 'Čeština',
   'de-DE' = 'Deutsch',
-  'pt-PT' = 'Português'
+  'en-US' = 'English',
+  'fr-FR' = 'Français',
+  'id-ID' = 'Bahasa Indonesia',
+  'pl-PL' = 'Polski',
+  'pt-PT' = 'Português',
+  'es-ES' = 'Español',
+  'zh-CN' = '中文'
 }

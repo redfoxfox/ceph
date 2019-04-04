@@ -139,6 +139,9 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
 
   MonCommandCompletion *command_c = new MonCommandCompletion(self->py_modules,
       completion, tag, PyThreadState_Get());
+
+  PyThreadState *tstate = PyEval_SaveThread();
+
   if (std::string(type) == "mon") {
 
     // Wait for the latest OSDMap after each command we send to
@@ -157,6 +160,7 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
     });
 
     self->py_modules->get_monc().start_mon_command(
+        name,
         {cmd_json},
         {},
         &command_c->outbl,
@@ -169,6 +173,7 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
       delete command_c;
       string msg("invalid osd_id: ");
       msg.append("\"").append(name).append("\"");
+      PyEval_RestoreThread(tstate);
       PyErr_SetString(PyExc_ValueError, msg.c_str());
       return nullptr;
     }
@@ -193,6 +198,7 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
     if (r != 0) {
       string msg("failed to send command to mds: ");
       msg.append(cpp_strerror(r));
+      PyEval_RestoreThread(tstate);
       PyErr_SetString(PyExc_RuntimeError, msg.c_str());
       return nullptr;
     }
@@ -202,6 +208,7 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
       delete command_c;
       string msg("invalid pgid: ");
       msg.append("\"").append(name).append("\"");
+      PyEval_RestoreThread(tstate);
       PyErr_SetString(PyExc_ValueError, msg.c_str());
       return nullptr;
     }
@@ -215,15 +222,18 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
         &command_c->outbl,
         &command_c->outs,
         command_c);
+    PyEval_RestoreThread(tstate);
     return nullptr;
   } else {
     delete command_c;
     string msg("unknown service type: ");
     msg.append(type);
+    PyEval_RestoreThread(tstate);
     PyErr_SetString(PyExc_ValueError, msg.c_str());
     return nullptr;
   }
 
+  PyEval_RestoreThread(tstate);
   Py_RETURN_NONE;
 }
 
@@ -388,26 +398,21 @@ ceph_option_get(BaseMgrModule *self, PyObject *args)
 static PyObject*
 ceph_get_module_option(BaseMgrModule *self, PyObject *args)
 {
-  char *what = nullptr;
-  if (!PyArg_ParseTuple(args, "s:ceph_get_module_option", &what)) {
+  char *module = nullptr;
+  char *key = nullptr;
+  char *prefix = nullptr;
+  if (!PyArg_ParseTuple(args, "ss|s:ceph_get_module_option", &module, &key,
+			&prefix)) {
     derr << "Invalid args!" << dendl;
     return nullptr;
   }
-
-  PyThreadState *tstate = PyEval_SaveThread();
-  std::string value;
-  bool found = self->py_modules->get_config(self->this_module->get_name(),
-      what, &value);
-
-  PyEval_RestoreThread(tstate);
-
-  if (found) {
-    dout(10) << __func__ << " " << what << " found: " << value.c_str() << dendl;
-    return self->this_module->py_module->get_typed_option_value(what, value);
-  } else {
-    dout(4) << __func__ << " " << what << " not found " << dendl;
-    Py_RETURN_NONE;
+  std::string str_prefix;
+  if (prefix) {
+    str_prefix = prefix;
   }
+  assert(self->this_module->py_module);
+  auto pResult = self->py_modules->get_typed_config(module, key, str_prefix);
+  return pResult;
 }
 
 static PyObject*
@@ -426,20 +431,24 @@ ceph_store_get_prefix(BaseMgrModule *self, PyObject *args)
 static PyObject*
 ceph_set_module_option(BaseMgrModule *self, PyObject *args)
 {
+  char *module = nullptr;
   char *key = nullptr;
   char *value = nullptr;
-  if (!PyArg_ParseTuple(args, "sz:ceph_set_module_option", &key, &value)) {
+  if (!PyArg_ParseTuple(args, "ssz:ceph_set_module_option",
+        &module, &key, &value)) {
+    derr << "Invalid args!" << dendl;
     return nullptr;
   }
   boost::optional<string> val;
   if (value) {
     val = value;
   }
-  self->py_modules->set_config(self->this_module->get_name(), key, val);
+  PyThreadState *tstate = PyEval_SaveThread();
+  self->py_modules->set_config(module, key, val);
+  PyEval_RestoreThread(tstate);
 
   Py_RETURN_NONE;
 }
-
 
 static PyObject*
 ceph_store_get(BaseMgrModule *self, PyObject *args)
@@ -462,8 +471,6 @@ ceph_store_get(BaseMgrModule *self, PyObject *args)
   }
 }
 
-
-
 static PyObject*
 ceph_store_set(BaseMgrModule *self, PyObject *args)
 {
@@ -476,7 +483,9 @@ ceph_store_set(BaseMgrModule *self, PyObject *args)
   if (value) {
     val = value;
   }
+  PyThreadState *tstate = PyEval_SaveThread();
   self->py_modules->set_store(self->this_module->get_name(), key, val);
+  PyEval_RestoreThread(tstate);
 
   Py_RETURN_NONE;
 }
@@ -633,6 +642,52 @@ ceph_have_mon_connection(BaseMgrModule *self, PyObject *args)
     Py_RETURN_FALSE;
   }
 }
+
+static PyObject*
+ceph_update_progress_event(BaseMgrModule *self, PyObject *args)
+{
+  char *evid = nullptr;
+  char *desc = nullptr;
+  float progress = 0.0;
+  if (!PyArg_ParseTuple(args, "ssf:ceph_update_progress_event",
+			&evid, &desc, &progress)) {
+    return nullptr;
+  }
+
+  PyThreadState *tstate = PyEval_SaveThread();
+  self->py_modules->update_progress_event(evid, desc, progress);
+  PyEval_RestoreThread(tstate);
+
+  Py_RETURN_NONE;
+}
+
+static PyObject*
+ceph_complete_progress_event(BaseMgrModule *self, PyObject *args)
+{
+  char *evid = nullptr;
+  if (!PyArg_ParseTuple(args, "s:ceph_complete_progress_event",
+			&evid)) {
+    return nullptr;
+  }
+
+  PyThreadState *tstate = PyEval_SaveThread();
+  self->py_modules->complete_progress_event(evid);
+  PyEval_RestoreThread(tstate);
+
+  Py_RETURN_NONE;
+}
+
+static PyObject*
+ceph_clear_all_progress_events(BaseMgrModule *self, PyObject *args)
+{
+  PyThreadState *tstate = PyEval_SaveThread();
+  self->py_modules->clear_all_progress_events();
+  PyEval_RestoreThread(tstate);
+
+  Py_RETURN_NONE;
+}
+
+
 
 static PyObject *
 ceph_dispatch_remote(BaseMgrModule *self, PyObject *args)
@@ -797,7 +852,7 @@ ceph_add_osd_perf_query(BaseMgrModule *self, PyObject *args)
             }
             d.regex_str = PyString_AsString(param_value);
             try {
-              d.regex = {d.regex_str.c_str()};
+              d.regex = d.regex_str.c_str();
             } catch (const std::regex_error& e) {
               derr << __func__ << " query " << query_param_name << " item " << j
                    << " contains invalid regex " << d.regex_str << dendl;
@@ -1016,6 +1071,13 @@ PyMethodDef BaseMgrModule_methods[] = {
   {"_ceph_have_mon_connection", (PyCFunction)ceph_have_mon_connection,
     METH_NOARGS, "Find out whether this mgr daemon currently has "
                  "a connection to a monitor"},
+
+  {"_ceph_update_progress_event", (PyCFunction)ceph_update_progress_event,
+   METH_VARARGS, "Update status of a progress event"},
+  {"_ceph_complete_progress_event", (PyCFunction)ceph_complete_progress_event,
+   METH_VARARGS, "Complete a progress event"},
+  {"_ceph_clear_all_progress_events", (PyCFunction)ceph_clear_all_progress_events,
+   METH_NOARGS, "Clear all progress events"},
 
   {"_ceph_dispatch_remote", (PyCFunction)ceph_dispatch_remote,
     METH_VARARGS, "Dispatch a call to another module"},

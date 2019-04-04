@@ -264,8 +264,6 @@ public:
       expect.WillOnce(Return(r));
     } else {
       expect.WillOnce(DoDefault());
-      EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
-                  exec(RBD_INFO, _, StrEq("rbd"), StrEq("metadata_list"), _, _, _));
       EXPECT_CALL(*mock_image_ctx.image_watcher, is_unregistered())
         .WillOnce(Return(false));
     }
@@ -682,7 +680,7 @@ TEST_F(TestMockImageRefreshRequest, SuccessChild) {
     }
 
     librbd::NoOpProgressContext no_op;
-    ASSERT_EQ(0, librbd::api::Image<>::remove(m_ioctx, clone_name, "", no_op));
+    ASSERT_EQ(0, librbd::api::Image<>::remove(m_ioctx, clone_name, no_op));
     ASSERT_EQ(0, ictx->operations->snap_unprotect(cls::rbd::UserSnapshotNamespace(), "snap"));
   };
 
@@ -736,7 +734,7 @@ TEST_F(TestMockImageRefreshRequest, SuccessChildDontOpenParent) {
     }
 
     librbd::NoOpProgressContext no_op;
-    ASSERT_EQ(0, librbd::api::Image<>::remove(m_ioctx, clone_name, "", no_op));
+    ASSERT_EQ(0, librbd::api::Image<>::remove(m_ioctx, clone_name, no_op));
     ASSERT_EQ(0, ictx->operations->snap_unprotect(cls::rbd::UserSnapshotNamespace(), "snap"));
   };
 

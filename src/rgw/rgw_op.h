@@ -33,6 +33,7 @@
 #include "common/ceph_time.h"
 
 #include "rgw_common.h"
+#include "rgw_dmclock.h"
 #include "rgw_rados.h"
 #include "rgw_user.h"
 #include "rgw_bucket.h"
@@ -115,6 +116,8 @@ public:
 
 
 void rgw_bucket_object_pre_exec(struct req_state *s);
+
+namespace dmc = rgw::dmclock;
 
 /**
  * Provide the base class for all ops.
@@ -199,6 +202,9 @@ public:
   std::ostream& gen_prefix(std::ostream& out) const override;
   CephContext* get_cct() const override { return s->cct; }
   unsigned get_subsys() const override { return ceph_subsys_rgw; }
+
+  virtual dmc::client_id dmclock_client() { return dmc::client_id::metadata; }
+  virtual dmc::Cost dmclock_cost() { return 1; }
 };
 
 class RGWDefaultResponseOp : public RGWOp {
@@ -355,6 +361,7 @@ public:
     *filter = nullptr;
     return 0;
   }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWGetObj_CB : public RGWGetObj_Filter
@@ -483,6 +490,7 @@ public:
   const char* name() const override { return "bulk_delete"; }
   RGWOpType get_type() override { return RGW_OP_BULK_DELETE; }
   uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 inline ostream& operator<<(ostream& out, const RGWBulkDelete::acct_path_t &o) {
@@ -559,6 +567,7 @@ public:
   uint32_t op_mask() override {
     return RGW_OP_TYPE_WRITE;
   }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 }; /* RGWBulkUploadOp */
 
 
@@ -901,7 +910,7 @@ class RGWCreateBucket : public RGWOp {
 protected:
   RGWAccessControlPolicy policy;
   string location_constraint;
-  string placement_rule;
+  rgw_placement_rule placement_rule;
   RGWBucketInfo info;
   obj_version ep_objv;
   bool has_cors;
@@ -1044,6 +1053,10 @@ protected:
   int multipart_part_num = 0;
 
   boost::optional<ceph::real_time> delete_at;
+  //append obj
+  bool append;
+  uint64_t position;
+  uint64_t cur_accounted_size;
 
 public:
   RGWPutObj() : ofs(0),
@@ -1057,7 +1070,10 @@ public:
                 chunked_upload(0),
                 dlo_manifest(NULL),
                 slo_info(NULL),
-                olh_epoch(0) {}
+                olh_epoch(0),
+                append(false),
+                position(0),
+                cur_accounted_size(0) {}
 
   ~RGWPutObj() override {
     delete slo_info;
@@ -1098,6 +1114,7 @@ public:
   const char* name() const override { return "put_obj"; }
   RGWOpType get_type() override { return RGW_OP_PUT_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWPostObj : public RGWOp {
@@ -1151,6 +1168,7 @@ public:
   const char* name() const override { return "post_obj"; }
   RGWOpType get_type() override { return RGW_OP_POST_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWPutMetadataAccount : public RGWOp {
@@ -1199,7 +1217,7 @@ protected:
   uint32_t policy_rw_mask;
   RGWAccessControlPolicy policy;
   RGWCORSConfiguration cors_config;
-  string placement_rule;
+  rgw_placement_rule placement_rule;
   boost::optional<std::string> swift_ver_location;
 
 public:
@@ -1282,6 +1300,7 @@ public:
   RGWOpType get_type() override { return RGW_OP_DELETE_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
   virtual bool need_object_expiration() { return false; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWCopyObj : public RGWOp {
@@ -1324,6 +1343,8 @@ protected:
   boost::optional<ceph::real_time> delete_at;
   bool copy_if_newer;
 
+  bool need_to_check_storage_class = false;
+
   int init_common();
 
 public:
@@ -1360,6 +1381,10 @@ public:
   void execute() override;
   void progress_cb(off_t ofs);
 
+  virtual int check_storage_class(const rgw_placement_rule& src_placement) {
+    return 0;
+  }
+
   virtual int init_dest_policy() { return 0; }
   virtual int get_params() = 0;
   virtual void send_partial_response(off_t ofs) {}
@@ -1367,6 +1392,7 @@ public:
   const char* name() const override { return "copy_obj"; }
   RGWOpType get_type() override { return RGW_OP_COPY_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWGetACLs : public RGWOp {
@@ -1829,8 +1855,8 @@ public:
 extern int rgw_build_bucket_policies(RGWRados* store, struct req_state* s);
 extern int rgw_build_object_policies(RGWRados *store, struct req_state *s,
 				     bool prefetch_data);
-extern rgw::IAM::Environment rgw_build_iam_environment(RGWRados* store,
-						       struct req_state* s);
+extern void rgw_build_iam_environment(RGWRados* store,
+						                          struct req_state* s);
 extern vector<rgw::IAM::Policy> get_iam_user_policy_from_attr(CephContext* cct,
                         RGWRados* store,
                         map<string, bufferlist>& attrs,
@@ -1902,7 +1928,8 @@ static inline int rgw_get_request_metadata(CephContext* const cct,
   static const std::set<std::string> blacklisted_headers = {
       "x-amz-server-side-encryption-customer-algorithm",
       "x-amz-server-side-encryption-customer-key",
-      "x-amz-server-side-encryption-customer-key-md5"
+      "x-amz-server-side-encryption-customer-key-md5",
+      "x-amz-storage-class"
   };
 
   size_t valid_meta_count = 0;
@@ -2167,6 +2194,7 @@ public:
   virtual int get_params() = 0;
   void execute() override;
   const char* name() const override { return "get_cluster_stat"; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::admin; }
 };
 
 static inline int parse_value_and_bound(

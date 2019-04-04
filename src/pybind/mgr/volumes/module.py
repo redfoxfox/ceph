@@ -168,7 +168,8 @@ class Module(orchestrator.OrchestratorClientMixin, MgrModule):
         try:
             completion = self.add_stateless_service("mds", spec)
             self._orchestrator_wait([completion])
-        except ImportError:
+            orchestrator.raise_if_exception(completion)
+        except (ImportError, orchestrator.OrchestratorError):
             return 0, "", "Volume created successfully (no MDS daemons created)"
         except Exception as e:
             # Don't let detailed orchestrator exceptions (python backtraces)
@@ -210,7 +211,7 @@ class Module(orchestrator.OrchestratorClientMixin, MgrModule):
 
         # TODO: validate that subvol size fits in volume size
 
-        with CephFSVolumeClient(rados=self.rados) as vc:
+        with CephFSVolumeClient(rados=self.rados, fs_name=vol_name) as vc:
             # TODO: support real subvolume groups rather than just
             # always having them 1:1 with subvolumes.
             vp = VolumePath(sub_name, sub_name)
@@ -229,7 +230,7 @@ class Module(orchestrator.OrchestratorClientMixin, MgrModule):
 
         vol_fscid = fs['id']
 
-        with CephFSVolumeClient(rados=self.rados) as vc:
+        with CephFSVolumeClient(rados=self.rados, fs_name=vol_name) as vc:
             # TODO: support real subvolume groups rather than just
             # always having them 1:1 with subvolumes.
             vp = VolumePath(sub_name, sub_name)
@@ -249,8 +250,9 @@ class Module(orchestrator.OrchestratorClientMixin, MgrModule):
         try:
             completion = self.remove_stateless_service("mds", vol_name)
             self._orchestrator_wait([completion])
-        except ImportError:
-            self.log.warning("No orchestrator, not tearing down MDS daemons")
+            orchestrator.raise_if_exception(completion)
+        except (ImportError, orchestrator.OrchestratorError):
+            self.log.warning("OrchestratorError, not tearing down MDS daemons")
         except Exception as e:
             # Don't let detailed orchestrator exceptions (python backtraces)
             # bubble out to the user

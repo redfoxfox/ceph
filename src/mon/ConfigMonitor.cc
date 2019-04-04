@@ -176,6 +176,31 @@ bool ConfigMonitor::preprocess_command(MonOpRequestRef op)
     } else {
       odata.append(ss.str());
     }
+  } else if (prefix == "config ls") {
+    ostringstream ss;
+    if (f) {
+      f->open_array_section("options");
+    }
+    for (auto& i : ceph_options) {
+      if (f) {
+	f->dump_string("option", i.name);
+      } else {
+	ss << i.name << "\n";
+      }
+    }
+    for (auto& i : mon->mgrmon()->get_mgr_module_options()) {
+      if (f) {
+	f->dump_string("option", i.first);
+      } else {
+	ss << i.first << "\n";
+      }
+    }
+    if (f) {
+      f->close_section();
+      f->flush(odata);
+    } else {
+      odata.append(ss.str());
+    }
   } else if (prefix == "config dump") {
     list<pair<string,Section*>> sections = {
       make_pair("global", &config_map.global)
@@ -251,14 +276,13 @@ bool ConfigMonitor::preprocess_command(MonOpRequestRef op)
 	       << " class " << device_class << dendl;
     }
 
-    std::map<std::string,std::string> config;
     std::map<std::string,pair<std::string,const MaskedOption*>> src;
-    config_map.generate_entity_map(
+    auto config = config_map.generate_entity_map(
       entity,
       crush_location,
       mon->osdmon()->osdmap.crush.get(),
       device_class,
-      &config, &src);
+      &src);
 
     if (cmd_getval(g_ceph_context, cmdmap, "key", name)) {
       // get a single value
@@ -394,15 +418,13 @@ void ConfigMonitor::handle_get_config(MonOpRequestRef op)
   const OSDMap& osdmap = mon->osdmon()->osdmap;
   map<string,string> crush_location;
   osdmap.crush->get_full_location(m->host, &crush_location);
-  map<string,string> out;
-  config_map.generate_entity_map(
+  auto out = config_map.generate_entity_map(
     m->name,
     crush_location,
     osdmap.crush.get(),
-    m->device_class,
-    &out);
+    m->device_class);
   dout(20) << " config is " << out << dendl;
-  m->get_connection()->send_message(new MConfig(out));
+  m->get_connection()->send_message(new MConfig{std::move(out)});
 }
 
 bool ConfigMonitor::prepare_update(MonOpRequestRef op)
@@ -499,25 +521,21 @@ bool ConfigMonitor::prepare_command(MonOpRequestRef op)
     }
     goto update;
   } else if (prefix == "config reset") {
-    int64_t num;
-    if (!cmd_getval(g_ceph_context, cmdmap, "num", num)) {
+    int64_t revert_to = -1;
+    cmd_getval(g_ceph_context, cmdmap, "num", revert_to);
+    if (revert_to < 0 ||
+        revert_to > (int64_t)version) {
       err = -EINVAL;
-      ss << "must specify what to revert to";
+      ss << "must specify a valid historical version to revert to; "
+         << "see 'ceph config log' for a list of avialable configuration "
+         << "historical versions";
       goto reply;
     }
-    if (num < 0 ||
-	(num > 0 && num > (int64_t)version)) {
-      err = -EINVAL;
-      ss << "must specify a valid version to revert to";
-      goto reply;
-    }
-    if (num == (int64_t)version) {
+    if (revert_to == (int64_t)version) {
       err = 0;
       goto reply;
     }
-    ceph_assert(num > 0);
-    ceph_assert((version_t)num < version);
-    for (int64_t v = version; v > num; --v) {
+    for (int64_t v = version; v > revert_to; --v) {
       ConfigChangeSet ch;
       load_changeset(v, &ch);
       for (auto& i : ch.diff) {
@@ -530,7 +548,7 @@ bool ConfigMonitor::prepare_command(MonOpRequestRef op)
 	}
       }
     }
-    pending_description = string("reset to ") + stringify(num);
+    pending_description = string("reset to ") + stringify(revert_to);
     goto update;
   } else if (prefix == "config assimilate-conf") {
     ConfFile cf;
@@ -745,13 +763,11 @@ void ConfigMonitor::load_config()
     const OSDMap& osdmap = mon->osdmon()->osdmap;
     map<string,string> crush_location;
     osdmap.crush->get_full_location(g_conf()->host, &crush_location);
-    map<string,string> out;
-    config_map.generate_entity_map(
+    auto out = config_map.generate_entity_map(
       g_conf()->name,
       crush_location,
       osdmap.crush.get(),
-      string(), // no device class
-      &out);
+      string{}); // no device class
     g_conf().set_mon_vals(g_ceph_context, out, nullptr);
   }
 }
@@ -807,13 +823,11 @@ bool ConfigMonitor::refresh_config(MonSession *s)
 
   dout(20) << __func__ << " " << s->entity_name << " crush " << crush_location
 	   << " device_class " << device_class << dendl;
-  map<string,string> out;
-  config_map.generate_entity_map(
+  auto out = config_map.generate_entity_map(
     s->entity_name,
     crush_location,
     osdmap.crush.get(),
-    device_class,
-    &out);
+    device_class);
 
   if (out == s->last_config && s->any_config) {
     dout(20) << __func__ << " no change, " << out << dendl;
@@ -821,7 +835,7 @@ bool ConfigMonitor::refresh_config(MonSession *s)
   }
 
   dout(20) << __func__ << " " << out << dendl;
-  s->last_config = out;
+  s->last_config = std::move(out);
   s->any_config = true;
   return true;
 }

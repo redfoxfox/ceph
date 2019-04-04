@@ -47,6 +47,7 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/common/perf_counters.cc
   ${PROJECT_SOURCE_DIR}/src/common/perf_histogram.cc
   ${PROJECT_SOURCE_DIR}/src/common/page.cc
+  ${PROJECT_SOURCE_DIR}/src/common/pick_address.cc
   ${PROJECT_SOURCE_DIR}/src/common/snap_types.cc
   ${PROJECT_SOURCE_DIR}/src/common/signal.cc
   ${PROJECT_SOURCE_DIR}/src/common/str_list.cc
@@ -79,7 +80,9 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/mds/MDSMap.cc
   ${PROJECT_SOURCE_DIR}/src/msg/msg_types.cc
   ${PROJECT_SOURCE_DIR}/src/msg/Message.cc
+  ${PROJECT_SOURCE_DIR}/src/mon/PGMap.cc
   ${PROJECT_SOURCE_DIR}/src/mon/MonCap.cc
+  ${PROJECT_SOURCE_DIR}/src/mon/MonMap.cc
   ${PROJECT_SOURCE_DIR}/src/osd/osd_types.cc
   ${PROJECT_SOURCE_DIR}/src/osd/ECMsgTypes.cc
   ${PROJECT_SOURCE_DIR}/src/osd/HitSet.cc
@@ -94,7 +97,8 @@ add_library(crimson-common STATIC
 
 target_compile_definitions(crimson-common PRIVATE
   "CEPH_LIBDIR=\"${CMAKE_INSTALL_FULL_LIBDIR}\""
-  "CEPH_PKGLIBDIR=\"${CMAKE_INSTALL_FULL_PKGLIBDIR}\"")
+  "CEPH_PKGLIBDIR=\"${CEPH_INSTALL_FULL_PKGLIBDIR}\""
+  "CEPH_DATADIR=\"${CEPH_INSTALL_DATADIR}\"")
 
 target_link_libraries(crimson-common
   PUBLIC
@@ -108,13 +112,14 @@ target_link_libraries(crimson-common
 
 set(crimson_auth_srcs
   auth/KeyRing.cc)
+set(crimson_mgr_srcs
+  mgr/client.cc)
 set(crimson_mon_srcs
   mon/MonClient.cc
-  ${PROJECT_SOURCE_DIR}/src/mon/MonMap.cc
   ${PROJECT_SOURCE_DIR}/src/mon/MonSub.cc)
 set(crimson_net_srcs
-  net/Dispatcher.cc
   net/Errors.cc
+  net/Messenger.cc
   net/SocketConnection.cc
   net/SocketMessenger.cc
   net/Socket.cc)
@@ -123,6 +128,7 @@ set(crimson_thread_srcs
   thread/Throttle.cc)
 add_library(crimson STATIC
   ${crimson_auth_srcs}
+  ${crimson_mgr_srcs}
   ${crimson_mon_srcs}
   ${crimson_net_srcs}
   ${crimson_thread_srcs}
@@ -133,3 +139,5 @@ target_link_libraries(crimson
   PUBLIC
     crimson-common
     crimson::cflags)
+add_subdirectory(os)
+add_subdirectory(osd)

@@ -157,7 +157,7 @@ int RGWRESTSimpleRequest::execute(RGWAccessKey& key, const char *_method, const 
   ldout(cct, 15) << "generated auth header: " << auth_hdr << dendl;
 
   headers.push_back(pair<string, string>("AUTHORIZATION", auth_hdr));
-  int r = process();
+  int r = process(null_yield);
   if (r < 0)
     return r;
 
@@ -324,7 +324,7 @@ int RGWRESTSimpleRequest::forward_request(RGWAccessKey& key, req_info& info, siz
   method = new_info.method;
   url = new_url;
 
-  int r = process();
+  int r = process(null_yield);
   if (r < 0){
     if (r == -EINVAL){
       // curl_easy has errored, generally means the service is not available
@@ -761,7 +761,7 @@ int RGWRESTStreamRWRequest::do_send_prepare(RGWAccessKey *key, map<string, strin
   if (send_data) {
     set_send_length(send_data->length());
     set_outbl(*send_data);
-    send_data_hint = true;
+    set_send_data_hint(true);
   }
   
 
@@ -789,7 +789,7 @@ int RGWRESTStreamRWRequest::send(RGWHTTPManager *mgr)
     return RGWHTTP::send(this);
   }
 
-  int r = mgr->add_request(this, send_data_hint);
+  int r = mgr->add_request(this);
   if (r < 0)
     return r;
 
@@ -802,7 +802,7 @@ int RGWRESTStreamRWRequest::complete_request(string *etag,
                                              map<string, string> *pattrs,
                                              map<string, string> *pheaders)
 {
-  int ret = wait();
+  int ret = wait(null_yield);
   if (ret < 0) {
     return ret;
   }

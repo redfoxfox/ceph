@@ -285,7 +285,8 @@ struct RecoveryMessages {
 
 void ECBackend::handle_recovery_push(
   const PushOp &op,
-  RecoveryMessages *m)
+  RecoveryMessages *m,
+  bool is_repair)
 {
   if (get_parent()->check_failsafe_full()) {
     dout(10) << __func__ << " Out of space (failsafe) processing push request." << dendl;
@@ -329,6 +330,15 @@ void ECBackend::handle_recovery_push(
     ceph_assert(op.data.length() == 0);
   }
 
+  if (get_parent()->pg_is_remote_backfilling()) {
+    get_parent()->pg_add_local_num_bytes(op.data.length());
+    get_parent()->pg_add_num_bytes(op.data.length() * get_ec_data_chunk_count());
+    dout(10) << __func__ << " " << op.soid
+             << " add new actual data by " << op.data.length()
+             << " add new num_bytes by " << op.data.length() * get_ec_data_chunk_count()
+             << dendl;
+  }
+
   if (op.before_progress.first) {
     ceph_assert(op.attrset.count(string("_")));
     m->t.setattrs(
@@ -352,6 +362,8 @@ void ECBackend::handle_recovery_push(
     if ((get_parent()->pgb_is_primary())) {
       ceph_assert(recovery_ops.count(op.soid));
       ceph_assert(recovery_ops[op.soid].obc);
+      if (get_parent()->pg_is_repair())
+        get_parent()->inc_osd_stat_repaired();
       get_parent()->on_local_recover(
 	op.soid,
 	op.recovery_info,
@@ -359,12 +371,29 @@ void ECBackend::handle_recovery_push(
 	false,
 	&m->t);
     } else {
+      // If primary told us this is a repair, bump osd_stat_t::num_objects_repaired
+      if (is_repair)
+        get_parent()->inc_osd_stat_repaired();
       get_parent()->on_local_recover(
 	op.soid,
 	op.recovery_info,
 	ObjectContextRef(),
 	false,
 	&m->t);
+      if (get_parent()->pg_is_remote_backfilling()) {
+        struct stat st;
+        int r = store->stat(ch, ghobject_t(op.soid, ghobject_t::NO_GEN,
+                            get_parent()->whoami_shard().shard), &st);
+        if (r == 0) {
+          get_parent()->pg_sub_local_num_bytes(st.st_size);
+         // XXX: This can be way overestimated for small objects
+         get_parent()->pg_sub_num_bytes(st.st_size * get_ec_data_chunk_count());
+         dout(10) << __func__ << " " << op.soid
+                  << " sub actual data by " << st.st_size
+                  << " sub num_bytes by " << st.st_size * get_ec_data_chunk_count()
+                  << dendl;
+        }
+      }
     }
   }
   m->push_replies[get_parent()->primary_shard()].push_back(PushReplyOp());
@@ -494,6 +523,7 @@ void ECBackend::dispatch_recovery_messages(RecoveryMessages &m, int priority)
     msg->pgid = spg_t(get_parent()->get_info().pgid.pgid, i->first.shard);
     msg->pushes.swap(i->second);
     msg->compute_cost(cct);
+    msg->is_repair = get_parent()->pg_is_repair();
     get_parent()->send_message(
       i->first.osd,
       msg);
@@ -659,6 +689,8 @@ void ECBackend::continue_recovery_op(
 	  stat.num_bytes_recovered = op.recovery_info.size;
 	  stat.num_keys_recovered = 0; // ??? op ... omap_entries.size(); ?
 	  stat.num_objects_recovered = 1;
+	  if (get_parent()->pg_is_repair())
+	    stat.num_objects_repaired = 1;
 	  get_parent()->on_global_recover(op.hoid, stat, false);
 	  dout(10) << __func__ << ": WRITING return " << op << dendl;
 	  recovery_ops.erase(op.hoid);
@@ -800,7 +832,7 @@ bool ECBackend::_handle_message(
     for (vector<PushOp>::const_iterator i = op->pushes.begin();
 	 i != op->pushes.end();
 	 ++i) {
-      handle_recovery_push(*i, &rm);
+      handle_recovery_push(*i, &rm, op->is_repair);
     }
     dispatch_recovery_messages(rm, priority);
     return true;
@@ -1838,13 +1870,12 @@ bool ECBackend::try_state_to_reads()
     return false;
   }
 
-  if (op->invalidates_cache()) {
+  if (!pipeline_state.caching_enabled()) {
+    op->using_cache = false;
+  } else if (op->invalidates_cache()) {
     dout(20) << __func__ << ": invalidating cache after this op"
 	     << dendl;
     pipeline_state.invalidate();
-    op->using_cache = false;
-  } else {
-    op->using_cache = pipeline_state.caching_enabled();
   }
 
   waiting_state.pop_front();

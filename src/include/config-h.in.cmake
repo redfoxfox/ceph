@@ -342,6 +342,9 @@
 /* Defined if OpenSSL is available for the rgw beast frontend */
 #cmakedefine WITH_RADOSGW_BEAST_OPENSSL
 
+/* Defined if rabbitmq-c is available for rgw amqp push endpoint */
+#cmakedefine WITH_RADOSGW_AMQP_ENDPOINT
+
 /* Defined if std::map::merge() is supported */
 #cmakedefine HAVE_STDLIB_MAP_SPLICING
 
@@ -350,5 +353,8 @@
 
 /* Define if seastar is available. */
 #cmakedefine HAVE_SEASTAR
+
+/* Define if unit tests are built. */
+#cmakedefine UNIT_TESTS_BUILT
 
 #endif /* CONFIG_H */

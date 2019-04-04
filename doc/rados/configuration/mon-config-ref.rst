@@ -988,6 +988,14 @@ Monitors can also disallow removal of pools if configured that way.
 :Type: Boolean
 :Default: ``false``
 
+``osd pool default ec fast read``
+
+:Description: Whether to turn on fast read on the pool or not. It will be used as
+              the default setting of newly created erasure coded pools if ``fast_read``
+              is not specified at create time.
+:Type: Boolean
+:Default: ``false``
+
 ``osd pool default flag hashpspool``
 
 :Description: Set the hashpspool flag on new pools
@@ -1101,15 +1109,6 @@ Miscellaneous
 :Default: False
 
 
-``mon osd pool ec fast read``
-
-:Description: Whether turn on fast read on the pool or not. It will be used as
-              the default setting of newly created erasure pools if ``fast_read``
-              is not specified at create time.
-:Type: Boolean
-:Default: False
-
-
 ``mon mds skip sanity``
 
 :Description: Skip safety assertions on FSMap (in case of bugs where we want to
@@ -1189,17 +1188,6 @@ Miscellaneous
               This option specifies the number of placement groups per chunk.
 :Type: Integer
 :Default: 4096
-
-
-``mon osd max split count``
-
-:Description: Largest number of PGs per "involved" OSD to let split create.
-              When we increase the ``pg_num`` of a pool, the placement groups
-              will be split on all OSDs serving that pool. We want to avoid
-              extreme multipliers on PG splits.
-:Type: Integer
-:Default: 300
-
 
 ``mon session timeout``
 

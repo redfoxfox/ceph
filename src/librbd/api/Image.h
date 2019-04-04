@@ -5,12 +5,11 @@
 #define LIBRBD_API_IMAGE_H
 
 #include "include/rbd/librbd.hpp"
+#include "include/rados/librados_fwd.hpp"
 #include "librbd/Types.h"
 #include <map>
 #include <set>
 #include <string>
-
-namespace librados { struct IoCtx; }
 
 namespace librbd {
 
@@ -42,6 +41,17 @@ struct Image {
                            const cls::rbd::ParentImageSpec &parent_spec,
                            std::vector<librbd::linked_image_spec_t> *images);
 
+  static int list_descendants(IoCtx& io_ctx, const std::string &image_id,
+                              const std::optional<size_t> &max_level,
+                              std::vector<librbd::linked_image_spec_t> *images);
+  static int list_descendants(ImageCtxT *ictx,
+                              const std::optional<size_t> &max_level,
+                              std::vector<librbd::linked_image_spec_t> *images);
+  static int list_descendants(ImageCtxT *ictx,
+                              const cls::rbd::ParentImageSpec &parent_spec,
+                              const std::optional<size_t> &max_level,
+                              std::vector<librbd::linked_image_spec_t> *images);
+
   static int deep_copy(ImageCtxT *ictx, librados::IoCtx& dest_md_ctx,
                        const char *destname, ImageOptions& opts,
                        ProgressContext &prog_ctx);
@@ -54,8 +64,7 @@ struct Image {
   static int snap_set(ImageCtxT *ictx, uint64_t snap_id);
 
   static int remove(librados::IoCtx& io_ctx, const std::string &image_name,
-                    const std::string &image_id, ProgressContext& prog_ctx,
-                    bool force=false, bool from_trash_remove=false);
+                    ProgressContext& prog_ctx);
 
 };
 

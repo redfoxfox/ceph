@@ -37,7 +37,6 @@
 
 #define CEPH_MDS_PROTOCOL    34 /* cluster internal */
 
-class AuthAuthorizeHandlerRegistry;
 class Messenger;
 class MonClient;
 
@@ -63,9 +62,6 @@ class MDSDaemon : public Dispatcher, public md_config_obs_t {
 
  protected:
   Beacon  beacon;
-
-  AuthAuthorizeHandlerRegistry *authorize_handler_cluster_registry;
-  AuthAuthorizeHandlerRegistry *authorize_handler_service_registry;
 
   std::string name;
 
@@ -110,7 +106,7 @@ class MDSDaemon : public Dispatcher, public md_config_obs_t {
 
  private:
   bool ms_dispatch2(const Message::ref &m) override;
-  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new) override;
+  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer) override;
   int ms_handle_authentication(Connection *con) override;
   KeyStore *ms_get_auth1_authorizer_keystore() override;
   void ms_handle_accept(Connection *con) override;
@@ -177,6 +173,8 @@ private:
   };
 
   static const std::vector<MDSCommand>& get_commands();
+
+  bool parse_caps(const AuthCapsInfo&, MDSAuthCaps&);
 
   mono_time starttime = mono_clock::zero();
 };

@@ -102,7 +102,7 @@ void do_out_buffer(string& outbl, char **outbuf, size_t *outbuflen) {
 librados::TestRadosClient *create_rados_client() {
   CephInitParameters iparams(CEPH_ENTITY_TYPE_CLIENT);
   CephContext *cct = common_preinit(iparams, CODE_ENVIRONMENT_LIBRARY, 0);
-  cct->_conf.parse_env();
+  cct->_conf.parse_env(cct->get_module_type());
   cct->_conf.apply_changes(nullptr);
 
   auto rados_client =
@@ -152,7 +152,7 @@ extern "C" int rados_conf_parse_env(rados_t cluster, const char *var) {
   librados::TestRadosClient *client =
     reinterpret_cast<librados::TestRadosClient*>(cluster);
   auto& conf = client->cct()->_conf;
-  conf.parse_env(var);
+  conf.parse_env(client->cct()->get_module_type(), var);
   conf.apply_changes(NULL);
   return 0;
 }
@@ -163,7 +163,7 @@ extern "C" int rados_conf_read_file(rados_t cluster, const char *path) {
   auto& conf = client->cct()->_conf;
   int ret = conf.parse_config_files(path, NULL, 0);
   if (ret == 0) {
-    conf.parse_env();
+    conf.parse_env(client->cct()->get_module_type());
     conf.apply_changes(NULL);
     conf.complain_about_parse_errors(client->cct());
   } else if (ret == -ENOENT) {
@@ -655,6 +655,13 @@ void IoCtx::snap_set_read(snap_t seq) {
   ctx->set_snap_read(seq);
 }
 
+int IoCtx::sparse_read(const std::string& oid, std::map<uint64_t,uint64_t>& m,
+                       bufferlist& bl, size_t len, uint64_t off) {
+  TestIoCtxImpl *ctx = reinterpret_cast<TestIoCtxImpl*>(io_ctx_impl);
+  return ctx->execute_operation(
+    oid, boost::bind(&TestIoCtxImpl::sparse_read, _1, _2, off, len, &m, &bl));
+}
+
 int IoCtx::stat(const std::string& oid, uint64_t *psize, time_t *pmtime) {
   TestIoCtxImpl *ctx = reinterpret_cast<TestIoCtxImpl*>(io_ctx_impl);
   return ctx->execute_operation(
@@ -811,7 +818,8 @@ size_t ObjectOperation::size() {
   return o->ops.size();
 }
 
-void ObjectOperation::cmpext(uint64_t off, bufferlist& cmp_bl, int *prval) {
+void ObjectOperation::cmpext(uint64_t off, const bufferlist& cmp_bl,
+                             int *prval) {
   TestObjectOperationImpl *o = reinterpret_cast<TestObjectOperationImpl*>(impl);
   ObjectOperationTestImpl op = boost::bind(&TestIoCtxImpl::cmpext, _1, _2, off, cmp_bl);
   if (prval != NULL) {
@@ -1364,6 +1372,17 @@ int cls_cxx_write_full(cls_method_context_t hctx, bufferlist *inbl) {
   librados::TestClassHandler::MethodContext *ctx =
     reinterpret_cast<librados::TestClassHandler::MethodContext*>(hctx);
   return ctx->io_ctx_impl->write_full(ctx->oid, *inbl, ctx->snapc);
+}
+
+int cls_cxx_replace(cls_method_context_t hctx, int ofs, int len,
+                    bufferlist *inbl) {
+  librados::TestClassHandler::MethodContext *ctx =
+    reinterpret_cast<librados::TestClassHandler::MethodContext*>(hctx);
+  int r = ctx->io_ctx_impl->truncate(ctx->oid, 0, ctx->snapc);
+  if (r < 0) {
+    return r;
+  }
+  return ctx->io_ctx_impl->write(ctx->oid, *inbl, len, ofs, ctx->snapc);
 }
 
 int cls_cxx_list_watchers(cls_method_context_t hctx,

@@ -402,6 +402,28 @@ public:
     release_object_locks(manager);
   }
 
+  bool pg_is_repair() override {
+    return is_repair();
+  }
+  void inc_osd_stat_repaired() override {
+    osd->inc_osd_stat_repaired();
+  }
+  bool pg_is_remote_backfilling() override {
+    return is_remote_backfilling();
+  }
+  void pg_add_local_num_bytes(int64_t num_bytes) override {
+    add_local_num_bytes(num_bytes);
+  }
+  void pg_sub_local_num_bytes(int64_t num_bytes) override {
+    sub_local_num_bytes(num_bytes);
+  }
+  void pg_add_num_bytes(int64_t num_bytes) override {
+    add_num_bytes(num_bytes);
+  }
+  void pg_sub_num_bytes(int64_t num_bytes) override {
+    sub_num_bytes(num_bytes);
+  }
+
   void pgb_set_object_snap_mapping(
     const hobject_t &soid,
     const set<snapid_t> &snaps,
@@ -438,6 +460,10 @@ public:
     return is_undersized();
   }
   
+  bool pg_is_repair() const override {
+    return is_repair();
+  }
+
   void update_peer_last_complete_ondisk(
     pg_shard_t fromosd,
     eversion_t lcod) override {
@@ -465,9 +491,6 @@ public:
   }
   pg_shard_t primary_shard() const override {
     return primary;
-  }
-  uint64_t min_peer_features() const override {
-    return get_min_peer_features();
   }
 
   void send_message_osd_cluster(
@@ -1414,7 +1437,7 @@ protected:
   void finish_manifest_flush(hobject_t oid, ceph_tid_t tid, int r, ObjectContextRef obc, 
 			     uint64_t last_offset);
   void handle_manifest_flush(hobject_t oid, ceph_tid_t tid, int r,
-			     uint64_t offset, uint64_t last_offset);
+			     uint64_t offset, uint64_t last_offset, epoch_t lpr);
   void refcount_manifest(ObjectContextRef obc, object_locator_t oloc, hobject_t soid,
                          SnapContext snapc, bool get, Context *cb, uint64_t offset);
 

@@ -1,10 +1,12 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
+#include "include/compat.h"
 #include "rgw_rados.h"
 #include "rgw_zone.h"
 #include "rgw_coroutine.h"
 #include "rgw_cr_rados.h"
+#include "rgw_sync_counters.h"
 
 #include "services/svc_zone.h"
 #include "services/svc_zone_utils.h"
@@ -102,7 +104,7 @@ int RGWAsyncGetSystemObj::_send_request()
                .set_objv_tracker(&objv_tracker)
                .set_attrs(pattrs)
 	       .set_raw_attrs(raw_attrs)
-               .read(&bl);
+               .read(&bl, null_yield);
 }
 
 RGWAsyncGetSystemObj::RGWAsyncGetSystemObj(RGWCoroutine *caller, RGWAioCompletionNotifier *cn, RGWSI_SysObj *_svc,
@@ -139,7 +141,7 @@ int RGWAsyncPutSystemObj::_send_request()
   return sysobj.wop()
                .set_objv_tracker(&objv_tracker)
                .set_exclusive(exclusive)
-               .write_data(bl);
+               .write_data(bl, null_yield);
 }
 
 RGWAsyncPutSystemObj::RGWAsyncPutSystemObj(RGWCoroutine *caller, RGWAioCompletionNotifier *cn,
@@ -162,7 +164,7 @@ int RGWAsyncPutSystemObjAttrs::_send_request()
                .set_objv_tracker(&objv_tracker)
                .set_exclusive(false)
                .set_attrs(attrs)
-               .write_attrs();
+               .write_attrs(null_yield);
 }
 
 RGWAsyncPutSystemObjAttrs::RGWAsyncPutSystemObjAttrs(RGWCoroutine *caller, RGWAioCompletionNotifier *cn,
@@ -582,8 +584,9 @@ int RGWAsyncFetchRemoteObj::_send_request()
 
   rgw_obj src_obj(bucket_info.bucket, key);
 
-  rgw_obj dest_obj(src_obj);
+  rgw_obj dest_obj(bucket_info.bucket, dest_key.value_or(key));
 
+  std::optional<uint64_t> bytes_transferred;
   int r = store->fetch_remote_obj(obj_ctx,
                        user_id,
                        NULL, /* req_info */
@@ -592,6 +595,7 @@ int RGWAsyncFetchRemoteObj::_send_request()
                        src_obj,
                        bucket_info, /* dest */
                        bucket_info, /* source */
+		       dest_placement_rule,
                        NULL, /* real_time* src_mtime, */
                        NULL, /* real_time* mtime, */
                        NULL, /* const real_time* mod_ptr, */
@@ -609,10 +613,20 @@ int RGWAsyncFetchRemoteObj::_send_request()
                        NULL, /* string *petag, */
                        NULL, /* void (*progress_cb)(off_t, void *), */
                        NULL, /* void *progress_data*); */
-                       &zones_trace);
+                       &zones_trace,
+                       &bytes_transferred);
 
   if (r < 0) {
     ldout(store->ctx(), 0) << "store->fetch_remote_obj() returned r=" << r << dendl;
+    if (counters) {
+      counters->inc(sync_counters::l_fetch_err, 1);
+    }
+  } else if (counters) {
+    if (bytes_transferred) {
+      counters->inc(sync_counters::l_fetch, *bytes_transferred);
+    } else {
+      counters->inc(sync_counters::l_fetch_not_modified);
+    }
   }
   return r;
 }
@@ -818,9 +832,10 @@ RGWSyncLogTrimCR::RGWSyncLogTrimCR(RGWRados *store, const std::string& oid,
 int RGWSyncLogTrimCR::request_complete()
 {
   int r = RGWRadosTimelogTrimCR::request_complete();
-  if (r < 0 && r != -ENODATA) {
+  if (r != -ENODATA) {
     return r;
   }
+  // nothing left to trim, update last_trim_marker
   if (*last_trim_marker < to_marker) {
     *last_trim_marker = to_marker;
   }

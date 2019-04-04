@@ -306,7 +306,8 @@ private:
     RecoveryMessages *m);
   void handle_recovery_push(
     const PushOp &op,
-    RecoveryMessages *m);
+    RecoveryMessages *m,
+    bool is_repair);
   void handle_recovery_push_reply(
     const PushReplyOp &op,
     pg_shard_t from,
@@ -478,7 +479,7 @@ public:
     bool invalidates_cache() const { return plan.invalidates_cache; }
 
     // must be true if requires_rmw(), must be false if invalidates_cache()
-    bool using_cache = false;
+    bool using_cache = true;
 
     /// In progress read state;
     map<hobject_t,extent_set> pending_read; // subset already being read
@@ -599,6 +600,13 @@ public:
   };
   IsPGRecoverablePredicate *get_is_recoverable_predicate() const override {
     return new ECRecPred(ec_impl);
+  }
+
+  int get_ec_data_chunk_count() const override {
+    return ec_impl->get_data_chunk_count();
+  }
+  int get_ec_stripe_chunk_size() const override {
+    return sinfo.get_chunk_size();
   }
 
   /**

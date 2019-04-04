@@ -40,6 +40,16 @@ class Options(object):
     GRAFANA_API_USERNAME = ('admin', str)
     GRAFANA_API_PASSWORD = ('admin', str)
 
+    # NFS Ganesha settings
+    GANESHA_CLUSTERS_RADOS_POOL_NAMESPACE = ('', str)
+
+    # Prometheus settings
+    PROMETHEUS_API_HOST = ('', str)  # Not in use ATM
+    ALERTMANAGER_API_HOST = ('', str)
+
+    # iSCSI management settings
+    ISCSI_API_SSL_VERIFICATION = (True, bool)
+
     @staticmethod
     def has_default_value(name):
         return getattr(Settings, name, None) is None or \
@@ -63,7 +73,7 @@ class SettingsMeta(type):
         else:
             setattr(SettingsMeta, attr, value)
 
-    def __delattr__(self, attr):
+    def __delattr__(cls, attr):
         if not attr.startswith('_') and hasattr(Options, attr):
             mgr.set_module_option(attr, None)
 

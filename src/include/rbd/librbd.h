@@ -237,7 +237,8 @@ enum {
 typedef enum {
   RBD_TRASH_IMAGE_SOURCE_USER = 0,
   RBD_TRASH_IMAGE_SOURCE_MIRRORING = 1,
-  RBD_TRASH_IMAGE_SOURCE_MIGRATION = 2
+  RBD_TRASH_IMAGE_SOURCE_MIGRATION = 2,
+  RBD_TRASH_IMAGE_SOURCE_REMOVING = 3
 } rbd_trash_image_source_t;
 
 typedef struct {
@@ -734,6 +735,13 @@ CEPH_RBD_API int rbd_flatten_with_progress(rbd_image_t image,
                                            librbd_progress_fn_t cb,
                                            void *cbdata);
 
+CEPH_RBD_API int rbd_sparsify(rbd_image_t image, size_t sparse_size);
+
+CEPH_RBD_API int rbd_sparsify_with_progress(rbd_image_t image,
+                                            size_t sparse_size,
+                                            librbd_progress_fn_t cb,
+                                            void *cbdata);
+
 /**
  * List all images that are cloned from the image at the
  * snapshot that is set via rbd_snap_set().
@@ -772,6 +780,10 @@ CEPH_RBD_API void rbd_list_children_cleanup(rbd_child_info_t *children,
 CEPH_RBD_API int rbd_list_children3(rbd_image_t image,
                                     rbd_linked_image_spec_t *images,
                                     size_t *max_images);
+
+CEPH_RBD_API int rbd_list_descendants(rbd_image_t image,
+                                      rbd_linked_image_spec_t *images,
+                                      size_t *max_images);
 
 /**
  * @defgroup librbd_h_locking Advisory Locking

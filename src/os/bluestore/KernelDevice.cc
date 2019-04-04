@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/file.h>
 
 #include "KernelDevice.h"
 #include "include/types.h"
@@ -55,13 +56,12 @@ KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, ai
 
 int KernelDevice::_lock()
 {
-  struct flock l;
-  memset(&l, 0, sizeof(l));
-  l.l_type = F_WRLCK;
-  l.l_whence = SEEK_SET;
-  int r = ::fcntl(fd_directs[WRITE_LIFE_NOT_SET], F_SETLK, &l);
-  if (r < 0)
+  dout(10) << __func__ << " " << fd_directs[WRITE_LIFE_NOT_SET] << dendl;
+  int r = ::flock(fd_directs[WRITE_LIFE_NOT_SET], LOCK_EX | LOCK_NB);
+  if (r < 0) {
+    derr << __func__ << " flock failed on " << path << dendl;
     return -errno;
+  }
   return 0;
 }
 
@@ -92,6 +92,7 @@ int KernelDevice::open(const string& p)
     goto out_fail;
   }
 
+#if defined(F_SET_FILE_RW_HINT)
   for (i = WRITE_LIFE_NONE; i < WRITE_LIFE_MAX; i++) {
     if (fcntl(fd_directs[i], F_SET_FILE_RW_HINT, &i) < 0) {
       r = -errno;
@@ -106,6 +107,7 @@ int KernelDevice::open(const string& p)
     enable_wrt = false;
     dout(0) << "ioctl(F_SET_FILE_RW_HINT) on " << path << " failed: " << cpp_strerror(r) << dendl;
   }
+#endif
 
   dio = true;
   aio = cct->_conf->bdev_aio;
@@ -122,11 +124,13 @@ int KernelDevice::open(const string& p)
     goto out_fail;
   }
 
-  r = _lock();
-  if (r < 0) {
-    derr << __func__ << " failed to lock " << path << ": " << cpp_strerror(r)
-	 << dendl;
-    goto out_fail;
+  if (lock_exclusive) {
+    r = _lock();
+    if (r < 0) {
+      derr << __func__ << " failed to lock " << path << ": " << cpp_strerror(r)
+	   << dendl;
+      goto out_fail;
+    }
   }
 
   struct stat st;
@@ -543,14 +547,16 @@ void KernelDevice::_aio_thread()
 	if (debug_stall_since == utime_t()) {
 	  debug_stall_since = now;
 	} else {
-	  utime_t cutoff = now;
-	  cutoff -= cct->_conf->bdev_debug_aio_suicide_timeout;
-	  if (debug_stall_since < cutoff) {
-	    derr << __func__ << " stalled aio " << debug_oldest
-		 << " since " << debug_stall_since << ", timeout is "
-		 << cct->_conf->bdev_debug_aio_suicide_timeout
-		 << "s, suicide" << dendl;
-	    ceph_abort_msg("stalled aio... buggy kernel or bad device?");
+	  if (cct->_conf->bdev_debug_aio_suicide_timeout) {
+            utime_t cutoff = now;
+	    cutoff -= cct->_conf->bdev_debug_aio_suicide_timeout;
+	    if (debug_stall_since < cutoff) {
+	      derr << __func__ << " stalled aio " << debug_oldest
+		   << " since " << debug_stall_since << ", timeout is "
+		   << cct->_conf->bdev_debug_aio_suicide_timeout
+		   << "s, suicide" << dendl;
+	      ceph_abort_msg("stalled aio... buggy kernel or bad device?");
+	    }
 	  }
 	}
       }
@@ -652,6 +658,18 @@ void KernelDevice::debug_aio_unlink(aio_t& aio)
   if (aio.queue_item.is_linked()) {
     debug_queue.erase(debug_queue.iterator_to(aio));
     if (debug_oldest == &aio) {
+      auto age = cct->_conf->bdev_debug_aio_log_age;
+      if (age && debug_stall_since != utime_t()) {
+        utime_t cutoff = ceph_clock_now();
+	cutoff -= age;
+	if (debug_stall_since < cutoff) {
+	  derr << __func__ << " stalled aio " << debug_oldest
+		<< " since " << debug_stall_since << ", timeout is "
+		<< age
+		<< "s" << dendl;
+	}
+      }
+
       if (debug_queue.empty()) {
 	debug_oldest = nullptr;
       } else {
@@ -862,9 +880,21 @@ int KernelDevice::read(uint64_t off, uint64_t len, bufferlist *pbl,
 
   _aio_log_start(ioc, off, len);
 
+  auto start1 = mono_clock::now();
+
   auto p = buffer::ptr_node::create(buffer::create_small_page_aligned(len));
   int r = ::pread(buffered ? fd_buffereds[WRITE_LIFE_NOT_SET] : fd_directs[WRITE_LIFE_NOT_SET],
 		  p->c_str(), len, off);
+  auto age = cct->_conf->bdev_debug_aio_log_age;
+  if (mono_clock::now() - start1 >= make_timespan(age)) {
+    derr << __func__ << " stalled read "
+         << " 0x" << std::hex << off << "~" << len << std::dec
+         << (buffered ? " (buffered)" : " (direct)")
+	 << " since " << start1 << ", timeout is "
+	 << age
+	 << "s" << dendl;
+  }
+
   if (r < 0) {
     if (ioc->allow_eio && is_expected_ioerr(r)) {
       r = -EIO;
@@ -923,7 +953,17 @@ int KernelDevice::direct_read_unaligned(uint64_t off, uint64_t len, char *buf)
   bufferptr p = buffer::create_small_page_aligned(aligned_len);
   int r = 0;
 
+  auto start1 = mono_clock::now();
   r = ::pread(fd_directs[WRITE_LIFE_NOT_SET], p.c_str(), aligned_len, aligned_off);
+  auto age = cct->_conf->bdev_debug_aio_log_age;
+  if (mono_clock::now() - start1 >= make_timespan(age)) {
+    derr << __func__ << " stalled read "
+         << " 0x" << std::hex << off << "~" << len << std::dec
+	 << " since " << start1 << ", timeout is "
+	 << age
+	 << "s" << dendl;
+  }
+
   if (r < 0) {
     r = -errno;
     derr << __func__ << " 0x" << std::hex << off << "~" << len << std::dec
@@ -952,6 +992,7 @@ int KernelDevice::read_random(uint64_t off, uint64_t len, char *buf,
   ceph_assert(off < size);
   ceph_assert(off + len <= size);
   int r = 0;
+  auto age = cct->_conf->bdev_debug_aio_log_age;
 
   //if it's direct io and unaligned, we have to use a internal buffer
   if (!buffered && ((off % block_size != 0)
@@ -959,8 +1000,10 @@ int KernelDevice::read_random(uint64_t off, uint64_t len, char *buf,
                     || (uintptr_t(buf) % CEPH_PAGE_SIZE != 0)))
     return direct_read_unaligned(off, len, buf);
 
+  auto start1 = mono_clock::now();
   if (buffered) {
     //buffered read
+    auto off0 = off;
     char *t = buf;
     uint64_t left = len;
     while (left > 0) {
@@ -975,9 +1018,23 @@ int KernelDevice::read_random(uint64_t off, uint64_t len, char *buf,
       t += r;
       left -= r;
     }
+    if (mono_clock::now() - start1 >= make_timespan(age)) {
+      derr << __func__ << " stalled read "
+	   << " 0x" << std::hex << off0 << "~" << len << std::dec
+           << " (buffered) since " << start1 << ", timeout is "
+	   << age
+	   << "s" << dendl;
+    }
   } else {
     //direct and aligned read
     r = ::pread(fd_directs[WRITE_LIFE_NOT_SET], buf, len, off);
+    if (mono_clock::now() - start1 >= make_timespan(age)) {
+      derr << __func__ << " stalled read "
+	   << " 0x" << std::hex << off << "~" << len << std::dec
+           << " (direct) since " << start1 << ", timeout is "
+	   << age
+	   << "s" << dendl;
+    }
     if (r < 0) {
       r = -errno;
       derr << __func__ << " direct_aligned_read" << " 0x" << std::hex

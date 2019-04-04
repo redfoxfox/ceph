@@ -19,6 +19,7 @@
 
 #include <string_view>
 
+#include "common/DecayCounter.h"
 #include "include/types.h"
 #include "include/filepath.h"
 #include "include/elist.h"
@@ -187,14 +188,15 @@ public:
     stray_index = (stray_index+1)%NUM_STRAY;
   }
 
-  void activate_stray_manager();
-
   /**
    * Call this when you know that a CDentry is ready to be passed
    * on to StrayManager (i.e. this is a stray you've just created)
    */
   void notify_stray(CDentry *dn) {
     ceph_assert(dn->get_dir()->get_inode()->is_stray());
+    if (dn->state_test(CDentry::STATE_PURGING))
+      return;
+
     stray_manager.eval_stray(dn);
   }
 
@@ -290,19 +292,22 @@ public:
   }
 
   // waiters
-  map<int, map<inodeno_t, MDSInternalContextBase::vec > > waiting_for_base_ino;
+  map<int, map<inodeno_t, MDSContext::vec > > waiting_for_base_ino;
 
-  void discover_base_ino(inodeno_t want_ino, MDSInternalContextBase *onfinish, mds_rank_t from=MDS_RANK_NONE);
-  void discover_dir_frag(CInode *base, frag_t approx_fg, MDSInternalContextBase *onfinish,
+  void discover_base_ino(inodeno_t want_ino, MDSContext *onfinish, mds_rank_t from=MDS_RANK_NONE);
+  void discover_dir_frag(CInode *base, frag_t approx_fg, MDSContext *onfinish,
 			 mds_rank_t from=MDS_RANK_NONE);
-  void discover_path(CInode *base, snapid_t snap, filepath want_path, MDSInternalContextBase *onfinish,
+  void discover_path(CInode *base, snapid_t snap, filepath want_path, MDSContext *onfinish,
 		     bool want_xlocked=false, mds_rank_t from=MDS_RANK_NONE);
-  void discover_path(CDir *base, snapid_t snap, filepath want_path, MDSInternalContextBase *onfinish,
+  void discover_path(CDir *base, snapid_t snap, filepath want_path, MDSContext *onfinish,
 		     bool want_xlocked=false);
   void kick_discovers(mds_rank_t who);  // after a failure.
 
 
   // -- subtrees --
+private:
+  static const unsigned int SUBTREES_COUNT_THRESHOLD = 5;
+  static const unsigned int SUBTREES_DEPTH_THRESHOLD = 5;
 protected:
   /* subtree keys and each tree's non-recursive nested subtrees (the "bounds") */
   map<CDir*,set<CDir*> > subtrees;
@@ -357,12 +362,52 @@ public:
   void project_subtree_rename(CInode *diri, CDir *olddir, CDir *newdir);
   void adjust_subtree_after_rename(CInode *diri, CDir *olddir, bool pop);
 
-  void get_auth_subtrees(set<CDir*>& s);
-  void get_fullauth_subtrees(set<CDir*>& s);
+  auto get_auth_subtrees() {
+    std::vector<CDir*> c;
+    for (auto& p : subtrees) {
+      auto& root = p.first;
+      if (root->is_auth()) {
+        c.push_back(root);
+      }
+    }
+    return c;
+  }
 
-  int num_subtrees();
-  int num_subtrees_fullauth();
-  int num_subtrees_fullnonauth();
+  auto get_fullauth_subtrees() {
+    std::vector<CDir*> c;
+    for (auto& p : subtrees) {
+      auto& root = p.first;
+      if (root->is_full_dir_auth()) {
+        c.push_back(root);
+      }
+    }
+    return c;
+  }
+  auto num_subtrees_fullauth() const {
+    std::size_t n = 0;
+    for (auto& p : subtrees) {
+      auto& root = p.first;
+      if (root->is_full_dir_auth()) {
+        ++n;
+      }
+    }
+    return n;
+  }
+
+  auto num_subtrees_fullnonauth() const {
+    std::size_t n = 0;
+    for (auto& p : subtrees) {
+      auto& root = p.first;
+      if (root->is_full_dir_nonauth()) {
+        ++n;
+      }
+    }
+    return n;
+  }
+
+  auto num_subtrees() const {
+    return subtrees.size();
+  }
 
   
 protected:
@@ -407,7 +452,7 @@ public:
   void project_rstat_frag_to_inode(nest_info_t& rstat, nest_info_t& accounted_rstat,
 				   snapid_t ofirst, snapid_t last, 
 				   CInode *pin, bool cow_head);
-  void broadcast_quota_to_client(CInode *in, client_t exclude_ct = -1);
+  void broadcast_quota_to_client(CInode *in, client_t exclude_ct = -1, bool quota_change = false);
   void predirty_journal_parents(MutationRef mut, EMetaBlob *blob,
 				CInode *in, CDir *parent,
 				int flags, int linkunlink=0,
@@ -419,7 +464,7 @@ public:
     uncommitted_masters[reqid].slaves = slaves;
     uncommitted_masters[reqid].safe = safe;
   }
-  void wait_for_uncommitted_master(metareqid_t reqid, MDSInternalContextBase *c) {
+  void wait_for_uncommitted_master(metareqid_t reqid, MDSContext *c) {
     uncommitted_masters[reqid].waiters.push_back(c);
   }
   bool have_uncommitted_master(metareqid_t reqid, mds_rank_t from) {
@@ -458,7 +503,7 @@ protected:
   struct umaster {
     set<mds_rank_t> slaves;
     LogSegment *ls;
-    MDSInternalContextBase::vec waiters;
+    MDSContext::vec waiters;
     bool safe;
     bool committing;
     bool recovering;
@@ -532,7 +577,7 @@ public:
   }
   void cancel_ambiguous_import(CDir *);
   void finish_ambiguous_import(dirfrag_t dirino);
-  void resolve_start(MDSInternalContext *resolve_done_);
+  void resolve_start(MDSContext *resolve_done_);
   void send_resolves();
   void maybe_send_pending_resolves() {
     if (resolves_pending)
@@ -565,7 +610,7 @@ protected:
 
   map<inodeno_t,map<client_t,map<mds_rank_t,cap_reconnect_t> > > cap_imports;  // ino -> client -> frommds -> capex
   set<inodeno_t> cap_imports_missing;
-  map<inodeno_t, MDSInternalContextBase::vec > cap_reconnect_waiters;
+  map<inodeno_t, MDSContext::vec > cap_reconnect_waiters;
   int cap_imports_num_opening;
   
   set<CInode*> rejoin_undef_inodes;
@@ -575,7 +620,7 @@ protected:
 
   vector<CInode*> rejoin_recover_q, rejoin_check_q;
   list<SimpleLock*> rejoin_eval_locks;
-  MDSInternalContextBase::vec rejoin_waiters;
+  MDSContext::vec rejoin_waiters;
 
   void rejoin_walk(CDir *dir, const MMDSCacheRejoin::ref &rejoin);
   void handle_cache_rejoin(const MMDSCacheRejoin::const_ref &m);
@@ -593,10 +638,10 @@ protected:
     if (rejoins_pending)
       rejoin_send_rejoins();
   }
-  std::unique_ptr<MDSInternalContext> rejoin_done;
-  std::unique_ptr<MDSInternalContext> resolve_done;
+  std::unique_ptr<MDSContext> rejoin_done;
+  std::unique_ptr<MDSContext> resolve_done;
 public:
-  void rejoin_start(MDSInternalContext *rejoin_done_);
+  void rejoin_start(MDSContext *rejoin_done_);
   void rejoin_gather_finish();
   void rejoin_send_rejoins();
   void rejoin_export_caps(inodeno_t ino, client_t client, const cap_reconnect_t& icr,
@@ -635,7 +680,7 @@ public:
     ceph_assert(cap_imports[ino][client].size() == 1);
     cap_imports.erase(ino);
   }
-  void wait_replay_cap_reconnect(inodeno_t ino, MDSInternalContextBase *c) {
+  void wait_replay_cap_reconnect(inodeno_t ino, MDSContext *c) {
     cap_reconnect_waiters[ino].push_back(c);
   }
 
@@ -680,7 +725,7 @@ public:
   Capability* rejoin_import_cap(CInode *in, client_t client, const cap_reconnect_t& icr, mds_rank_t frommds);
   void finish_snaprealm_reconnect(client_t client, SnapRealm *realm, snapid_t seq,
 				  map<client_t,MClientSnap::ref>& updates);
-  void try_reconnect_cap(CInode *in, Session *session);
+  Capability* try_reconnect_cap(CInode *in, Session *session);
   void export_remaining_imported_caps();
 
   //  realm inodes
@@ -743,9 +788,9 @@ public:
   size_t get_cache_size() { return lru.lru_get_size(); }
 
   // trimming
-  bool trim(uint64_t count=0);
+  std::pair<bool, uint64_t> trim(uint64_t count=0);
 private:
-  void trim_lru(uint64_t count, expiremap& expiremap);
+  std::pair<bool, uint64_t> trim_lru(uint64_t count, expiremap& expiremap);
   bool trim_dentry(CDentry *dn, expiremap& expiremap);
   void trim_dirfrag(CDir *dir, CDir *con, expiremap& expiremap);
   bool trim_inode(CDentry *dn, CInode *in, CDir *con, expiremap&);
@@ -778,8 +823,6 @@ public:
 
   void trim_client_leases();
   void check_memory_usage();
-
-  time last_recall_state;
 
   // shutdown
 private:
@@ -912,7 +955,7 @@ protected:
 
 private:
   bool opening_root, open;
-  MDSInternalContextBase::vec waiting_for_open;
+  MDSContext::vec waiting_for_open;
 
 public:
   void init_layouts();
@@ -925,21 +968,21 @@ public:
   void create_mydir_hierarchy(MDSGather *gather);
 
   bool is_open() { return open; }
-  void wait_for_open(MDSInternalContextBase *c) {
+  void wait_for_open(MDSContext *c) {
     waiting_for_open.push_back(c);
   }
 
-  void open_root_inode(MDSInternalContextBase *c);
+  void open_root_inode(MDSContext *c);
   void open_root();
-  void open_mydir_inode(MDSInternalContextBase *c);
-  void open_mydir_frag(MDSInternalContextBase *c);
+  void open_mydir_inode(MDSContext *c);
+  void open_mydir_frag(MDSContext *c);
   void populate_mydir();
 
-  void _create_system_file(CDir *dir, std::string_view name, CInode *in, MDSInternalContextBase *fin);
+  void _create_system_file(CDir *dir, std::string_view name, CInode *in, MDSContext *fin);
   void _create_system_file_finish(MutationRef& mut, CDentry *dn,
-                                  version_t dpv, MDSInternalContextBase *fin);
+                                  version_t dpv, MDSContext *fin);
 
-  void open_foreign_mdsdir(inodeno_t ino, MDSInternalContextBase *c);
+  void open_foreign_mdsdir(inodeno_t ino, MDSContext *c);
   CDir *get_stray_dir(CInode *in);
   CDentry *get_or_create_stray_dentry(CInode *in);
 
@@ -981,7 +1024,7 @@ public:
 
   CInode *cache_traverse(const filepath& path);
 
-  void open_remote_dirfrag(CInode *diri, frag_t fg, MDSInternalContextBase *fin);
+  void open_remote_dirfrag(CInode *diri, frag_t fg, MDSContext *fin);
   CInode *get_dentry_inode(CDentry *dn, MDRequestRef& mdr, bool projected=false);
 
   bool parallel_fetch(map<inodeno_t,filepath>& pathmap, set<inodeno_t>& missing);
@@ -989,9 +1032,9 @@ public:
 				   set<CDir*>& fetch_queue, set<inodeno_t>& missing,
 				   C_GatherBuilder &gather_bld);
 
-  void open_remote_dentry(CDentry *dn, bool projected, MDSInternalContextBase *fin,
+  void open_remote_dentry(CDentry *dn, bool projected, MDSContext *fin,
 			  bool want_xlocked=false);
-  void _open_remote_dentry_finish(CDentry *dn, inodeno_t ino, MDSInternalContextBase *fin,
+  void _open_remote_dentry_finish(CDentry *dn, inodeno_t ino, MDSContext *fin,
 				  bool want_xlocked, int r);
 
   void make_trace(vector<CDentry*>& trace, CInode *in);
@@ -1010,7 +1053,7 @@ protected:
     version_t tid;
     int64_t pool;
     int last_err;
-    MDSInternalContextBase::vec waiters;
+    MDSContext::vec waiters;
     open_ino_info_t() : checking(MDS_RANK_NONE), auth_hint(MDS_RANK_NONE),
       check_peers(true), fetch_backtrace(true), discover(false),
       want_replica(false), want_xlocked(false), tid(0), pool(-1),
@@ -1037,14 +1080,14 @@ protected:
 
 public:
   void kick_open_ino_peers(mds_rank_t who);
-  void open_ino(inodeno_t ino, int64_t pool, MDSInternalContextBase *fin,
+  void open_ino(inodeno_t ino, int64_t pool, MDSContext *fin,
 		bool want_replica=true, bool want_xlocked=false);
   
   // -- find_ino_peer --
   struct find_ino_peer_info_t {
     inodeno_t ino;
     ceph_tid_t tid;
-    MDSInternalContextBase *fin;
+    MDSContext *fin;
     mds_rank_t hint;
     mds_rank_t checking;
     set<mds_rank_t> checked;
@@ -1055,7 +1098,7 @@ public:
   map<ceph_tid_t, find_ino_peer_info_t> find_ino_peer;
   ceph_tid_t find_ino_peer_last_tid;
 
-  void find_ino_peers(inodeno_t ino, MDSInternalContextBase *c, mds_rank_t hint=MDS_RANK_NONE);
+  void find_ino_peers(inodeno_t ino, MDSContext *c, mds_rank_t hint=MDS_RANK_NONE);
   void _do_find_ino_peer(find_ino_peer_info_t& fip);
   void handle_find_ino(const MMDSFindIno::const_ref &m);
   void handle_find_ino_reply(const MMDSFindInoReply::const_ref &m);
@@ -1081,7 +1124,6 @@ protected:
   void scan_stray_dir(dirfrag_t next=dirfrag_t());
   StrayManager stray_manager;
   friend struct C_MDC_RetryScanStray;
-  friend class C_IO_MDC_FetchedBacktrace;
 
   // == messages ==
  public:
@@ -1099,9 +1141,9 @@ public:
   void replicate_inode(CInode *in, mds_rank_t to, bufferlist& bl,
 		       uint64_t features);
   
-  CDir* add_replica_dir(bufferlist::const_iterator& p, CInode *diri, mds_rank_t from, MDSInternalContextBase::vec& finished);
-  CDentry *add_replica_dentry(bufferlist::const_iterator& p, CDir *dir, MDSInternalContextBase::vec& finished);
-  CInode *add_replica_inode(bufferlist::const_iterator& p, CDentry *dn, MDSInternalContextBase::vec& finished);
+  CDir* add_replica_dir(bufferlist::const_iterator& p, CInode *diri, mds_rank_t from, MDSContext::vec& finished);
+  CDentry *add_replica_dentry(bufferlist::const_iterator& p, CDir *dir, MDSContext::vec& finished);
+  CInode *add_replica_inode(bufferlist::const_iterator& p, CDentry *dn, MDSContext::vec& finished);
 
   void replicate_stray(CDentry *straydn, mds_rank_t who, bufferlist& bl);
   CDentry *add_replica_stray(const bufferlist &bl, mds_rank_t from);
@@ -1121,7 +1163,7 @@ private:
     int bits;
     bool committed;
     LogSegment *ls;
-    MDSInternalContextBase::vec waiters;
+    MDSContext::vec waiters;
     frag_vec_t old_frags;
     bufferlist rollback;
     ufragment() : bits(0), committed(false), ls(NULL) {}
@@ -1130,8 +1172,8 @@ private:
 
   struct fragment_info_t {
     int bits;
-    list<CDir*> dirs;
-    list<CDir*> resultfrags;
+    std::vector<CDir*> dirs;
+    std::vector<CDir*> resultfrags;
     MDRequestRef mdr;
     set<mds_rank_t> notify_ack_waiting;
     bool finishing = false;
@@ -1149,21 +1191,21 @@ private:
   typedef map<dirfrag_t,fragment_info_t>::iterator fragment_info_iterator;
 
   void adjust_dir_fragments(CInode *diri, frag_t basefrag, int bits,
-			    list<CDir*>& frags, MDSInternalContextBase::vec& waiters, bool replay);
+			    std::vector<CDir*>* frags, MDSContext::vec& waiters, bool replay);
   void adjust_dir_fragments(CInode *diri,
-			    list<CDir*>& srcfrags,
+			    const std::vector<CDir*>& srcfrags,
 			    frag_t basefrag, int bits,
-			    list<CDir*>& resultfrags, 
-			    MDSInternalContextBase::vec& waiters,
+			    std::vector<CDir*>* resultfrags,
+			    MDSContext::vec& waiters,
 			    bool replay);
   CDir *force_dir_fragment(CInode *diri, frag_t fg, bool replay=true);
   void get_force_dirfrag_bound_set(const vector<dirfrag_t>& dfs, set<CDir*>& bounds);
 
-  bool can_fragment(CInode *diri, list<CDir*>& dirs);
-  void fragment_freeze_dirs(list<CDir*>& dirs);
+  bool can_fragment(CInode *diri, const std::vector<CDir*>& dirs);
+  void fragment_freeze_dirs(const std::vector<CDir*>& dirs);
   void fragment_mark_and_complete(MDRequestRef& mdr);
   void fragment_frozen(MDRequestRef& mdr, int r);
-  void fragment_unmark_unfreeze_dirs(list<CDir*>& dirs);
+  void fragment_unmark_unfreeze_dirs(const std::vector<CDir*>& dirs);
   void fragment_drop_locks(fragment_info_t &info);
   void fragment_maybe_finish(const fragment_info_iterator& it);
   void dispatch_fragment_dir(MDRequestRef& mdr);
@@ -1187,8 +1229,12 @@ private:
 				LogSegment *ls, bufferlist *rollback=NULL);
   void finish_uncommitted_fragment(dirfrag_t basedirfrag, int op);
   void rollback_uncommitted_fragment(dirfrag_t basedirfrag, frag_vec_t&& old_frags);
+
+
+  DecayCounter trim_counter;
+
 public:
-  void wait_for_uncommitted_fragment(dirfrag_t dirfrag, MDSInternalContextBase *c) {
+  void wait_for_uncommitted_fragment(dirfrag_t dirfrag, MDSContext *c) {
     ceph_assert(uncommitted_fragments.count(dirfrag));
     uncommitted_fragments[dirfrag].waiters.push_back(c);
   }
@@ -1231,7 +1277,7 @@ public:
   // == crap fns ==
  public:
   void show_cache();
-  void show_subtrees(int dbl=10);
+  void show_subtrees(int dbl=10, bool force_print=false);
 
   CInode *hack_pick_random_inode() {
     ceph_assert(!inode_map.empty());

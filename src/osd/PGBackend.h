@@ -227,6 +227,7 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
        const hobject_t &hoid) = 0;
 
      virtual bool pg_is_undersized() const = 0;
+     virtual bool pg_is_repair() const = 0;
 
      virtual void log_operation(
        const vector<pg_log_entry_t> &logv,
@@ -270,8 +271,6 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      virtual spg_t primary_spg_t() const = 0;
      virtual pg_shard_t primary_shard() const = 0;
 
-     virtual uint64_t min_peer_features() const = 0;
-
      virtual hobject_t get_temp_recovery_object(const hobject_t& target,
 						eversion_t version) = 0;
 
@@ -295,6 +294,13 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
 
      virtual bool check_osdmap_full(const set<pg_shard_t> &missing_on) = 0;
 
+     virtual bool pg_is_repair() = 0;
+     virtual void inc_osd_stat_repaired() = 0;
+     virtual bool pg_is_remote_backfilling() = 0;
+     virtual void pg_add_local_num_bytes(int64_t num_bytes) = 0;
+     virtual void pg_sub_local_num_bytes(int64_t num_bytes) = 0;
+     virtual void pg_add_num_bytes(int64_t num_bytes) = 0;
+     virtual void pg_sub_num_bytes(int64_t num_bytes) = 0;
      virtual bool maybe_preempt_replica_scrub(const hobject_t& oid) = 0;
      virtual ~Listener() {}
    };
@@ -406,6 +412,8 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
 
    virtual IsPGRecoverablePredicate *get_is_recoverable_predicate() const = 0;
    virtual IsPGReadablePredicate *get_is_readable_predicate() const = 0;
+   virtual int get_ec_data_chunk_count() const { return 0; };
+   virtual int get_ec_stripe_chunk_size() const { return 0; };
 
    virtual void dump_recovery_info(Formatter *f) const = 0;
 
@@ -602,10 +610,10 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      ScrubMap &map,
      ScrubMapBuilder &pos,
      ScrubMap::object &o) = 0;
-   void be_large_omap_check(
+   void be_omap_checks(
      const map<pg_shard_t,ScrubMap*> &maps,
      const set<hobject_t> &master_set,
-     int& large_omap_objects,
+     omap_stat_t& omap_stats,
      ostream &warnstream) const;
 
    static PGBackend *build_pg_backend(

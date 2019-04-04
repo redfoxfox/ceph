@@ -121,6 +121,8 @@ public:
 
   int bindv(const entity_addrvec_t& bind_addrs) override;
 
+  bool should_use_msgr2() override;
+
   /** @} Configuration functions */
 
   /**
@@ -137,11 +139,7 @@ public:
    * @defgroup Messaging
    * @{
    */
-  int send_to(Message *m, int type, const entity_addrvec_t& addrs) override {
-    Mutex::Locker l(lock);
-
-    return _send_to(m, type, addrs);
-  }
+  int send_to(Message *m, int type, const entity_addrvec_t& addrs) override;
 
   /** @} // Messaging */
 
@@ -216,9 +214,10 @@ private:
   void submit_message(Message *m, AsyncConnectionRef con,
                       const entity_addrvec_t& dest_addrs, int dest_type);
 
-  int _send_to(Message *m, int type, const entity_addrvec_t& addrs);
   void _finish_bind(const entity_addrvec_t& bind_addrs,
 		    const entity_addrvec_t& listen_addrs);
+
+  entity_addrvec_t _filter_addrs(const entity_addrvec_t& addrs);
 
  private:
   static const uint64_t ReapDeadConnectionThreshold = 5;
@@ -359,6 +358,10 @@ public:
     return stack;
   }
 
+  uint64_t get_nonce() const {
+    return nonce;
+  }
+
   /**
    * Increment the global sequence for this AsyncMessenger and return it.
    * This is for the connect protocol, although it doesn't hurt if somebody
@@ -388,6 +391,7 @@ public:
    */
   void init_local_connection() {
     Mutex::Locker l(lock);
+    local_connection->is_loopback = true;
     _init_local_connection();
   }
 

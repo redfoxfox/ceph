@@ -9,6 +9,11 @@ import * as _ from 'lodash';
 import { TableActionsComponent } from '../app/shared/datatable/table-actions/table-actions.component';
 import { CdFormGroup } from '../app/shared/forms/cd-form-group';
 import { Permission } from '../app/shared/models/permissions';
+import {
+  PrometheusAlert,
+  PrometheusNotification,
+  PrometheusNotificationAlert
+} from '../app/shared/models/prometheus-alerts';
 import { _DEV_ } from '../unit-test-configuration';
 
 export function configureTestBed(configuration, useOldMethod?) {
@@ -22,7 +27,8 @@ export function configureTestBed(configuration, useOldMethod?) {
         TestBed.resetTestingModule = () => TestBed;
       })()
         .then(done)
-        .catch(done.fail));
+        .catch(done.fail)
+    );
     afterAll(() => {
       TestBed.resetTestingModule = resetTestingModule;
     });
@@ -163,22 +169,91 @@ export class FormHelper {
   expectError(control: AbstractControl | string, error: string) {
     expect(this.getControl(control).hasError(error)).toBeTruthy();
   }
+}
+
+export class FixtureHelper {
+  fixture: ComponentFixture<any>;
+
+  constructor(fixture: ComponentFixture<any>) {
+    this.fixture = fixture;
+  }
 
   /**
    * Expect a list of id elements to be visible or not.
    */
-  expectIdElementsVisible(fixture: ComponentFixture<any>, ids: string[], visibility: boolean) {
-    fixture.detectChanges();
+  expectIdElementsVisible(ids: string[], visibility: boolean) {
     ids.forEach((css) => {
-      this.expectElementVisible(fixture, `#${css}`, visibility);
+      this.expectElementVisible(`#${css}`, visibility);
     });
   }
 
   /**
-   * Expect a specific element in fixture to be visible or not.
+   * Expect a specific element to be visible or not.
    */
-  expectElementVisible(fixture: ComponentFixture<any>, css: string, visibility: boolean) {
-    expect(Boolean(fixture.debugElement.query(By.css(css)))).toBe(visibility);
+  expectElementVisible(css: string, visibility: boolean) {
+    expect(Boolean(this.getElementByCss(css))).toBe(visibility);
+  }
+
+  expectFormFieldToBe(css: string, value: string) {
+    const props = this.getElementByCss(css).properties;
+    expect(props['value'] || props['checked'].toString()).toBe(value);
+  }
+
+  clickElement(css: string) {
+    this.getElementByCss(css).triggerEventHandler('click', null);
+    this.fixture.detectChanges();
+  }
+
+  getText(css: string) {
+    const e = this.getElementByCss(css);
+    return e ? e.nativeElement.textContent.trim() : null;
+  }
+
+  getElementByCss(css: string) {
+    this.fixture.detectChanges();
+    return this.fixture.debugElement.query(By.css(css));
+  }
+}
+
+export class PrometheusHelper {
+  createAlert(name, state = 'active', timeMultiplier = 1) {
+    return {
+      fingerprint: name,
+      status: { state },
+      labels: {
+        alertname: name
+      },
+      annotations: {
+        summary: `${name} is ${state}`
+      },
+      generatorURL: `http://${name}`,
+      startsAt: new Date(new Date('2022-02-22').getTime() * timeMultiplier).toString()
+    } as PrometheusAlert;
+  }
+
+  createNotificationAlert(name, status = 'firing') {
+    return {
+      status: status,
+      labels: {
+        alertname: name
+      },
+      annotations: {
+        summary: `${name} is ${status}`
+      },
+      generatorURL: `http://${name}`
+    } as PrometheusNotificationAlert;
+  }
+
+  createNotification(alertNumber = 1, status = 'firing') {
+    const alerts = [];
+    for (let i = 0; i < alertNumber; i++) {
+      alerts.push(this.createNotificationAlert('alert' + i, status));
+    }
+    return { alerts, status } as PrometheusNotification;
+  }
+
+  createLink(url) {
+    return `<a href="${url}" target="_blank"><i class="fa fa-line-chart"></i></a>`;
   }
 }
 

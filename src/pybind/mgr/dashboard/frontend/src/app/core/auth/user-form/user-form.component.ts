@@ -10,7 +10,8 @@ import { AuthService } from '../../../shared/api/auth.service';
 import { RoleService } from '../../../shared/api/role.service';
 import { UserService } from '../../../shared/api/user.service';
 import { ConfirmationModalComponent } from '../../../shared/components/confirmation-modal/confirmation-modal.component';
-import { SelectBadgesMessages } from '../../../shared/components/select-badges/select-badges-messages.model';
+import { SelectMessages } from '../../../shared/components/select/select-messages.model';
+import { ActionLabelsI18n } from '../../../shared/constants/app.constants';
 import { NotificationType } from '../../../shared/enum/notification-type.enum';
 import { CdFormGroup } from '../../../shared/forms/cd-form-group';
 import { CdValidators } from '../../../shared/forms/cd-validators';
@@ -37,7 +38,9 @@ export class UserFormComponent implements OnInit {
   userFormMode = UserFormMode;
   mode: UserFormMode;
   allRoles: Array<UserFormRoleModel>;
-  messages: SelectBadgesMessages;
+  messages = new SelectMessages({ empty: 'There are no roles.' }, this.i18n);
+  action: string;
+  resource: string;
 
   constructor(
     private authService: AuthService,
@@ -48,10 +51,12 @@ export class UserFormComponent implements OnInit {
     private roleService: RoleService,
     private userService: UserService,
     private notificationService: NotificationService,
-    private i18n: I18n
+    private i18n: I18n,
+    public actionLabels: ActionLabelsI18n
   ) {
+    this.resource = this.i18n('user');
     this.createForm();
-    this.messages = new SelectBadgesMessages({ empty: 'There are no roles.' }, this.i18n);
+    this.messages = new SelectMessages({ empty: 'There are no roles.' }, this.i18n);
   }
 
   createForm() {
@@ -82,7 +87,11 @@ export class UserFormComponent implements OnInit {
   ngOnInit() {
     if (this.router.url.startsWith('/user-management/users/edit')) {
       this.mode = this.userFormMode.editing;
+      this.action = this.actionLabels.EDIT;
+    } else {
+      this.action = this.actionLabels.CREATE;
     }
+
     this.roleService.list().subscribe((roles: Array<UserFormRoleModel>) => {
       this.allRoles = roles;
     });

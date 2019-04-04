@@ -158,7 +158,7 @@ WRITE_INTTYPE_ENCODER(int16_t, le16)
 
 
 #define WRITE_CLASS_ENCODER(cl)						\
-  inline void encode(const cl &c, ::ceph::bufferlist &bl, uint64_t features=0) { \
+  inline void encode(const cl& c, ::ceph::buffer::list &bl, uint64_t features=0) { \
     ENCODE_DUMP_PRE(); c.encode(bl); ENCODE_DUMP_POST(cl); }		\
   inline void decode(cl &c, ::ceph::bufferlist::const_iterator &p) { c.decode(p); }
 
@@ -681,8 +681,9 @@ inline void encode(const std::list<std::shared_ptr<T>, Alloc>& ls,
 {
   __u32 n = (__u32)(ls.size());  // c++11 std::list::size() is O(1)
   encode(n, bl);
-  for (auto p = ls.begin(); p != ls.end(); ++p)
-    encode(**p, bl);
+  for (const auto& ref : ls) {
+    encode(*ref, bl);
+  }
 }
 template<class T, class Alloc>
 inline void encode(const std::list<std::shared_ptr<T>, Alloc>& ls,
@@ -690,8 +691,9 @@ inline void encode(const std::list<std::shared_ptr<T>, Alloc>& ls,
 {
   __u32 n = (__u32)(ls.size());  // c++11 std::list::size() is O(1)
   encode(n, bl);
-  for (auto p = ls.begin(); p != ls.end(); ++p)
-    encode(**p, bl, features);
+  for (const auto& ref : ls) {
+    encode(*ref, bl, features);
+  }
 }
 template<class T, class Alloc>
 inline void decode(std::list<std::shared_ptr<T>, Alloc>& ls,
@@ -701,9 +703,9 @@ inline void decode(std::list<std::shared_ptr<T>, Alloc>& ls,
   decode(n, p);
   ls.clear();
   while (n--) {
-    std::shared_ptr<T> v(std::make_shared<T>());
-    decode(*v, p);
-    ls.push_back(v);
+    auto ref = std::make_shared<T>();
+    decode(*ref, p);
+    ls.emplace_back(std::move(ref));
   }
 }
 
@@ -917,11 +919,12 @@ inline void encode(const std::vector<std::shared_ptr<T>,Alloc>& v,
 {
   __u32 n = (__u32)(v.size());
   encode(n, bl);
-  for (auto p = v.begin(); p != v.end(); ++p)
-    if (*p)
-      encode(**p, bl, features);
+  for (const auto& ref : v) {
+    if (ref)
+      encode(*ref, bl, features);
     else
       encode(T(), bl, features);
+  }
 }
 template<class T, class Alloc>
 inline void encode(const std::vector<std::shared_ptr<T>,Alloc>& v,
@@ -929,11 +932,12 @@ inline void encode(const std::vector<std::shared_ptr<T>,Alloc>& v,
 {
   __u32 n = (__u32)(v.size());
   encode(n, bl);
-  for (auto p = v.begin(); p != v.end(); ++p)
-    if (*p)
-      encode(**p, bl);
+  for (const auto& ref : v) {
+    if (ref)
+      encode(*ref, bl);
     else
       encode(T(), bl);
+  }
 }
 template<class T, class Alloc>
 inline void decode(std::vector<std::shared_ptr<T>,Alloc>& v,
@@ -941,10 +945,12 @@ inline void decode(std::vector<std::shared_ptr<T>,Alloc>& v,
 {
   __u32 n;
   decode(n, p);
-  v.resize(n);
-  for (__u32 i=0; i<n; i++) {
-    v[i] = std::make_shared<T>();
-    decode(*v[i], p);
+  v.clear();
+  v.reserve(n);
+  while (n--) {
+    auto ref = std::make_shared<T>();
+    decode(*ref, p);
+    v.emplace_back(std::move(ref));
   }
 }
 
@@ -1274,7 +1280,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
   __u8 struct_v = v;                                         \
   __u8 struct_compat = compat;		                     \
   ceph_le32 struct_len;				             \
-  auto filler = (bl).append_hole(sizeof(struct_v) + 	     \
+  auto filler = (bl).append_hole(sizeof(struct_v) +	     \
     sizeof(struct_compat) + sizeof(struct_len));	     \
   const auto starting_bl_len = (bl).length();		     \
   using ::ceph::encode;					     \
@@ -1328,7 +1334,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
   decode(struct_v, bl);						\
   decode(struct_compat, bl);						\
   if (v < struct_compat)						\
-    throw buffer::malformed_input(DECODE_ERR_OLDVERSION(__PRETTY_FUNCTION__, v, struct_compat)); \
+    throw ::ceph::buffer::malformed_input(DECODE_ERR_OLDVERSION(__PRETTY_FUNCTION__, v, struct_compat)); \
   __u32 struct_len;							\
   decode(struct_len, bl);						\
   if (struct_len > bl.get_remaining())					\
@@ -1346,10 +1352,10 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
     __u8 struct_compat;							\
     decode(struct_compat, bl);					\
     if (v < struct_compat)						\
-      throw buffer::malformed_input(DECODE_ERR_OLDVERSION(__PRETTY_FUNCTION__, v, struct_compat)); \
+      throw ::ceph::buffer::malformed_input(DECODE_ERR_OLDVERSION(__PRETTY_FUNCTION__, v, struct_compat)); \
   } else if (skip_v) {							\
     if (bl.get_remaining() < skip_v)					\
-      throw buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
+      throw ::ceph::buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
     bl.advance(skip_v);							\
   }									\
   unsigned struct_end = 0;						\
@@ -1357,7 +1363,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
     __u32 struct_len;							\
     decode(struct_len, bl);						\
     if (struct_len > bl.get_remaining())				\
-      throw buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
+      throw ::ceph::buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
     struct_end = bl.get_off() + struct_len;				\
   }									\
   do {
@@ -1388,7 +1394,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
     __u8 struct_compat;							\
     decode(struct_compat, bl);						\
     if (v < struct_compat)						\
-      throw buffer::malformed_input(DECODE_ERR_OLDVERSION(		\
+      throw ::ceph::buffer::malformed_input(DECODE_ERR_OLDVERSION(	\
 	__PRETTY_FUNCTION__, v, struct_compat));			\
   }									\
   unsigned struct_end = 0;						\
@@ -1396,7 +1402,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
     __u32 struct_len;							\
     decode(struct_len, bl);						\
     if (struct_len > bl.get_remaining())				\
-      throw buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
+      throw ::ceph::buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
     struct_end = bl.get_off() + struct_len;				\
   }									\
   do {
@@ -1433,7 +1439,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
   } while (false);							\
   if (struct_end) {							\
     if (bl.get_off() > struct_end)					\
-      throw buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
+      throw ::ceph::buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
     if (bl.get_off() < struct_end)					\
       bl.advance(struct_end - bl.get_off());				\
   }
@@ -1449,9 +1455,9 @@ inline ssize_t decode_file(int fd, std::string &str)
   bufferlist bl;
   __u32 len = 0;
   bl.read_fd(fd, sizeof(len));
-  decode(len, bl);                                                                                                  
+  decode(len, bl);
   bl.read_fd(fd, len);
-  decode(str, bl);                                                                                                  
+  decode(str, bl);
   return bl.length();
 }
 

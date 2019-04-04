@@ -18,6 +18,7 @@
 #include "common/ceph_crypto_cms.h"
 #include "common/armor.h"
 #include "common/Cond.h"
+#include "rgw_perf_counters.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
@@ -121,24 +122,6 @@ void rgw_get_token_id(const string& token, string& token_id)
   char calc_md5[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 1];
   buf_to_hex(m, CEPH_CRYPTO_MD5_DIGESTSIZE, calc_md5);
   token_id = calc_md5;
-}
-
-bool rgw_decode_pki_token(CephContext * const cct,
-                          const string& token,
-                          bufferlist& bl)
-{
-  if (!rgw_is_pki_token(token)) {
-    return false;
-  }
-
-  int ret = rgw_decode_b64_cms(cct, token, bl);
-  if (ret < 0) {
-    return false;
-  }
-
-  ldout(cct, 20) << "successfully decoded pki token" << dendl;
-
-  return true;
 }
 
 
@@ -299,7 +282,7 @@ int Service::issue_admin_token_request(CephContext* const cct,
 
   token_req.set_url(token_url);
 
-  const int ret = token_req.process();
+  const int ret = token_req.process(null_yield);
   if (ret < 0) {
     return ret;
   }
@@ -373,7 +356,7 @@ int Service::get_keystone_barbican_token(CephContext * const cct,
   token_req.set_url(token_url);
 
   ldout(cct, 20) << "Requesting secret from barbican url=" << token_url << dendl;
-  const int ret = token_req.process();
+  const int ret = token_req.process(null_yield);
   if (ret < 0) {
     ldout(cct, 20) << "Barbican process error:" << token_bl.c_str() << dendl;
     return ret;
@@ -600,7 +583,7 @@ int TokenCache::RevokeThread::check_revoked()
   req.set_url(url);
 
   req.set_send_length(0);
-  int ret = req.process();
+  int ret = req.process(null_yield);
   if (ret < 0) {
     return ret;
   }

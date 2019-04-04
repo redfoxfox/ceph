@@ -2,10 +2,16 @@ import { Component, OnDestroy, OnInit } from '@angular/core';
 
 import { I18n } from '@ngx-translate/i18n-polyfill';
 import * as _ from 'lodash';
+import { Subscription } from 'rxjs/Subscription';
 
 import { HealthService } from '../../../shared/api/health.service';
 import { Permissions } from '../../../shared/models/permissions';
 import { AuthStorageService } from '../../../shared/services/auth-storage.service';
+import {
+  FeatureTogglesMap$,
+  FeatureTogglesService
+} from '../../../shared/services/feature-toggles.service';
+import { RefreshIntervalService } from '../../../shared/services/refresh-interval.service';
 import { PgCategoryService } from '../../shared/pg-category.service';
 import { HealthPieColor } from '../health-pie/health-pie-color.enum';
 
@@ -16,27 +22,31 @@ import { HealthPieColor } from '../health-pie/health-pie-color.enum';
 })
 export class HealthComponent implements OnInit, OnDestroy {
   healthData: any;
-  interval: number;
+  interval = new Subscription();
   permissions: Permissions;
+  enabledFeature$: FeatureTogglesMap$;
 
   constructor(
     private healthService: HealthService,
     private i18n: I18n,
     private authStorageService: AuthStorageService,
-    private pgCategoryService: PgCategoryService
+    private pgCategoryService: PgCategoryService,
+    private featureToggles: FeatureTogglesService,
+    private refreshIntervalService: RefreshIntervalService
   ) {
     this.permissions = this.authStorageService.getPermissions();
+    this.enabledFeature$ = this.featureToggles.get();
   }
 
   ngOnInit() {
     this.getHealth();
-    this.interval = window.setInterval(() => {
+    this.interval = this.refreshIntervalService.intervalData$.subscribe(() => {
       this.getHealth();
-    }, 5000);
+    });
   }
 
   ngOnDestroy() {
-    clearInterval(this.interval);
+    this.interval.unsubscribe();
   }
 
   getHealth() {
@@ -45,7 +55,7 @@ export class HealthComponent implements OnInit, OnDestroy {
     });
   }
 
-  prepareReadWriteRatio(chart, data) {
+  prepareReadWriteRatio(chart) {
     const ratioLabels = [];
     const ratioData = [];
 
@@ -90,10 +100,10 @@ export class HealthComponent implements OnInit, OnDestroy {
     chart.colors = [
       {
         backgroundColor: [
-          HealthPieColor.SHADE_GREEN_CYAN,
-          HealthPieColor.MEDIUM_DARK_SHADE_CYAN_BLUE,
-          HealthPieColor.LIGHT_SHADE_BROWN,
-          HealthPieColor.MEDIUM_LIGHT_SHADE_PINK_RED
+          HealthPieColor.DEFAULT_GREEN,
+          HealthPieColor.DEFAULT_BLUE,
+          HealthPieColor.DEFAULT_ORANGE,
+          HealthPieColor.DEFAULT_RED
         ]
       }
     ];

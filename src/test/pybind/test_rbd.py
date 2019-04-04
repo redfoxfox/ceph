@@ -1117,6 +1117,10 @@ class TestImage(object):
             for option in image.config_list():
                 eq(option['source'], RBD_CONFIG_SOURCE_CONFIG)
 
+    def test_sparsify(self):
+        assert_raises(InvalidArgument, self.image.sparsify, 16)
+        self.image.sparsify(4096)
+
 class TestImageId(object):
 
     def setUp(self):
@@ -1344,6 +1348,9 @@ class TestClone(object):
                   for x in self.image.list_children2()]
         eq(actual, expected)
 
+    def check_descendants(self, expected):
+        eq(list(self.image.list_descendants()), expected)
+
     def get_image_id(self, ioctx, name):
         with Image(ioctx, name) as image:
             return image.id()
@@ -1357,10 +1364,15 @@ class TestClone(object):
             [{'pool': pool_name, 'pool_namespace': '',
               'image': self.clone_name, 'trash': False,
               'id': self.get_image_id(ioctx, self.clone_name)}])
+        self.check_descendants(
+            [{'pool': pool_name, 'pool_namespace': '',
+              'image': self.clone_name, 'trash': False,
+              'id': self.get_image_id(ioctx, self.clone_name)}])
         self.clone.close()
         self.rbd.remove(ioctx, self.clone_name)
         eq(self.image.list_children(), [])
         eq(list(self.image.list_children2()), [])
+        eq(list(self.image.list_descendants()), [])
 
         clone_name = get_temp_image_name() + '_'
         expected_children = []
@@ -1375,6 +1387,7 @@ class TestClone(object):
                  'id': self.get_image_id(ioctx, clone_name + str(i))})
             self.check_children(expected_children)
             self.check_children2(expected_children2)
+            self.check_descendants(expected_children2)
 
         image6_id = self.get_image_id(ioctx, clone_name + str(5))
         RBD().trash_move(ioctx, clone_name + str(5), 0)
@@ -1385,6 +1398,7 @@ class TestClone(object):
               item["trash"] = True
         self.check_children(expected_children)
         self.check_children2(expected_children2)
+        self.check_descendants(expected_children2)
 
         RBD().trash_restore(ioctx, image6_id, clone_name + str(5))
         expected_children.append((pool_name, clone_name + str(5)))
@@ -1394,6 +1408,7 @@ class TestClone(object):
               item["trash"] = False
         self.check_children(expected_children)
         self.check_children2(expected_children2)
+        self.check_descendants(expected_children2)
 
         for i in range(10):
             self.rbd.remove(ioctx, clone_name + str(i))
@@ -1401,6 +1416,7 @@ class TestClone(object):
             expected_children2.pop(0)
             self.check_children(expected_children)
             self.check_children2(expected_children2)
+            self.check_descendants(expected_children2)
 
         eq(self.image.list_children(), [])
         eq(list(self.image.list_children2()), [])
@@ -1408,6 +1424,10 @@ class TestClone(object):
                        features)
         self.check_children([(pool_name, self.clone_name)])
         self.check_children2(
+            [{'pool': pool_name, 'pool_namespace': '',
+              'image': self.clone_name, 'trash': False,
+              'id': self.get_image_id(ioctx, self.clone_name)}])
+        self.check_descendants(
             [{'pool': pool_name, 'pool_namespace': '',
               'image': self.clone_name, 'trash': False,
               'id': self.get_image_id(ioctx, self.clone_name)}])
@@ -2003,6 +2023,16 @@ class TestGroups(object):
         eq([], list(self.group.list_images()))
         self.group.add_image(ioctx, image_name)
         eq([image_name], [img['name'] for img in self.group.list_images()])
+
+    def test_group_image_list_move_to_trash(self):
+        eq([], list(self.group.list_images()))
+        with Image(ioctx, image_name) as image:
+            image_id = image.id()
+        self.group.add_image(ioctx, image_name)
+        eq([image_name], [img['name'] for img in self.group.list_images()])
+        RBD().trash_move(ioctx, image_name, 0)
+        eq([], list(self.group.list_images()))
+        RBD().trash_restore(ioctx, image_id, image_name)
 
     def test_group_image_many_images(self):
         eq([], list(self.group.list_images()))

@@ -19,6 +19,12 @@ try:
 except ImportError:
     ApiException = None
 
+try:
+    import orchestrator
+except ImportError:
+    pass  # just used for type checking.
+
+
 ROOK_SYSTEM_NS = "rook-ceph-system"
 ROOK_API_VERSION = "v1"
 ROOK_API_NAME = "ceph.rook.io/%s" % ROOK_API_VERSION
@@ -45,32 +51,6 @@ class RookCluster(object):
         # (this is also assumed some places in Rook source, may
         #  be formalized at some point)
         return self.cluster_name
-
-    def init_rook(self):
-        """
-        Create a passive Rook configuration for this Ceph cluster.  This
-        will prompt Rook to start watching for other resources within
-        the cluster (e.g. Filesystem CRDs), but no other action will happen.
-        """
-
-        # TODO: complete or remove this functionality: if Rook wasn't
-        # already running, then we would need to supply it with
-        # keys and ceph.conf as well as creating the cluster CRD
-
-        cluster_crd = {
-            "apiVersion": ROOK_API_NAME,
-            "kind": "CephCluster",
-            "metadata": {
-                "name": self.cluster_name,
-                "namespace": self.cluster_name
-            },
-            "spec": {
-                "backend": "ceph",
-                "hostNetwork": True
-            }
-        }
-
-        self.rook_api_post("cephclusters", body=cluster_crd)
 
     def rook_url(self, path):
         prefix = "/apis/ceph.rook.io/%s/namespaces/%s/" % (
@@ -132,9 +112,15 @@ class RookCluster(object):
     def get_nfs_conf_url(self, nfs_cluster, instance):
         #
         # Fetch cephnfs object for "nfs_cluster" and then return a rados://
-        # URL for the instance within that cluster.
+        # URL for the instance within that cluster. If the fetch fails, just
+        # return None.
         #
-        ceph_nfs = self.rook_api_get("cephnfses/{0}".format(nfs_cluster))
+        try:
+            ceph_nfs = self.rook_api_get("cephnfses/{0}".format(nfs_cluster))
+        except ApiException as e:
+            log.info("Unable to fetch cephnfs object: {}".format(e.status))
+            return None
+
         pool = ceph_nfs['spec']['rados']['pool']
         namespace = ceph_nfs['spec']['rados'].get('namespace', None)
 
@@ -223,7 +209,6 @@ class RookCluster(object):
 
     def add_filesystem(self, spec):
         # TODO use spec.placement
-        # TODO use spec.min_size (and use max_size meaningfully)
         # TODO warn if spec.extended has entries we don't kow how
         #      to action.
 
@@ -237,7 +222,7 @@ class RookCluster(object):
             "spec": {
                 "onlyManageDaemons": True,
                 "metadataServer": {
-                    "activeCount": spec.max_size,
+                    "activeCount": spec.count,
                     "activeStandby": True
 
                 }
@@ -249,7 +234,6 @@ class RookCluster(object):
 
     def add_nfsgw(self, spec):
         # TODO use spec.placement
-        # TODO use spec.min_size (and use max_size meaningfully)
         # TODO warn if spec.extended has entries we don't kow how
         #      to action.
 
@@ -265,7 +249,7 @@ class RookCluster(object):
                     "pool": spec.extended["pool"]
                 },
                 "server": {
-                    "active": spec.max_size,
+                    "active": spec.count,
                 }
             }
         }
@@ -277,7 +261,6 @@ class RookCluster(object):
             self.rook_api_post("cephnfses/", body=rook_nfsgw)
 
     def add_objectstore(self, spec):
-  
         rook_os = {
             "apiVersion": ROOK_API_NAME,
             "kind": "CephObjectStore",
@@ -351,16 +334,43 @@ class RookCluster(object):
         else:
             return True
 
-    def add_osds(self, spec):
+    def update_mon_count(self, newcount):
+        patch = [{"op": "replace", "path": "/spec/mon/count", "value": newcount}]
+
+        try:
+            self.rook_api_patch(
+                "cephclusters/{0}".format(self.cluster_name),
+                body=patch)
+        except ApiException as e:
+            log.exception("API exception: {0}".format(e))
+            raise ApplyException(
+                "Failed to update mon count in Cluster CRD: {0}".format(e))
+
+        return "Updated mon count to {0}".format(newcount)
+
+    def update_nfs_count(self, svc_id, newcount):
+        patch = [{"op": "replace", "path": "/spec/server/active", "value": newcount}]
+
+        try:
+            self.rook_api_patch(
+                "cephnfses/{0}".format(svc_id),
+                body=patch)
+        except ApiException as e:
+            log.exception("API exception: {0}".format(e))
+            raise ApplyException(
+                "Failed to update NFS server count for {0}: {1}".format(svc_id, e))
+        return "Updated NFS server count for {0} to {1}".format(svc_id, newcount)
+
+    def add_osds(self, drive_group, all_hosts):
+        # type: (orchestrator.DriveGroupSpec, List[str]) -> None
         """
         Rook currently (0.8) can only do single-drive OSDs, so we
         treat all drive groups as just a list of individual OSDs.
         """
-        # assert isinstance(spec, orchestrator.OsdSpec)
+        block_devices = drive_group.data_devices.paths if drive_group.data_devices else None
+        directories = drive_group.data_directories
 
-        block_devices = spec.drive_group.devices
-
-        assert spec.format in ("bluestore", "filestore")
+        assert drive_group.objectstore in ("bluestore", "filestore")
 
         # The CRD looks something like this:
         #     nodes:
@@ -386,22 +396,22 @@ class RookCluster(object):
 
         current_nodes = current_cluster['spec']['storage'].get('nodes', [])
 
-        if spec.node not in [n['name'] for n in current_nodes]:
-            patch.append({
-                "op": "add", "path": "/spec/storage/nodes/-", "value": {
-                    "name": spec.node,
-                    "devices": [{'name': d} for d in block_devices],
-                    "storeConfig": {
-                        "storeType": spec.format
-                    }
-                }
-            })
+        if drive_group.hosts(all_hosts)[0] not in [n['name'] for n in current_nodes]:
+            pd = { "name": drive_group.hosts(all_hosts)[0],
+                   "storeConfig": { "storeType": drive_group.objectstore }}
+
+            if block_devices:
+                pd["devices"] = [{'name': d} for d in block_devices]
+            if directories:
+                pd["directories"] = [{'path': p} for p in directories]
+
+            patch.append({ "op": "add", "path": "/spec/storage/nodes/-", "value": pd })
         else:
             # Extend existing node
             node_idx = None
             current_node = None
             for i, c in enumerate(current_nodes):
-                if c['name'] == spec.node:
+                if c['name'] == drive_group.hosts(all_hosts)[0]:
                     current_node = c
                     node_idx = i
                     break
@@ -410,7 +420,6 @@ class RookCluster(object):
             assert current_node is not None
 
             new_devices = list(set(block_devices) - set([d['name'] for d in current_node['devices']]))
-
             for n in new_devices:
                 patch.append({
                     "op": "add",
@@ -418,9 +427,16 @@ class RookCluster(object):
                     "value": {'name': n}
                 })
 
+            new_dirs = list(set(directories) - set(current_node['directories']))
+            for p in new_dirs:
+                patch.append({
+                    "op": "add",
+                    "path": "/spec/storage/nodes/{0}/directories/-".format(node_idx),
+                    "value": {'path': p}
+                })
+
         if len(patch) == 0:
-            log.warning("No-op adding stateful service")
-            return
+            return "No change"
 
         try:
             self.rook_api_patch(
@@ -431,3 +447,5 @@ class RookCluster(object):
             raise ApplyException(
                 "Failed to create OSD entries in Cluster CRD: {0}".format(
                     e))
+
+        return "Success"

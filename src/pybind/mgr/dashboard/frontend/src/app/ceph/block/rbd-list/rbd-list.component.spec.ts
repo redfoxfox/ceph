@@ -17,12 +17,14 @@ import {
   PermissionHelper
 } from '../../../../testing/unit-test-helper';
 import { RbdService } from '../../../shared/api/rbd.service';
+import { ActionLabels } from '../../../shared/constants/app.constants';
 import { TableActionsComponent } from '../../../shared/datatable/table-actions/table-actions.component';
 import { ViewCacheStatus } from '../../../shared/enum/view-cache-status.enum';
 import { ExecutingTask } from '../../../shared/models/executing-task';
 import { SummaryService } from '../../../shared/services/summary.service';
 import { TaskListService } from '../../../shared/services/task-list.service';
 import { SharedModule } from '../../../shared/shared.module';
+import { RbdConfigurationListComponent } from '../rbd-configuration-list/rbd-configuration-list.component';
 import { RbdDetailsComponent } from '../rbd-details/rbd-details.component';
 import { RbdSnapshotListComponent } from '../rbd-snapshot-list/rbd-snapshot-list.component';
 import { RbdListComponent } from './rbd-list.component';
@@ -50,7 +52,12 @@ describe('RbdListComponent', () => {
       RouterTestingModule,
       HttpClientTestingModule
     ],
-    declarations: [RbdListComponent, RbdDetailsComponent, RbdSnapshotListComponent],
+    declarations: [
+      RbdListComponent,
+      RbdDetailsComponent,
+      RbdSnapshotListComponent,
+      RbdConfigurationListComponent
+    ],
     providers: [TaskListService, i18nProviders]
   });
 
@@ -206,8 +213,8 @@ describe('RbdListComponent', () => {
       );
       scenario = {
         fn: () => tableActions.getCurrentButton().name,
-        single: 'Edit',
-        empty: 'Add'
+        single: ActionLabels.EDIT,
+        empty: ActionLabels.CREATE
       };
     });
 

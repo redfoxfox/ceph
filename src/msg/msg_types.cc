@@ -67,6 +67,9 @@ bool entity_addr_t::parse(const char *s, const char **end, int default_type)
   *this = entity_addr_t();
 
   const char *start = s;
+  if (end) {
+    *end = s;
+  }
 
   int newtype;
   if (strncmp("v1:", s, 3) == 0) {
@@ -177,72 +180,95 @@ ostream& operator<<(ostream& out, const entity_addr_t &addr)
   if (addr.type == entity_addr_t::TYPE_NONE) {
     return out << "-";
   }
-  out << entity_addr_t::get_type_name(addr.type) << ":"
-      << addr.get_sockaddr() << '/' << addr.nonce;
+  if (addr.type != entity_addr_t::TYPE_ANY) {
+    out << entity_addr_t::get_type_name(addr.type) << ":";
+  }
+  out << addr.get_sockaddr() << '/' << addr.nonce;
   return out;
+}
+
+ostream& operator<<(ostream& out, const sockaddr *psa)
+{
+  char buf[NI_MAXHOST] = { 0 };
+
+  switch (psa->sa_family) {
+  case AF_INET:
+    {
+      const sockaddr_in *sa = (const sockaddr_in*)psa;
+      inet_ntop(AF_INET, &sa->sin_addr, buf, NI_MAXHOST);
+      return out << buf << ':'
+		 << ntohs(sa->sin_port);
+    }
+  case AF_INET6:
+    {
+      const sockaddr_in6 *sa = (const sockaddr_in6*)psa;
+      inet_ntop(AF_INET6, &sa->sin6_addr, buf, NI_MAXHOST);
+      return out << '[' << buf << "]:"
+		 << ntohs(sa->sin6_port);
+    }
+  default:
+    return out << "(unrecognized address family " << psa->sa_family << ")";
+  }
 }
 
 ostream& operator<<(ostream& out, const sockaddr_storage &ss)
 {
-  char buf[NI_MAXHOST] = { 0 };
-  char serv[NI_MAXSERV] = { 0 };
-  size_t hostlen;
-
-  if (ss.ss_family == AF_INET)
-    hostlen = sizeof(struct sockaddr_in);
-  else if (ss.ss_family == AF_INET6)
-    hostlen = sizeof(struct sockaddr_in6);
-  else
-    hostlen = sizeof(struct sockaddr_storage);
-  getnameinfo((struct sockaddr *)&ss, hostlen, buf, sizeof(buf),
-	      serv, sizeof(serv),
-	      NI_NUMERICHOST | NI_NUMERICSERV);
-  if (ss.ss_family == AF_INET6)
-    return out << '[' << buf << "]:" << serv;
-  return out << buf << ':' << serv;
+  return out << (const sockaddr*)&ss;
 }
 
-ostream& operator<<(ostream& out, const sockaddr *sa)
-{
-  char buf[NI_MAXHOST] = { 0 };
-  char serv[NI_MAXSERV] = { 0 };
-  size_t hostlen;
-
-  if (sa->sa_family == AF_INET)
-    hostlen = sizeof(struct sockaddr_in);
-  else if (sa->sa_family == AF_INET6)
-    hostlen = sizeof(struct sockaddr_in6);
-  else
-    hostlen = sizeof(struct sockaddr_storage);
-  getnameinfo(sa, hostlen, buf, sizeof(buf),
-	      serv, sizeof(serv),
-	      NI_NUMERICHOST | NI_NUMERICSERV);
-  if (sa->sa_family == AF_INET6)
-    return out << '[' << buf << "]:" << serv;
-  return out << buf << ':' << serv;
-}
 
 // entity_addrvec_t
 
 bool entity_addrvec_t::parse(const char *s, const char **end)
 {
+  const char *orig_s = s;
   const char *static_end;
   if (!end) {
     end = &static_end;
+  } else {
+    *end = s;
   }
   v.clear();
+  bool brackets = false;
+  if (*s == '[') {
+    // weirdness: make sure this isn't an IPV6 addr!
+    entity_addr_t a;
+    const char *p;
+    if (!a.parse(s, &p) || !a.is_ipv6()) {
+      // it's not
+      brackets = true;
+      ++s;
+    }
+  }
   while (*s) {
     entity_addr_t a;
     bool r = a.parse(s, end);
     if (!r) {
+      if (brackets) {
+	v.clear();
+	*end = orig_s;
+	return false;
+      }
       break;
     }
     v.push_back(a);
     s = *end;
-    while (*s == ',' ||
-	   *s == ' ' ||
-	   *s == ';') {
+    if (!brackets) {
+      break;
+    }
+    if (*s != ',') {
+      break;
+    }
+    ++s;
+  }
+  if (brackets) {
+    if (*s == ']') {
       ++s;
+      *end = s;
+    } else {
+      *end = orig_s;
+      v.clear();
+      return false;
     }
   }
   return !v.empty();

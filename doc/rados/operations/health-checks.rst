@@ -21,6 +21,57 @@ that are defined by ceph-mgr python modules.
 Definitions
 ===========
 
+Monitor
+-------
+
+MON_DOWN
+________
+
+One or more monitor daemons is currently down.  The cluster requires a
+majority (more than 1/2) of the monitors in order to function.  When
+one or more monitors are down, clients may have a harder time forming
+their initial connection to the cluster as they may need to try more
+addresses before they reach an operating monitor.
+
+The down monitor daemon should generally be restarted as soon as
+possible to reduce the risk of a subsequen monitor failure leading to
+a service outage.
+
+MON_CLOCK_SKEW
+______________
+
+The clocks on the hosts running the ceph-mon monitor daemons are not
+sufficiently well synchronized.  This health alert is raised if the
+cluster detects a clock skew greater than ``mon_clock_drift_allowed``.
+
+This is best resolved by synchronizing the clocks using a tool like
+``ntpd`` or ``chrony``.
+
+If it is impractical to keep the clocks closely synchronized, the
+``mon_clock_drift_allowed`` threshold can also be increased, but this
+value must stay significantly below the ``mon_lease`` interval in
+order for monitor cluster to function properly.
+
+MON_MSGR2_NOT_ENABLED
+_____________________
+
+The ``ms_bind_msgr2`` option is enabled but one or more monitors is
+not configured to bind to a v2 port in the cluster's monmap.  This
+means that features specific to the msgr2 protocol (e.g., encryption)
+are not available on some or all connections.
+
+In most cases this can be corrected by issuing the command::
+
+  ceph mon enable-msgr2
+
+That command will change any monitor configured for the old default
+port 6789 to continue to listen for v1 connections on 6789 and also
+listen for v2 connections on the new default 3300 port.
+
+If a monitor is configured to listen for v1 connections on a non-standard port (not 6789), then the monmap will need to be modified manually.
+
+
+
 Manager
 -------
 
@@ -249,6 +300,34 @@ You can either raise the pool quota with::
   ceph osd pool set-quota <poolname> max_bytes <num-bytes>
 
 or delete some existing data to reduce utilization.
+
+BLUEFS_SPILLOVER
+________________
+
+One or more OSDs that use the BlueStore backend have been allocated
+`db` partitions (storage space for metadata, normally on a faster
+device) but that space has filled, such that metadata has "spilled
+over" onto the normal slow device.  This isn't necessarily an error
+condition or even unexpected, but if the administrator's expectation
+was that all metadata would fit on the faster device, it indicates
+that not enough space was provided.
+
+This warning can be disabled on all OSDs with::
+
+  ceph config set osd bluestore_warn_on_bluefs_spillover false
+
+Alternatively, it can be disabled on a specific OSD with::
+
+  ceph config set osd.123 bluestore_warn_on_bluefs_spillover false
+
+To provide more metadata space, the OSD in question could be destroyed and
+reprovisioned.  This will involve data migration and recovery.
+
+It may also be possible to expand the LVM logical volume backing the
+`db` storage.  If the underlying LV has been expanded, the OSD daemon
+needs to be stopped and BlueFS informed of the device size change with::
+
+  ceph-bluestore-tool bluefs-bdev-expand --path /var/lib/ceph/osd/ceph-$ID
 
 
 Device health
@@ -690,8 +769,8 @@ _______________
 
 One or more PGs has not been scrubbed recently.  PGs are normally
 scrubbed every ``mon_scrub_interval`` seconds, and this warning
-triggers when ``mon_warn_not_scrubbed`` such intervals have elapsed
-without a scrub.
+triggers when ``mon_warn_pg_not_scrubbed_ratio`` percentage of interval has elapsed
+without a scrub since it was due.
 
 PGs will not scrub if they are not flagged as *clean*, which may
 happen if they are misplaced or degraded (see *PG_AVAILABILITY* and
@@ -705,9 +784,9 @@ PG_NOT_DEEP_SCRUBBED
 ____________________
 
 One or more PGs has not been deep scrubbed recently.  PGs are normally
-scrubbed every ``osd_deep_mon_scrub_interval`` seconds, and this warning
-triggers when ``mon_warn_not_deep_scrubbed`` such intervals have elapsed
-without a scrub.
+scrubbed every ``osd_deep_scrub_interval`` seconds, and this warning
+triggers when ``mon_warn_pg_not_deep_scrubbed_ratio`` percentage of interval has elapsed
+without a scrub since it was due.
 
 PGs will not (deep) scrub if they are not flagged as *clean*, which may
 happen if they are misplaced or degraded (see *PG_AVAILABILITY* and

@@ -323,10 +323,10 @@ public:
   void finish_waiters(uint64_t mask, int r=0) {
     parent->finish_waiting(mask << get_wait_shift(), r);
   }
-  void take_waiting(uint64_t mask, MDSInternalContextBase::vec& ls) {
+  void take_waiting(uint64_t mask, MDSContext::vec& ls) {
     parent->take_waiting(mask << get_wait_shift(), ls);
   }
-  void add_waiter(uint64_t mask, MDSInternalContextBase *c) {
+  void add_waiter(uint64_t mask, MDSContext *c) {
     parent->add_waiter((mask << get_wait_shift()) | MDSCacheObject::WAIT_ORDERED, c);
   }
   bool is_waiter_for(uint64_t mask) const {
@@ -342,7 +342,7 @@ public:
     //assert(!is_stable() || gather_set.size() == 0);  // gather should be empty in stable states.
     return s;
   }
-  void set_state_rejoin(int s, MDSInternalContextBase::vec& waiters, bool survivor) {
+  void set_state_rejoin(int s, MDSContext::vec& waiters, bool survivor) {
     ceph_assert(!get_parent()->is_auth());
 
     // If lock in the replica object was not in SYNC state when auth mds of the object failed.
@@ -523,8 +523,9 @@ public:
   }
   void put_xlock() {
     ceph_assert(state == LOCK_XLOCK || state == LOCK_XLOCKDONE ||
-	   state == LOCK_XLOCKSNAP || is_locallock() ||
-	   state == LOCK_LOCK /* if we are a master of a slave */);
+	   state == LOCK_XLOCKSNAP || state == LOCK_LOCK_XLOCK ||
+	   state == LOCK_LOCK  || /* if we are a master of a slave */
+	   is_locallock());
     --more()->num_xlock;
     parent->put(MDSCacheObject::PIN_LOCK);
     if (more()->num_xlock == 0) {
@@ -607,7 +608,7 @@ public:
     if (is_new)
       state = s;
   }
-  void decode_state_rejoin(bufferlist::const_iterator& p, MDSInternalContextBase::vec& waiters, bool survivor) {
+  void decode_state_rejoin(bufferlist::const_iterator& p, MDSContext::vec& waiters, bool survivor) {
     __s16 s;
     using ceph::decode;
     decode(s, p);

@@ -68,14 +68,6 @@ MDSDaemon::MDSDaemon(std::string_view n, Messenger *m, MonClient *mc) :
   timer(m->cct, mds_lock),
   gss_ktfile_client(m->cct->_conf.get_val<std::string>("gss_ktab_client_file")),
   beacon(m->cct, mc, n),
-  authorize_handler_cluster_registry(new AuthAuthorizeHandlerRegistry(m->cct,
-								      m->cct->_conf->auth_supported.empty() ?
-								      m->cct->_conf->auth_cluster_required :
-								      m->cct->_conf->auth_supported)),
-  authorize_handler_service_registry(new AuthAuthorizeHandlerRegistry(m->cct,
-								      m->cct->_conf->auth_supported.empty() ?
-								      m->cct->_conf->auth_service_required :
-								      m->cct->_conf->auth_supported)),
   name(n),
   messenger(m),
   monc(mc),
@@ -115,9 +107,6 @@ MDSDaemon::~MDSDaemon() {
 
   delete mds_rank;
   mds_rank = NULL;
-
-  delete authorize_handler_service_registry;
-  delete authorize_handler_cluster_registry;
 }
 
 class MDSSocketHook : public AdminSocketHook {
@@ -260,11 +249,6 @@ void MDSDaemon::set_up_admin_socket()
                                      asok_hook,
                                      "show cache status");
   ceph_assert(r == 0);
-  r = admin_socket->register_command("cache drop",
-                                     "cache drop name=timeout,type=CephInt,range=0,req=false",
-                                     asok_hook,
-                                     "drop cache");
-  ceph_assert(r == 0);
   r = admin_socket->register_command("dump tree",
 				     "dump tree "
 				     "name=root,type=CephString,req=true "
@@ -375,6 +359,7 @@ const char** MDSDaemon::get_tracked_conf_keys() const
     "mds_health_cache_threshold",
     "mds_cache_mid",
     "mds_dump_cache_threshold_formatter",
+    "mds_cache_trim_decay_rate",
     "mds_dump_cache_threshold_file",
     // MDBalancer
     "mds_bal_fragment_dirs",
@@ -388,8 +373,10 @@ const char** MDSDaemon::get_tracked_conf_keys() const
     "mds_inject_migrator_session_race",
     "host",
     "fsid",
-    "mds_request_load_average_decay_rate",
     "mds_cap_revoke_eviction_timeout",
+    // SessionMap
+    "mds_request_load_average_decay_rate",
+    "mds_recall_max_decay_rate",
     NULL
   };
   return KEYS;
@@ -493,6 +480,10 @@ int MDSDaemon::init()
     mds_lock.Unlock();
     return r;
   }
+
+  messenger->set_auth_client(monc);
+  messenger->set_auth_server(monc);
+  monc->set_handle_authentication_dispatcher(this);
 
   // tell monc about log_client so it will know about mon session resets
   monc->set_log_client(&log_client);
@@ -838,6 +829,9 @@ int MDSDaemon::_handle_command(
       cmd_getval(cct, cmdmap, "heapcmd", heapcmd);
       vector<string> heapcmd_vec;
       get_str_vec(heapcmd, heapcmd_vec);
+      string value;
+      if (cmd_getval(cct, cmdmap, "value", value))
+	 heapcmd_vec.push_back(value);
       ceph_heap_profiler_handle_command(heapcmd_vec, ds);
     }
   } else if (prefix == "cpu_profiler") {
@@ -875,8 +869,6 @@ out:
   return r;
 }
 
-/* This function deletes the passed message before returning. */
-
 void MDSDaemon::handle_mds_map(const MMDSMap::const_ref &m)
 {
   version_t epoch = m->get_epoch();
@@ -904,8 +896,7 @@ void MDSDaemon::handle_mds_map(const MMDSMap::const_ref &m)
 
   monc->sub_got("mdsmap", mdsmap->get_epoch());
 
-  // Calculate my effective rank (either my owned rank or my
-  // standby_for_rank if in standby replay)
+  // Calculate my effective rank (either my owned rank or the rank I'm following if STATE_STANDBY_REPLAY
   mds_rank_t whoami = mdsmap->get_rank_gid(mds_gid_t(monc->get_global_id()));
 
   // verify compatset
@@ -926,11 +917,6 @@ void MDSDaemon::handle_mds_map(const MMDSMap::const_ref &m)
       dout(10) << " peer mds gid " << p.first << " removed from map" << dendl;
       messenger->mark_down_addrs(p.second.addrs);
     }
-  }
-
-  if (whoami == MDS_RANK_NONE && 
-      new_state == MDSMap::STATE_STANDBY_REPLAY) {
-    whoami = mdsmap->get_mds_info_gid(mds_gid_t(monc->get_global_id())).standby_for_rank;
   }
 
   // see who i am
@@ -1090,6 +1076,14 @@ void MDSDaemon::suicide()
 
 void MDSDaemon::respawn()
 {
+  // --- WARNING TO FUTURE COPY/PASTERS ---
+  // You must also add a call like
+  //
+  //   ceph_pthread_setname(pthread_self(), "ceph-mds");
+  //
+  // to main() so that /proc/$pid/stat field 2 contains "(ceph-mds)"
+  // instead of "(exe)", so that killall (and log rotation) will work.
+
   dout(1) << "respawn!" << dendl;
 
   /* Dump recent in case the MDS was stuck doing something which caused it to
@@ -1169,7 +1163,7 @@ bool MDSDaemon::ms_dispatch2(const Message::ref &m)
   }
 }
 
-bool MDSDaemon::ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new)
+bool MDSDaemon::ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer)
 {
   dout(10) << "MDSDaemon::ms_get_authorizer type="
            << ceph_entity_type_name(dest_type) << dendl;
@@ -1177,12 +1171,6 @@ bool MDSDaemon::ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bo
   /* monitor authorization is being handled on different layer */
   if (dest_type == CEPH_ENTITY_TYPE_MON)
     return true;
-
-  if (force_new) {
-    auto timeout = g_conf().get_val<int64_t>("rotating_keys_renewal_timeout");
-    if (monc->wait_auth_rotating(timeout) < 0)
-      return false;
-  }
 
   *authorizer = monc->build_authorizer(dest_type);
   return *authorizer != NULL;
@@ -1241,7 +1229,7 @@ bool MDSDaemon::ms_handle_reset(Connection *con)
   if (stopping) {
     return false;
   }
-  dout(5) << "ms_handle_reset on " << con->get_peer_addr() << dendl;
+  dout(5) << "ms_handle_reset on " << con->get_peer_socket_addr() << dendl;
   if (beacon.get_want_state() == CEPH_MDS_STATE_DNE)
     return false;
 
@@ -1269,7 +1257,7 @@ void MDSDaemon::ms_handle_remote_reset(Connection *con)
     return;
   }
 
-  dout(5) << "ms_handle_remote_reset on " << con->get_peer_addr() << dendl;
+  dout(5) << "ms_handle_remote_reset on " << con->get_peer_socket_addr() << dendl;
   if (beacon.get_want_state() == CEPH_MDS_STATE_DNE)
     return;
 
@@ -1294,11 +1282,47 @@ KeyStore *MDSDaemon::ms_get_auth1_authorizer_keystore()
   return monc->rotating_secrets.get();
 }
 
+bool MDSDaemon::parse_caps(const AuthCapsInfo& info, MDSAuthCaps& caps)
+{
+  caps.clear();
+  if (info.allow_all) {
+    caps.set_allow_all();
+    return true;
+  } else {
+    auto it = info.caps.begin();
+    string auth_cap_str;
+    try {
+      decode(auth_cap_str, it);
+    } catch (const buffer::error& e) {
+      dout(1) << __func__ << ": cannot decode auth caps buffer of length " << info.caps.length() << dendl;
+      return false;
+    }
+
+    dout(10) << __func__ << ": parsing auth_cap_str='" << auth_cap_str << "'" << dendl;
+    CachedStackStringStream cs;
+    if (caps.parse(g_ceph_context, auth_cap_str, cs.get())) {
+      return true;
+    } else {
+      dout(1) << __func__ << ": auth cap parse error: " << cs->strv() << " parsing '" << auth_cap_str << "'" << dendl;
+      return false;
+    }
+  }
+}
+
 int MDSDaemon::ms_handle_authentication(Connection *con)
 {
-  std::lock_guard l(mds_lock);
-  int ret = 0;
+  /* N.B. without mds_lock! */
+  MDSAuthCaps caps;
+  return parse_caps(con->get_peer_caps_info(), caps) ? 0 : -1;
+}
+
+void MDSDaemon::ms_handle_accept(Connection *con)
+{
   entity_name_t n(con->get_peer_type(), con->get_peer_global_id());
+  std::lock_guard l(mds_lock);
+  if (stopping) {
+    return;
+  }
 
   // We allow connections and assign Session instances to connections
   // even if we have not been assigned a rank, because clients with
@@ -1317,7 +1341,7 @@ int MDSDaemon::ms_handle_authentication(Connection *con)
   if (!s) {
     s = new Session(con);
     s->info.auth_name = con->get_peer_entity_name();
-    s->info.inst.addr = con->get_peer_addr();
+    s->info.inst.addr = con->get_peer_socket_addr();
     s->info.inst.name = n;
     dout(10) << " new session " << s << " for " << s->info.inst
 	     << " con " << con << dendl;
@@ -1330,64 +1354,11 @@ int MDSDaemon::ms_handle_authentication(Connection *con)
 	     << " existing con " << s->get_connection()
 	     << ", new/authorizing con " << con << dendl;
     con->set_priv(RefCountedPtr{s});
-
-    // Wait until we fully accept the connection before setting
-    // s->connection.  In particular, if there are multiple incoming
-    // connection attempts, they will all get their authorizer
-    // validated, but some of them may "lose the race" and get
-    // dropped.  We only want to consider the winner(s).  See
-    // ms_handle_accept().  This is important for Sessions we replay
-    // from the journal on recovery that don't have established
-    // messenger state; we want the con from only the winning
-    // connect attempt(s).  (Normal reconnects that don't follow MDS
-    // recovery are reconnected to the existing con by the
-    // messenger.)
   }
 
-  AuthCapsInfo &caps_info = con->get_peer_caps_info();
-  if (caps_info.allow_all) {
-    // Flag for auth providers that don't provide cap strings
-    s->auth_caps.set_allow_all();
-  } else {
-    auto p = caps_info.caps.cbegin();
-    string auth_cap_str;
-    try {
-      decode(auth_cap_str, p);
+  parse_caps(con->get_peer_caps_info(), s->auth_caps);
 
-      dout(10) << __func__ << ": parsing auth_cap_str='" << auth_cap_str << "'"
-	       << dendl;
-      std::ostringstream errstr;
-      if (!s->auth_caps.parse(g_ceph_context, auth_cap_str, &errstr)) {
-	dout(1) << __func__ << ": auth cap parse error: " << errstr.str()
-		<< " parsing '" << auth_cap_str << "'" << dendl;
-	clog->warn() << name << " mds cap '" << auth_cap_str
-		     << "' does not parse: " << errstr.str();
-	ret = -EPERM;
-      } else {
-	ret = 1;
-      }
-    } catch (buffer::error& e) {
-      // Assume legacy auth, defaults to:
-      //  * permit all filesystem ops
-      //  * permit no `tell` ops
-      dout(1) << __func__ << ": cannot decode auth caps bl of length "
-	      << caps_info.caps.length() << dendl;
-      ret = -EPERM;
-    }
-  }
-  return ret;
-}
-
-void MDSDaemon::ms_handle_accept(Connection *con)
-{
-  std::lock_guard l(mds_lock);
-  if (stopping) {
-    return;
-  }
-
-  auto priv = con->get_priv();
-  auto s = static_cast<Session *>(priv.get());
-  dout(10) << "ms_handle_accept " << con->get_peer_addr() << " con " << con << " session " << s << dendl;
+  dout(10) << "ms_handle_accept " << con->get_peer_socket_addr() << " con " << con << " session " << s << dendl;
   if (s) {
     if (s->get_connection() != con) {
       dout(10) << " session connection " << s->get_connection()

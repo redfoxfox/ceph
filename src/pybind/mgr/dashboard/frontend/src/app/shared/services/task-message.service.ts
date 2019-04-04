@@ -293,24 +293,41 @@ export class TaskMessageService {
     'rbd/mirroring/pool/edit': this.newTaskMessage(
       this.commonOperations.update,
       this.rbd_mirroring.pool,
-      (metadata) => ({
+      () => ({
         16: this.i18n('Cannot disable mirroring because it contains a peer.')
       })
     ),
     'rbd/mirroring/peer/add': this.newTaskMessage(
       this.commonOperations.create,
       this.rbd_mirroring.pool_peer,
-      (metadata) => ({})
+      () => ({})
     ),
     'rbd/mirroring/peer/edit': this.newTaskMessage(
       this.commonOperations.update,
       this.rbd_mirroring.pool_peer,
-      (metadata) => ({})
+      () => ({})
     ),
     'rbd/mirroring/peer/delete': this.newTaskMessage(
       this.commonOperations.delete,
       this.rbd_mirroring.pool_peer,
-      (metadata) => ({})
+      () => ({})
+    ),
+    // iSCSI target tasks
+    'iscsi/target/create': this.newTaskMessage(this.commonOperations.create, (metadata) =>
+      this.iscsiTarget(metadata)
+    ),
+    'iscsi/target/edit': this.newTaskMessage(this.commonOperations.update, (metadata) =>
+      this.iscsiTarget(metadata)
+    ),
+    'iscsi/target/delete': this.newTaskMessage(this.commonOperations.delete, (metadata) =>
+      this.iscsiTarget(metadata)
+    ),
+    'nfs/create': this.newTaskMessage(this.commonOperations.create, (metadata) =>
+      this.nfs(metadata)
+    ),
+    'nfs/edit': this.newTaskMessage(this.commonOperations.update, (metadata) => this.nfs(metadata)),
+    'nfs/delete': this.newTaskMessage(this.commonOperations.delete, (metadata) =>
+      this.nfs(metadata)
     )
   };
 
@@ -330,6 +347,16 @@ export class TaskMessageService {
 
   ecp(metadata) {
     return this.i18n(`erasure code profile '{{name}}'`, { name: metadata.name });
+  }
+
+  iscsiTarget(metadata) {
+    return this.i18n(`target '{{target_iqn}}'`, { target_iqn: metadata.target_iqn });
+  }
+
+  nfs(metadata) {
+    return this.i18n(`NFS {{nfs_id}}`, {
+      nfs_id: `'${metadata.cluster_id}:${metadata.export_id ? metadata.export_id : metadata.path}'`
+    });
   }
 
   _getTaskTitle(task: Task) {

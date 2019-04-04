@@ -4,6 +4,7 @@ Client module to interact with the Ansible Runner Service
 import requests
 import json
 import re
+from functools import wraps
 
 # Ansible Runner service API endpoints
 API_URL = "api"
@@ -11,6 +12,20 @@ LOGIN_URL = "api/v1/login"
 PLAYBOOK_EXEC_URL = "api/v1/playbooks"
 PLAYBOOK_EVENTS = "api/v1/jobs/%s/events"
 EVENT_DATA_URL = "api/v1/jobs/%s/events/%s"
+
+class AnsibleRunnerServiceError(Exception):
+    pass
+
+def handle_requests_exceptions(func):
+    """Decorator to manage errors raised by requests library
+    """
+    @wraps(func)
+    def inner(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except requests.exceptions.RequestException as ex:
+               raise AnsibleRunnerServiceError(str(ex))
+    return inner
 
 class ExecutionStatusCode(object):
     """Execution status of playbooks ( 'msg' field in playbook status request)
@@ -21,12 +36,13 @@ class ExecutionStatusCode(object):
     ON_GOING = 2  # Playbook is being executed              msg = running
     NOT_LAUNCHED = 3  # Not initialized
 
-
 class PlayBookExecution(object):
     """Object to provide all the results of a Playbook execution
     """
 
-    def __init__(self, rest_client, playbook, logger, result_pattern="", the_params={}):
+    def __init__(self, rest_client, playbook, logger, result_pattern="",
+                 the_params=None,
+                 querystr_dict=None):
 
         self.rest_client = rest_client
 
@@ -39,27 +55,39 @@ class PlayBookExecution(object):
         # Playbook name
         self.playbook = playbook
 
-        # Params used in the playbook
+        # Parameters used in the playbook
         self.params = the_params
 
+        # Query string used in the "launch" request
+        self.querystr_dict = querystr_dict
+
+        # Logger
         self.log = logger
 
     def launch(self):
         """ Launch the playbook execution
         """
 
+        response = None
         endpoint = "%s/%s" % (PLAYBOOK_EXEC_URL, self.playbook)
 
-        response = self.rest_client.http_post(endpoint, self.params)
+        try:
+            response = self.rest_client.http_post(endpoint,
+                                                    self.params,
+                                                    self.querystr_dict)
+        except AnsibleRunnerServiceError:
+            self.log.exception("Error launching playbook <%s>", self.playbook)
+            raise
 
-        if response:
+        # Here we have a server response, but an error trying
+        # to launch the playbook is also posible (ex. 404, playbook not found)
+        # Error already logged by rest_client, but an error should be raised
+        # to the orchestrator (via completion object)
+        if response.ok:
             self.play_uuid = json.loads(response.text)["data"]["play_uuid"]
             self.log.info("Playbook execution launched succesfuly")
         else:
-            # An error launching the execution implies play_uuid empty
-            self.play_uuid = ""
-            self.log.error("Playbook launch error. \
-                            Check <endpoint> request result")
+            raise AnsibleRunnerServiceError(response.reason)
 
     def get_status(self):
         """ Return the status of the execution
@@ -71,6 +99,7 @@ class PlayBookExecution(object):
         """
 
         status_value = ExecutionStatusCode.NOT_LAUNCHED
+        response = None
 
         if self.play_uuid == '-': # Initialized
             status_value = ExecutionStatusCode.NOT_LAUNCHED
@@ -78,7 +107,12 @@ class PlayBookExecution(object):
             status_value = ExecutionStatusCode.ERROR
         else:
             endpoint = "%s/%s" % (PLAYBOOK_EXEC_URL, self.play_uuid)
-            response = self.rest_client.http_get(endpoint)
+
+            try:
+                response = self.rest_client.http_get(endpoint)
+            except AnsibleRunnerServiceError:
+                self.log.exception("Error getting playbook <%s> status",
+                                   self.playbook)
 
             if response:
                 the_status = json.loads(response.text)["msg"]
@@ -100,19 +134,27 @@ class PlayBookExecution(object):
 
         @returns: the events that matches with the patterns provided
         """
+        response = None
+        if not self.play_uuid:
+            return {}
 
-        if not self.result_task_pattern or not self.play_uuid:
-            result_events = {}
-
-        response = self.rest_client.http_get(PLAYBOOK_EVENTS % self.play_uuid)
+        try:
+            response = self.rest_client.http_get(PLAYBOOK_EVENTS % self.play_uuid)
+        except AnsibleRunnerServiceError:
+            self.log.exception("Error getting playbook <%s> result", self.playbook)
 
         if not response:
             result_events = {}
         else:
             events = json.loads(response.text)["data"]["events"]
-            result_events = {event:data for event,data in events.items()
-                            if "task" in data and
-                            re.match(self.result_task_pattern, data["task"])}
+
+            if self.result_task_pattern:
+                result_events = {event:data for event,data in events.items()
+                                if "task" in data and
+                                re.match(self.result_task_pattern, data["task"])}
+            else:
+                result_events = events
+
             if event_filter:
                 result_events = {event:data for event,data in result_events.items()
                                 if re.match(event_filter, data['event'])}
@@ -129,13 +171,13 @@ class Client(object):
         """Provide an https client to make easy interact with the Ansible
         Runner Service"
 
-        @param servers_url: The base URL >server>:<port> of the Ansible Runner Service
-        @param user: User name of the authorized user
-        @param password: Password of the authotized user
-        @param verify_server: Either a boolean, in which case it controls whether we verify
+        :param servers_url: The base URL >server>:<port> of the Ansible Runner Service
+        :param user: Username of the authorized user
+        :param password: Password of the authorized user
+        :param verify_server: Either a boolean, in which case it controls whether we verify
             the server's TLS certificate, or a string, in which case it must be a path
             to a CA bundle to use. Defaults to ``True``.
-        @param logger: Log file
+        :param logger: Log file
         """
         self.server_url = server_url
         self.user = user
@@ -157,6 +199,7 @@ class Client(object):
         # Log in the server and get a token
         self.login()
 
+    @handle_requests_exceptions
     def login(self):
         """ Login with user credentials to obtain a valid token
         """
@@ -177,7 +220,7 @@ class Client(object):
             self.token = json.loads(response.text)["data"]["token"]
             self.log.info("Connection with Ansible Runner Service is operative")
 
-
+    @handle_requests_exceptions
     def is_operative(self):
         """Indicates if the connection with the Ansible runner Server is ok
         """
@@ -194,75 +237,90 @@ class Client(object):
         else:
             return False
 
+    @handle_requests_exceptions
     def http_get(self, endpoint):
         """Execute an http get request
 
-        @param endpoint: Ansible Runner service RESTful API endpoint
+        :param endpoint: Ansible Runner service RESTful API endpoint
 
-        @returns: A requests object
+        :returns: A requests object
         """
 
-        response = None
+        the_url = "%s/%s" % (self.server_url, endpoint)
+        response = requests.get(the_url,
+                            verify = self.verify_server,
+                            headers = {"Authorization": self.token})
 
-        try:
-            the_url = "%s/%s" % (self.server_url, endpoint)
-            r = requests.get(the_url,
-                             verify = self.verify_server,
-                             headers = {"Authorization": self.token})
-
-            if r.status_code != requests.codes.ok:
-                self.log.error("http GET %s <--> (%s - %s)\n%s",
-                               the_url, r.status_code, r.reason, r.text)
-            else:
-                self.log.info("http GET %s <--> (%s - %s)",
-                              the_url, r.status_code, r.text)
-
-            response = r
-
-        except Exception:
-            self.log.exception("Ansible runner service(GET %s)", the_url)
+        if response.status_code != requests.codes.ok:
+            self.log.error("http GET %s <--> (%s - %s)\n%s",
+                            the_url, response.status_code, response.reason,
+                            response.text)
+        else:
+            self.log.info("http GET %s <--> (%s - %s)",
+                            the_url, response.status_code, response.text)
 
         return response
 
-    def http_post(self, endpoint, payload):
+    @handle_requests_exceptions
+    def http_post(self, endpoint, payload, params_dict):
         """Execute an http post request
 
-        @param endpoint: Ansible Runner service RESTful API endpoint
-        @param payload: Dictionary with the data used in the post request
+        :param endpoint: Ansible Runner service RESTful API endpoint
+        :param payload: Dictionary with the data used in the post request
+        :param params_dict: A dict used to build a query string
 
-        @returns: A requests object
+        :returns: A requests object
         """
 
-        response = None
+        the_url = "%s/%s" % (self.server_url, endpoint)
+        response = requests.post(the_url,
+                            verify = self.verify_server,
+                            headers = {"Authorization": self.token,
+                                        "Content-type": "application/json"},
+                            json = payload,
+                            params = params_dict)
 
-        try:
-            the_url = "%s/%s" % (self.server_url, endpoint)
-            r = requests.post(the_url,
-                              verify = self.verify_server,
-                              headers = {"Authorization": self.token,
-                                         "Content-type": "application/json"},
-                              data = payload)
+        if response.status_code != requests.codes.ok:
+            self.log.error("http POST %s [%s] <--> (%s - %s:%s)\n",
+                            the_url, payload, response.status_code,
+                            response.reason, response.text)
+        else:
+            self.log.info("http POST %s <--> (%s - %s)",
+                            the_url, response.status_code, response.text)
 
-            if r.status_code != requests.codes.ok:
-                self.log.error("http POST %s [%s] <--> (%s - %s)\n%s",
-                              the_url, payload, r.status_code, r.reason, r.text)
-            else:
-                self.log.info("http POST %s <--> (%s - %s)",
-                              the_url, r.status_code, r.text)
-            response = r
+        return response
 
-        except Exception:
-            self.log.exception("Ansible runner service(POST %s)", the_url)
+    @handle_requests_exceptions
+    def http_delete(self, endpoint):
+        """Execute an http delete request
+
+        :param endpoint: Ansible Runner service RESTful API endpoint
+
+        :returns: A requests object
+        """
+
+        the_url = "%s/%s" % (self.server_url, endpoint)
+        response = requests.delete(the_url,
+                            verify = self.verify_server,
+                            headers = {"Authorization": self.token})
+
+        if response.status_code != requests.codes.ok:
+            self.log.error("http DELETE %s <--> (%s - %s)\n%s",
+                            the_url, response.status_code, response.reason,
+                            response.text)
+        else:
+            self.log.info("http DELETE %s <--> (%s - %s)",
+                            the_url, response.status_code, response.text)
 
         return response
 
     def http_put(self, endpoint, payload):
         """Execute an http put request
 
-        @param endpoint: Ansible Runner service RESTful API endpoint
-        @param payload: Dictionary with the data used in the put request
+        :param endpoint: Ansible Runner service RESTful API endpoint
+        :param payload: Dictionary with the data used in the put request
 
-        @returns: A requests object
+        :returns: A requests object
         """
         # TODO
         raise NotImplementedError("TODO")

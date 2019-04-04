@@ -462,7 +462,6 @@ int AsyncMessenger::client_bind(const entity_addr_t &bind_addr)
     return 0;
   Mutex::Locker l(lock);
   if (did_bind) {
-    ceph_assert(my_addrs->legacy_addr() == bind_addr);
     return 0;
   }
   if (started) {
@@ -601,41 +600,54 @@ AsyncConnectionRef AsyncMessenger::create_connect(
   return conn;
 }
 
-ConnectionRef AsyncMessenger::connect_to(int type, const entity_addrvec_t& addrs)
-{
-  Mutex::Locker l(lock);
-  if (*my_addrs == addrs ||
-      (addrs.v.size() == 1 &&
-       my_addrs->contains(addrs.front()))) {
-    // local
-    return local_connection;
-  }
-
-  AsyncConnectionRef conn = _lookup_conn(addrs);
-  if (conn) {
-    ldout(cct, 10) << __func__ << " " << addrs << " existing " << conn << dendl;
-  } else {
-    conn = create_connect(addrs, type);
-    ldout(cct, 10) << __func__ << " " << addrs << " new " << conn << dendl;
-  }
-
-  return conn;
-}
 
 ConnectionRef AsyncMessenger::get_loopback_connection()
 {
   return local_connection;
 }
 
-int AsyncMessenger::_send_to(Message *m, int type, const entity_addrvec_t& addrs)
+bool AsyncMessenger::should_use_msgr2()
 {
+  // if we are bound to v1 only, and we are connecting to a v2 peer,
+  // we cannot use the peer's v2 address. otherwise the connection
+  // is assymetrical, because they would have to use v1 to connect
+  // to us, and we would use v2, and connection race detection etc
+  // would totally break down (among other things).  or, the other
+  // end will be confused that we advertise ourselve with a v1
+  // address only (that we bound to) but connected with protocol v2.
+  return !did_bind || get_myaddrs().has_msgr2();
+}
+
+entity_addrvec_t AsyncMessenger::_filter_addrs(const entity_addrvec_t& addrs)
+{
+  if (!should_use_msgr2()) {
+    ldout(cct, 10) << __func__ << " " << addrs << " limiting to v1 ()" << dendl;
+    entity_addrvec_t r;
+    for (auto& i : addrs.v) {
+      if (i.is_msgr2()) {
+	continue;
+      }
+      r.v.push_back(i);
+    }
+    return r;
+  } else {
+    return addrs;
+  }
+}
+
+int AsyncMessenger::send_to(Message *m, int type, const entity_addrvec_t& addrs)
+{
+  Mutex::Locker l(lock);
+
   FUNCTRACE(cct);
   ceph_assert(m);
 
+#if defined(WITH_LTTNG) && defined(WITH_EVENTTRACE)
   if (m->get_type() == CEPH_MSG_OSD_OP)
     OID_EVENT_TRACE(((MOSDOp *)m)->get_oid().name.c_str(), "SEND_MSG_OSD_OP");
   else if (m->get_type() == CEPH_MSG_OSD_OPREPLY)
     OID_EVENT_TRACE(((MOSDOpReply *)m)->get_oid().name.c_str(), "SEND_MSG_OSD_OP_REPLY");
+#endif
 
   ldout(cct, 1) << __func__ << "--> " << ceph_entity_type_name(type) << " "
       << addrs << " -- " << *m << " -- ?+"
@@ -648,9 +660,33 @@ int AsyncMessenger::_send_to(Message *m, int type, const entity_addrvec_t& addrs
     return -EINVAL;
   }
 
-  AsyncConnectionRef conn = _lookup_conn(addrs);
-  submit_message(m, conn, addrs, type);
+  auto av = _filter_addrs(addrs);
+  AsyncConnectionRef conn = _lookup_conn(av);
+  submit_message(m, conn, av, type);
   return 0;
+}
+
+ConnectionRef AsyncMessenger::connect_to(int type, const entity_addrvec_t& addrs)
+{
+  Mutex::Locker l(lock);
+  if (*my_addrs == addrs ||
+      (addrs.v.size() == 1 &&
+       my_addrs->contains(addrs.front()))) {
+    // local
+    return local_connection;
+  }
+
+  auto av = _filter_addrs(addrs);
+
+  AsyncConnectionRef conn = _lookup_conn(av);
+  if (conn) {
+    ldout(cct, 10) << __func__ << " " << av << " existing " << conn << dendl;
+  } else {
+    conn = create_connect(av, type);
+    ldout(cct, 10) << __func__ << " " << av << " new " << conn << dendl;
+  }
+
+  return conn;
 }
 
 void AsyncMessenger::submit_message(Message *m, AsyncConnectionRef con,
@@ -850,20 +886,29 @@ bool AsyncMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)
     return false;
   std::lock_guard l(lock);
   if (need_addr) {
-    need_addr = false;
     if (my_addrs->empty()) {
       auto a = peer_addr_for_me;
+      a.set_type(entity_addr_t::TYPE_ANY);
       a.set_nonce(nonce);
+      if (!did_bind) {
+	a.set_port(0);
+      }
       set_myaddrs(entity_addrvec_t(a));
       ldout(cct,10) << __func__ << " had no addrs" << dendl;
     } else {
       // fix all addrs of the same family, regardless of type (msgr2 vs legacy)
       entity_addrvec_t newaddrs = *my_addrs;
       for (auto& a : newaddrs.v) {
-	if (a.get_family() == peer_addr_for_me.get_family()) {
+	if (a.is_blank_ip() &&
+	    a.get_family() == peer_addr_for_me.get_family()) {
 	  entity_addr_t t = peer_addr_for_me;
-	  t.set_type(a.get_type());
-	  t.set_port(a.get_port());
+	  if (!did_bind) {
+	    t.set_type(entity_addr_t::TYPE_ANY);
+	    t.set_port(0);
+	  } else {	  
+	    t.set_type(a.get_type());
+	    t.set_port(a.get_port());
+	  }
 	  t.set_nonce(a.get_nonce());
 	  ldout(cct,10) << __func__ << " " << a << " -> " << t << dendl;
 	  a = t;
@@ -874,6 +919,7 @@ bool AsyncMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)
     ldout(cct, 1) << __func__ << " learned my addr " << *my_addrs
 		  << " (peer_addr_for_me " << peer_addr_for_me << ")" << dendl;
     _init_local_connection();
+    need_addr = false;
     return true;
   }
   return false;

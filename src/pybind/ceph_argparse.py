@@ -23,10 +23,14 @@ import sys
 import threading
 import uuid
 
-
 # Flags are from MonCommand.h
-FLAG_MGR = 8   # command is intended for mgr
-FLAG_POLL = 16 # command is intended to be ran continuously by the client
+class Flag:
+    NOFORWARD = (1 << 0)
+    OBSOLETE = (1 << 1)
+    DEPRECATED = (1 << 2)
+    MGR = (1<<3)
+    POLL = (1 << 4)
+    HIDDEN = (1 << 5)
 
 KWARG_EQUALS = "--([^=]+)=(.+)"
 KWARG_SPACE = "--([^=]+)"
@@ -159,7 +163,7 @@ class CephInt(CephArgtype):
 
     def valid(self, s, partial=False):
         try:
-            val = int(s)
+            val = int(s, 0)
         except ValueError:
             raise ArgumentValid("{0} doesn't represent an int".format(s))
         if len(self.range) == 2:
@@ -1092,10 +1096,10 @@ def validate(args, signature, flags=0, partial=False):
             print(save_exception[0], 'not valid: ', save_exception[1], file=sys.stderr)
         raise ArgumentError("unused arguments: " + str(myargs))
 
-    if flags & FLAG_MGR:
+    if flags & Flag.MGR:
         d['target'] = ('mgr','')
 
-    if flags & FLAG_POLL:
+    if flags & Flag.POLL:
         d['poll'] = True
 
     # Finally, success
@@ -1129,6 +1133,9 @@ def validate_command(sigdict, args, verbose=False):
     best_match_cnt = 0
     bestcmds = []
     for cmd in sigdict.values():
+        flags = cmd.get('flags', 0)
+        if flags & Flag.OBSOLETE:
+            continue
         sig = cmd['sig']
         matched = matchnum(args, sig, partial=True)
         if (matched >= math.floor(best_match_cnt) and
@@ -1138,7 +1145,7 @@ def validate_command(sigdict, args, verbose=False):
         if matched < best_match_cnt:
             continue
         if verbose:
-            print("better match: {0} > {1}: {3} ".format(
+            print("better match: {0} > {1}: {2} ".format(
                 matched, best_match_cnt, concise_sig(sig)
             ), file=sys.stderr)
         if matched > best_match_cnt:
@@ -1193,7 +1200,9 @@ def validate_command(sigdict, args, verbose=False):
             print("Invalid command:", ex, file=sys.stderr)
             print(concise_sig(sig), ': ', cmd['help'], file=sys.stderr)
     else:
-        bestcmds = bestcmds[:10]
+        bestcmds = [c for c in bestcmds
+                    if not c.get('flags', 0) & (Flag.DEPRECATED | Flag.HIDDEN)]
+        bestcmds = bestcmds[:10] # top 10
         print('no valid command found; {0} closest matches:'.format(len(bestcmds)), file=sys.stderr)
         for cmd in bestcmds:
             print(concise_sig(cmd['sig']), file=sys.stderr)

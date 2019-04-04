@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 /*
  * Ceph - scalable distributed file system
@@ -7,9 +7,9 @@
  *
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License version 2.1, as published by the Free Software 
+ * License version 2.1, as published by the Free Software
  * Foundation.  See file COPYING.
- * 
+ *
  */
 #ifndef CEPH_BUFFER_H
 #define CEPH_BUFFER_H
@@ -62,16 +62,8 @@
 
 #include "inline_memory.h"
 
-#if __GNUC__ >= 4
-  #define CEPH_BUFFER_API  __attribute__ ((visibility ("default")))
-#else
-  #define CEPH_BUFFER_API
-#endif
+#define CEPH_BUFFER_API
 
-#if defined(HAVE_XIO)
-struct xio_reg_mem;
-class XioDispatchHook;
-#endif
 #ifdef HAVE_SEASTAR
 namespace seastar {
 template <typename T> class temporary_buffer;
@@ -81,9 +73,31 @@ class packet;
 }
 #endif // HAVE_SEASTAR
 class deleter;
-struct sha1_digest_t;
+template<uint8_t S>
+struct sha_digest_t;
+using sha1_digest_t = sha_digest_t<20>;
 
 namespace ceph {
+
+template <class T>
+struct nop_delete {
+  void operator()(T*) {}
+};
+
+// This is not unique_ptr-like smart pointer! It just signalizes ownership
+// but DOES NOT manage the resource. It WILL LEAK if not manually deleted.
+// It's rather a replacement for raw pointer than any other smart one.
+//
+// Considered options:
+//  * unique_ptr with custom deleter implemented in .cc (would provide
+//    the non-zero-cost resource management),
+//  * GSL's owner<T*> (pretty neat but would impose an extra depedency),
+//  * unique_ptr with nop deleter,
+//  * raw pointer (doesn't embed ownership enforcement - std::move).
+template <class T>
+struct unique_leakable_ptr : public std::unique_ptr<T, ceph::nop_delete<T>> {
+  using std::unique_ptr<T, ceph::nop_delete<T>>::unique_ptr;
+};
 
 namespace buffer CEPH_BUFFER_API {
   /*
@@ -137,23 +151,20 @@ namespace buffer CEPH_BUFFER_API {
   class raw_claim_buffer;
 
 
-  class xio_mempool;
-  class xio_msg_buffer;
-
   /*
-   * named constructors 
+   * named constructors
    */
-  raw* copy(const char *c, unsigned len);
-  raw* create(unsigned len);
-  raw* create_in_mempool(unsigned len, int mempool);
+  ceph::unique_leakable_ptr<raw> copy(const char *c, unsigned len);
+  ceph::unique_leakable_ptr<raw> create(unsigned len);
+  ceph::unique_leakable_ptr<raw> create_in_mempool(unsigned len, int mempool);
   raw* claim_char(unsigned len, char *buf);
   raw* create_malloc(unsigned len);
   raw* claim_malloc(unsigned len, char *buf);
   raw* create_static(unsigned len, char *buf);
-  raw* create_aligned(unsigned len, unsigned align);
-  raw* create_aligned_in_mempool(unsigned len, unsigned align, int mempool);
-  raw* create_page_aligned(unsigned len);
-  raw* create_small_page_aligned(unsigned len);
+  ceph::unique_leakable_ptr<raw> create_aligned(unsigned len, unsigned align);
+  ceph::unique_leakable_ptr<raw> create_aligned_in_mempool(unsigned len, unsigned align, int mempool);
+  ceph::unique_leakable_ptr<raw> create_page_aligned(unsigned len);
+  ceph::unique_leakable_ptr<raw> create_small_page_aligned(unsigned len);
   raw* create_unshareable(unsigned len);
   raw* create_static(unsigned len, char *buf);
   raw* claim_buffer(unsigned len, char *buf, deleter del);
@@ -167,16 +178,17 @@ namespace buffer CEPH_BUFFER_API {
   /// destructed on this cpu
   raw* create(seastar::temporary_buffer<char>&& buf);
 #endif
-#if defined(HAVE_XIO)
-  raw* create_msg(unsigned len, char *buf, XioDispatchHook *m_hook);
-#endif
+
+inline namespace v14_2_0 {
 
   /*
    * a buffer pointer.  references (a subsequence of) a raw buffer.
    */
   class CEPH_BUFFER_API ptr {
     raw *_raw;
+  public: // dirty hack for testing; if it works, this will be abstracted
     unsigned _off, _len;
+  private:
 
     void release();
 
@@ -242,15 +254,17 @@ namespace buffer CEPH_BUFFER_API {
     using const_iterator = iterator_impl<true>;
     using iterator = iterator_impl<false>;
 
-    ptr() : _raw(0), _off(0), _len(0) {}
+    ptr() : _raw(nullptr), _off(0), _len(0) {}
     // cppcheck-suppress noExplicitConstructor
-    ptr(raw *r);
+    ptr(raw* r);
+    ptr(ceph::unique_leakable_ptr<raw> r);
     // cppcheck-suppress noExplicitConstructor
     ptr(unsigned l);
     ptr(const char *d, unsigned l);
     ptr(const ptr& p);
     ptr(ptr&& p) noexcept;
     ptr(const ptr& p, unsigned o, unsigned l);
+    ptr(const ptr& p, ceph::unique_leakable_ptr<raw> r);
     ptr& operator= (const ptr& p);
     ptr& operator= (ptr&& p) noexcept;
     ~ptr() {
@@ -261,9 +275,8 @@ namespace buffer CEPH_BUFFER_API {
 
     bool have_raw() const { return _raw ? true:false; }
 
-    raw *clone();
+    ceph::unique_leakable_ptr<raw> clone();
     void swap(ptr& other) noexcept;
-    ptr& make_shareable();
 
     iterator begin(size_t offset=0) {
       return iterator(this, offset, false);
@@ -373,9 +386,7 @@ namespace buffer CEPH_BUFFER_API {
   class ptr_node : public ptr_hook, public ptr {
   public:
     struct cloner {
-      ptr_node* operator()(const ptr_node& clone_this) {
-	return new ptr_node(clone_this);
-      }
+      ptr_node* operator()(const ptr_node& clone_this);
     };
     struct disposer {
       void operator()(ptr_node* const delete_this) {
@@ -387,6 +398,10 @@ namespace buffer CEPH_BUFFER_API {
 
     ~ptr_node() = default;
 
+    static std::unique_ptr<ptr_node, disposer>
+    create(ceph::unique_leakable_ptr<raw> r) {
+      return create_hypercombined(std::move(r));
+    }
     static std::unique_ptr<ptr_node, disposer> create(raw* const r) {
       return create_hypercombined(r);
     }
@@ -398,6 +413,8 @@ namespace buffer CEPH_BUFFER_API {
       return std::unique_ptr<ptr_node, disposer>(
 	new ptr_node(std::forward<Args>(args)...));
     }
+
+    static ptr_node* copy_hypercombined(const ptr_node& copy_this);
 
   private:
     template <class... Args>
@@ -413,7 +430,10 @@ namespace buffer CEPH_BUFFER_API {
     void swap(ptr_node& other) noexcept = delete;
 
     static bool dispose_if_hypercombined(ptr_node* delete_this);
-    static std::unique_ptr<ptr_node, disposer> create_hypercombined(raw* r);
+    static std::unique_ptr<ptr_node, disposer> create_hypercombined(
+      buffer::raw* r);
+    static std::unique_ptr<ptr_node, disposer> create_hypercombined(
+      ceph::unique_leakable_ptr<raw> r);
   };
   /*
    * list - the useful bit!
@@ -651,9 +671,13 @@ namespace buffer CEPH_BUFFER_API {
   private:
     // my private bits
     buffers_t _buffers;
+
+    // track bufferptr we can modify (especially ::append() to). Not all bptrs
+    // bufferlist holds have this trait -- if somebody ::push_back(const ptr&),
+    // he expects it won't change.
+    ptr* _carriage;
     unsigned _len;
     unsigned _memcopy_count; //the total of memcopy using rebuild().
-    ptr append_buffer;  // where i put small appends.
 
     template <bool is_const>
     class CEPH_BUFFER_API iterator_impl {
@@ -691,7 +715,7 @@ namespace buffer CEPH_BUFFER_API {
 
       /// get current iterator offset in buffer::list
       unsigned get_off() const { return off; }
-      
+
       /// get number of bytes remaining from iterator position to the end of the buffer::list
       unsigned get_remaining() const { return bl->length() - off; }
 
@@ -754,75 +778,46 @@ namespace buffer CEPH_BUFFER_API {
       void copy_in(unsigned len, const list& otherl);
     };
 
+    struct reserve_t {
+      char* bp_data;
+      unsigned* bp_len;
+      unsigned* bl_len;
+    };
+
     class contiguous_appender {
-      bufferlist *pbl;
-      char *pos;
-      ptr bp;
+      ceph::bufferlist& bl;
+      ceph::bufferlist::reserve_t space;
+      char* pos;
       bool deep;
 
       /// running count of bytes appended that are not reflected by @pos
       size_t out_of_band_offset = 0;
 
-      contiguous_appender(bufferlist *l, size_t len, bool d)
-	: pbl(l),
+      contiguous_appender(bufferlist& bl, size_t len, bool d)
+	: bl(bl),
+	  space(bl.obtain_contiguous_space(len)),
+	  pos(space.bp_data),
 	  deep(d) {
-	size_t unused = pbl->append_buffer.unused_tail_length();
-	if (len > unused) {
-	  // note: if len < the normal append_buffer size it *might*
-	  // be better to allocate a normal-sized append_buffer and
-	  // use part of it.  however, that optimizes for the case of
-	  // old-style types including new-style types.  and in most
-	  // such cases, this won't be the very first thing encoded to
-	  // the list, so append_buffer will already be allocated.
-	  // OTOH if everything is new-style, we *should* allocate
-	  // only what we need and conserve memory.
-	  bp = buffer::create(len);
-	  pos = bp.c_str();
-	} else {
-	  pos = pbl->append_buffer.end_c_str();
-	}
       }
 
       void flush_and_continue() {
-	if (bp.have_raw()) {
-	  // we allocated a new buffer
-	  size_t l = pos - bp.c_str();
-	  pbl->append(bufferptr(bp, 0, l));
-	  bp.set_length(bp.length() - l);
-	  bp.set_offset(bp.offset() + l);
-	} else {
-	  // we are using pbl's append_buffer
-	  size_t l = pos - pbl->append_buffer.end_c_str();
-	  if (l) {
-	    pbl->append_buffer.set_length(pbl->append_buffer.length() + l);
-	    pbl->append(pbl->append_buffer, pbl->append_buffer.end() - l, l);
-	    pos = pbl->append_buffer.end_c_str();
-	  }
-	}
+	const size_t l = pos - space.bp_data;
+	*space.bp_len += l;
+	*space.bl_len += l;
+	space.bp_data = pos;
       }
 
       friend class list;
 
     public:
       ~contiguous_appender() {
-	if (bp.have_raw()) {
-	  // we allocated a new buffer
-	  bp.set_length(pos - bp.c_str());
-	  pbl->append(std::move(bp));
-	} else {
-	  // we are using pbl's append_buffer
-	  size_t l = pos - pbl->append_buffer.end_c_str();
-	  if (l) {
-	    pbl->append_buffer.set_length(pbl->append_buffer.length() + l);
-	    pbl->append(pbl->append_buffer, pbl->append_buffer.end() - l, l);
-	  }
-	}
+	flush_and_continue();
       }
 
       size_t get_out_of_band_offset() const {
 	return out_of_band_offset;
       }
-      void append(const char *p, size_t l) {
+      void append(const char* __restrict__ p, size_t l) {
 	maybe_inline_memcpy(pos, p, l, 16);
 	pos += l;
       }
@@ -836,43 +831,39 @@ namespace buffer CEPH_BUFFER_API {
       }
 
       void append(const bufferptr& p) {
-	if (!p.length()) {
+	const auto plen = p.length();
+	if (!plen) {
 	  return;
 	}
 	if (deep) {
-	  append(p.c_str(), p.length());
+	  append(p.c_str(), plen);
 	} else {
 	  flush_and_continue();
-	  pbl->append(p);
-	  out_of_band_offset += p.length();
+	  bl.append(p);
+	  space = bl.obtain_contiguous_space(0);
+	  out_of_band_offset += plen;
 	}
       }
       void append(const bufferlist& l) {
-	if (!l.length()) {
-	  return;
-	}
 	if (deep) {
 	  for (const auto &p : l._buffers) {
 	    append(p.c_str(), p.length());
 	  }
 	} else {
 	  flush_and_continue();
-	  pbl->append(l);
+	  bl.append(l);
+	  space = bl.obtain_contiguous_space(0);
 	  out_of_band_offset += l.length();
 	}
       }
 
       size_t get_logical_offset() {
-	if (bp.have_raw()) {
-	  return out_of_band_offset + (pos - bp.c_str());
-	} else {
-	  return out_of_band_offset + (pos - pbl->append_buffer.end_c_str());
-	}
+	return out_of_band_offset + (pos - space.bp_data);
       }
     };
 
     contiguous_appender get_contiguous_appender(size_t len, bool deep=false) {
-      return contiguous_appender(this, len, deep);
+      return contiguous_appender(*this, len, deep);
     }
 
     class contiguous_filler {
@@ -882,9 +873,12 @@ namespace buffer CEPH_BUFFER_API {
       contiguous_filler(char* const pos) : pos(pos) {}
 
     public:
+      void advance(const unsigned len) {
+	pos += len;
+      }
       void copy_in(const unsigned len, const char* const src) {
 	memcpy(pos, src, len);
-	pos += len;
+	advance(len);
       }
       char* c_str() {
         return pos;
@@ -956,18 +950,36 @@ namespace buffer CEPH_BUFFER_API {
   private:
     mutable iterator last_p;
 
+    // always_empty_bptr has no underlying raw but its _len is always 0.
+    // This is useful for e.g. get_append_buffer_unused_tail_length() as
+    // it allows to avoid conditionals on hot paths.
+    static ptr always_empty_bptr;
+    ptr_node& refill_append_space(const unsigned len);
+
   public:
     // cons/des
-    list() : _len(0), _memcopy_count(0), last_p(this) {}
+    list()
+      : _carriage(&always_empty_bptr),
+        _len(0),
+        _memcopy_count(0),
+        last_p(this) {
+    }
     // cppcheck-suppress noExplicitConstructor
-    list(unsigned prealloc) : _len(0), _memcopy_count(0), last_p(this) {
+    // cppcheck-suppress noExplicitConstructor
+    list(unsigned prealloc)
+      : _carriage(&always_empty_bptr),
+        _len(0),
+        _memcopy_count(0),
+	last_p(this) {
       reserve(prealloc);
     }
 
-    list(const list& other) : _len(other._len),
-			      _memcopy_count(other._memcopy_count), last_p(this) {
+    list(const list& other)
+      : _carriage(&always_empty_bptr),
+        _len(other._len),
+        _memcopy_count(other._memcopy_count),
+        last_p(this) {
       _buffers.clone_from(other._buffers);
-      make_shareable();
     }
     list(list&& other) noexcept;
 
@@ -977,18 +989,18 @@ namespace buffer CEPH_BUFFER_API {
 
     list& operator= (const list& other) {
       if (this != &other) {
+        _carriage = &always_empty_bptr;
         _buffers.clone_from(other._buffers);
         _len = other._len;
-	make_shareable();
       }
       return *this;
     }
     list& operator= (list&& other) noexcept {
       _buffers = std::move(other._buffers);
+      _carriage = other._carriage;
       _len = other._len;
       _memcopy_count = other._memcopy_count;
       last_p = begin();
-      append_buffer.swap(other.append_buffer);
       other.clear();
       return *this;
     }
@@ -1003,7 +1015,7 @@ namespace buffer CEPH_BUFFER_API {
     void try_assign_to_mempool(int pool);
 
     size_t get_append_buffer_unused_tail_length() const {
-      return append_buffer.unused_tail_length();
+      return _carriage->unused_tail_length();
     }
 
     unsigned get_memcopy_count() const {return _memcopy_count; }
@@ -1041,11 +1053,11 @@ namespace buffer CEPH_BUFFER_API {
 
     // modifiers
     void clear() noexcept {
+      _carriage = &always_empty_bptr;
       _buffers.clear_and_dispose();
       _len = 0;
       _memcopy_count = 0;
       last_p = begin();
-      append_buffer = ptr();
     }
     void push_back(const ptr& bp) {
       if (bp.length() == 0)
@@ -1058,6 +1070,7 @@ namespace buffer CEPH_BUFFER_API {
 	return;
       _len += bp.length();
       _buffers.push_back(*ptr_node::create(std::move(bp)).release());
+      _carriage = &always_empty_bptr;
     }
     void push_back(const ptr_node&) = delete;
     void push_back(ptr_node&) = delete;
@@ -1065,12 +1078,17 @@ namespace buffer CEPH_BUFFER_API {
     void push_back(std::unique_ptr<ptr_node, ptr_node::disposer> bp) {
       if (bp->length() == 0)
 	return;
+      _carriage = bp.get();
       _len += bp->length();
       _buffers.push_back(*bp.release());
     }
     void push_back(raw* const r) {
       _buffers.push_back(*ptr_node::create(r).release());
+      _carriage = &_buffers.back();
       _len += _buffers.back().length();
+    }
+    void push_back(ceph::unique_leakable_ptr<raw> r) {
+      push_back(r.release());
     }
 
     void zero();
@@ -1098,22 +1116,15 @@ namespace buffer CEPH_BUFFER_API {
     // only for bl is bufferlist::page_aligned_appender
     void claim_append_piecewise(list& bl);
 
-    // clone non-shareable buffers (make shareable)
-    void make_shareable() {
-      decltype(_buffers)::iterator pb;
-      for (pb = _buffers.begin(); pb != _buffers.end(); ++pb) {
-        (void) pb->make_shareable();
-      }
-    }
-
     // copy with explicit volatile-sharing semantics
     void share(const list& bl)
     {
       if (this != &bl) {
         clear();
-	for (const auto& pb : bl._buffers) {
-          push_back(static_cast<const ptr&>(pb));
+	for (const auto& bp : bl._buffers) {
+          _buffers.push_back(*ptr_node::create(bp).release());
         }
+        _len = bl._len;
       }
     }
 
@@ -1174,7 +1185,9 @@ namespace buffer CEPH_BUFFER_API {
     contiguous_filler append_hole(unsigned len);
     void append_zero(unsigned len);
     void prepend_zero(unsigned len);
-    
+
+    reserve_t obtain_contiguous_space(unsigned len);
+
     /*
      * get a char
      */
@@ -1193,6 +1206,7 @@ namespace buffer CEPH_BUFFER_API {
 
     void write_stream(std::ostream &out) const;
     void hexdump(std::ostream &out, bool trailing_newline = true) const;
+    ssize_t pread_file(const char *fn, uint64_t off, uint64_t len, std::string *error);
     int read_file(const char *fn, std::string *error);
     ssize_t read_fd(int fd, size_t len);
     int write_file(const char *fn, int mode=0644);
@@ -1215,7 +1229,7 @@ namespace buffer CEPH_BUFFER_API {
     }
     uint32_t crc32c(uint32_t crc) const;
     void invalidate_crc();
-    sha1_digest_t sha1(); 
+    sha1_digest_t sha1();
 
     // These functions return a bufferlist with a pointer to a single
     // static buffer. They /must/ not outlive the memory they
@@ -1224,6 +1238,8 @@ namespace buffer CEPH_BUFFER_API {
     static list static_from_cstring(char* c);
     static list static_from_string(std::string& s);
   };
+
+} // inline namespace v14_2_0
 
   /*
    * efficient hash of one or more bufferlists
@@ -1295,10 +1311,6 @@ inline bufferhash& operator<<(bufferhash& l, const bufferlist &r) {
 }
 
 } // namespace buffer
-
-#if defined(HAVE_XIO)
-xio_reg_mem* get_xio_mp(const buffer::ptr& bp);
-#endif
 
 } // namespace ceph
 
