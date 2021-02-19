@@ -30,7 +30,7 @@ public:
   }
 
   int get_min_compatible_osd(int8_t* require_osd_release) override {
-    *require_osd_release = CEPH_RELEASE_NAUTILUS;
+    *require_osd_release = CEPH_RELEASE_OCTOPUS;
     return 0;
   }
 
@@ -62,8 +62,8 @@ public:
 
   int watch_flush() override;
 
-  bool is_blacklisted() const override;
-  int blacklist_add(const std::string& client_address,
+  bool is_blocklisted() const override;
+  int blocklist_add(const std::string& client_address,
                     uint32_t expire_seconds) override;
 protected:
   TestMemCluster *get_mem_cluster() {

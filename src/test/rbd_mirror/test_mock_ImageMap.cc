@@ -34,7 +34,7 @@ namespace mirror {
 template <>
 struct Threads<librbd::MockTestImageCtx> {
   MockSafeTimer *timer;
-  Mutex &timer_lock;
+  ceph::mutex &timer_lock;
 
   MockContextWQ *work_queue;
 
@@ -160,11 +160,7 @@ public:
     }
   };
 
-  TestMockImageMap()
-    : m_lock("TestMockImageMap::m_lock"),
-      m_notify_update_count(0),
-      m_map_update_count(0) {
-  }
+  TestMockImageMap() = default;
 
   void SetUp() override {
     TestFixture::SetUp();
@@ -192,8 +188,8 @@ public:
   void expect_add_event(MockThreads &mock_threads) {
     EXPECT_CALL(*mock_threads.timer, add_event_after(_,_))
       .WillOnce(DoAll(WithArg<1>(Invoke([this](Context *ctx) {
-             auto wrapped_ctx = new FunctionContext([this, ctx](int r) {
-                    Mutex::Locker timer_locker(m_threads->timer_lock);
+             auto wrapped_ctx = new LambdaContext([this, ctx](int r) {
+                    std::lock_guard timer_locker{m_threads->timer_lock};
                     ctx->complete(r);
                   });
                 m_threads->work_queue->queue(wrapped_ctx, 0);
@@ -207,8 +203,8 @@ public:
                 CephContext *cct = reinterpret_cast<CephContext *>(m_local_io_ctx.cct());
                 cct->_conf.set_val("rbd_mirror_image_policy_rebalance_timeout", "0");
 
-                auto wrapped_ctx = new FunctionContext([this, ctx](int r) {
-                    Mutex::Locker timer_locker(m_threads->timer_lock);
+                auto wrapped_ctx = new LambdaContext([this, ctx](int r) {
+                    std::lock_guard timer_locker{m_threads->timer_lock};
                     ctx->complete(r);
                   });
                 m_threads->work_queue->queue(wrapped_ctx, 0);
@@ -227,9 +223,9 @@ public:
       .WillOnce(Invoke([this, &request, r]() {
             request.on_finish->complete(r);
             if (r == 0) {
-              Mutex::Locker locker(m_lock);
+              std::lock_guard locker{m_lock};
               ++m_map_update_count;
-              m_cond.Signal();
+              m_cond.notify_all();
             }
           }));
   }
@@ -239,10 +235,10 @@ public:
                                      std::map<std::string, Context*> *peer_ack_ctxs) {
     EXPECT_CALL(mock_listener, mock_acquire_image(global_image_id, _))
       .WillOnce(WithArg<1>(Invoke([this, global_image_id, peer_ack_ctxs](Context* ctx) {
-              Mutex::Locker locker(m_lock);
+              std::lock_guard locker{m_lock};
               peer_ack_ctxs->insert({global_image_id, ctx});
               ++m_notify_update_count;
-              m_cond.Signal();
+              m_cond.notify_all();
             })));
   }
 
@@ -251,10 +247,10 @@ public:
                                      std::map<std::string, Context*> *peer_ack_ctxs) {
     EXPECT_CALL(mock_listener, mock_release_image(global_image_id, _))
       .WillOnce(WithArg<1>(Invoke([this, global_image_id, peer_ack_ctxs](Context* ctx) {
-              Mutex::Locker locker(m_lock);
+              std::lock_guard locker{m_lock};
               peer_ack_ctxs->insert({global_image_id, ctx});
               ++m_notify_update_count;
-              m_cond.Signal();
+              m_cond.notify_all();
             })));
   }
 
@@ -265,10 +261,10 @@ public:
     EXPECT_CALL(mock_listener,
                 mock_remove_image(mirror_uuid, global_image_id, _))
       .WillOnce(WithArg<2>(Invoke([this, global_image_id, peer_ack_ctxs](Context* ctx) {
-              Mutex::Locker locker(m_lock);
+              std::lock_guard locker{m_lock};
               peer_ack_ctxs->insert({global_image_id, ctx});
               ++m_notify_update_count;
-              m_cond.Signal();
+              m_cond.notify_all();
             })));
   }
 
@@ -278,11 +274,11 @@ public:
     EXPECT_CALL(mock_listener, mock_release_image(_, _))
       .Times(count)
       .WillRepeatedly(Invoke([this, global_image_ids, peer_ack_ctxs](std::string global_image_id, Context* ctx) {
-              Mutex::Locker locker(m_lock);
+              std::lock_guard locker{m_lock};
               global_image_ids->emplace(global_image_id);
               peer_ack_ctxs->insert({global_image_id, ctx});
               ++m_notify_update_count;
-              m_cond.Signal();
+              m_cond.notify_all();
             }));
   }
 
@@ -359,9 +355,9 @@ public:
   }
 
   bool wait_for_listener_notify(uint32_t count) {
-    Mutex::Locker locker(m_lock);
+    std::unique_lock locker{m_lock};
     while (m_notify_update_count < count) {
-      if (m_cond.WaitInterval(m_lock, utime_t(10, 0)) != 0) {
+      if (m_cond.wait_for(locker, 10s) == std::cv_status::timeout) {
         break;
       }
     }
@@ -375,9 +371,9 @@ public:
   }
 
   bool wait_for_map_update(uint32_t count) {
-    Mutex::Locker locker(m_lock);
+    std::unique_lock locker{m_lock};
     while (m_map_update_count < count) {
-      if (m_cond.WaitInterval(m_lock, utime_t(10, 0)) != 0) {
+      if (m_cond.wait_for(locker, 10s) == std::cv_status::timeout) {
         break;
       }
     }
@@ -424,10 +420,10 @@ public:
     }
   }
 
-  Mutex m_lock;
-  Cond m_cond;
-  uint32_t m_notify_update_count;
-  uint32_t m_map_update_count;
+  ceph::mutex m_lock = ceph::make_mutex("TestMockImageMap::m_lock");
+  ceph::condition_variable m_cond;
+  uint32_t m_notify_update_count = 0;
+  uint32_t m_map_update_count = 0;
   std::string m_local_instance_id;
 };
 
@@ -1230,7 +1226,7 @@ TEST_F(TestMockImageMap, RemoveInstanceWithRemoveImage) {
   remote_peer_ack_nowait(mock_image_map.get(), shuffled_global_image_ids,
                          -ENOENT, &peer_ack_remove_ctxs);
   remote_peer_ack_wait(mock_image_map.get(), shuffled_global_image_ids,
-                       -EBLACKLISTED, &peer_ack_ctxs);
+                       -EBLOCKLISTED, &peer_ack_ctxs);
 
   wait_for_scheduled_task();
   ASSERT_EQ(0, when_shut_down(mock_image_map.get()));
@@ -1312,9 +1308,9 @@ TEST_F(TestMockImageMap, AddErrorAndRemoveImage) {
   expect_listener_images_unmapped(mock_listener, 1, &released_global_image_ids,
                                   &release_peer_ack_ctxs);
 
-  // instance blacklisted -- ACQUIRE request fails
+  // instance blocklisted -- ACQUIRE request fails
   remote_peer_ack_nowait(mock_image_map.get(), shuffled_global_image_ids,
-                         -EBLACKLISTED, &peer_ack_ctxs);
+                         -EBLOCKLISTED, &peer_ack_ctxs);
   ASSERT_TRUE(wait_for_listener_notify(shuffled_global_image_ids.size()));
 
   std::map<std::string, Context*> remap_peer_ack_ctxs;
@@ -1322,7 +1318,7 @@ TEST_F(TestMockImageMap, AddErrorAndRemoveImage) {
                          mock_listener, shuffled_global_image_ids, 0,
                          &remap_peer_ack_ctxs);
 
-  // instance blacklisted -- RELEASE request fails
+  // instance blocklisted -- RELEASE request fails
   remote_peer_ack_listener_wait(mock_image_map.get(), shuffled_global_image_ids,
                                 -ENOENT, &release_peer_ack_ctxs);
   wait_for_scheduled_task();

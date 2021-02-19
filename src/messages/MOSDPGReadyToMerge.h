@@ -3,8 +3,7 @@
 
 #pragma once
 
-class MOSDPGReadyToMerge
-  : public MessageInstance<MOSDPGReadyToMerge, PaxosServiceMessage> {
+class MOSDPGReadyToMerge : public PaxosServiceMessage {
 public:
   pg_t pgid;
   eversion_t source_version, target_version;
@@ -13,11 +12,11 @@ public:
   bool ready = true;
 
   MOSDPGReadyToMerge()
-    : MessageInstance(MSG_OSD_PG_READY_TO_MERGE, 0)
+    : PaxosServiceMessage{MSG_OSD_PG_READY_TO_MERGE, 0}
   {}
   MOSDPGReadyToMerge(pg_t p, eversion_t sv, eversion_t tv,
 		     epoch_t les, epoch_t lec, bool r, epoch_t v)
-    : MessageInstance(MSG_OSD_PG_READY_TO_MERGE, v),
+    : PaxosServiceMessage{MSG_OSD_PG_READY_TO_MERGE, v},
       pgid(p),
       source_version(sv),
       target_version(tv),
@@ -36,7 +35,8 @@ public:
     encode(ready, payload);
   }
   void decode_payload() override {
-    bufferlist::const_iterator p = payload.begin();
+    using ceph::decode;
+    auto p = payload.cbegin();
     paxos_decode(p);
     decode(pgid, p);
     decode(source_version, p);
@@ -46,7 +46,7 @@ public:
     decode(ready, p);
   }
   std::string_view get_type_name() const override { return "osd_pg_ready_to_merge"; }
-  void print(ostream &out) const {
+  void print(std::ostream &out) const {
     out << get_type_name()
         << "(" << pgid
 	<< " sv " << source_version
@@ -55,4 +55,7 @@ public:
 	<< (ready ? " ready" : " NOT READY")
         << " v" << version << ")";
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };

@@ -17,20 +17,18 @@
 
 #include "osd/osd_types.h"
 
-class MPGStatsAck : public MessageInstance<MPGStatsAck> {
+class MPGStatsAck final : public Message {
 public:
-  friend factory;
+  std::map<pg_t,std::pair<version_t,epoch_t> > pg_stat;
 
-  map<pg_t,pair<version_t,epoch_t> > pg_stat;
-  
-  MPGStatsAck() : MessageInstance(MSG_PGSTATSACK) {}
+  MPGStatsAck() : Message{MSG_PGSTATSACK} {}
 
 private:
-  ~MPGStatsAck() override {}
+  ~MPGStatsAck() final {}
 
 public:
   std::string_view get_type_name() const override { return "pg_stats_ack"; }
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "pg_stats_ack(" << pg_stat.size() << " pgs tid " << get_tid() << ")";
   }
 
@@ -39,9 +37,13 @@ public:
     encode(pg_stat, payload);
   }
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(pg_stat, p);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

@@ -1,2 +1,7 @@
+import os
 
-from .module import *
+if 'UNITTEST' in os.environ:
+    import tests
+from .module import Module
+
+

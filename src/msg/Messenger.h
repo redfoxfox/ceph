@@ -59,6 +59,27 @@ struct Interceptor {
     STOP
   };
 
+  enum STEP {
+    START_CLIENT_BANNER_EXCHANGE = 1,
+    START_SERVER_BANNER_EXCHANGE,
+    BANNER_EXCHANGE_BANNER_CONNECTING,
+    BANNER_EXCHANGE,
+    HANDLE_PEER_BANNER_BANNER_CONNECTING,
+    HANDLE_PEER_BANNER,
+    HANDLE_PEER_BANNER_PAYLOAD_HELLO_CONNECTING,
+    HANDLE_PEER_BANNER_PAYLOAD,
+    SEND_AUTH_REQUEST,
+    HANDLE_AUTH_REQUEST_ACCEPTING_SIGN,
+    SEND_CLIENT_IDENTITY,
+    SEND_SERVER_IDENTITY,
+    SEND_RECONNECT,
+    SEND_RECONNECT_OK,
+    READY,
+    HANDLE_MESSAGE,
+    READ_MESSAGE_COMPLETE,
+    SESSION_RETRY
+  };
+
   virtual ~Interceptor() {}
   virtual ACTION intercept(Connection *conn, uint32_t step) = 0;
 };
@@ -97,14 +118,6 @@ public:
 #endif
 
   /**
-   * Various Messenger conditional config/type flags to allow
-   * different "transport" Messengers to tune themselves
-   */
-  static const int HAS_HEAVY_TRAFFIC    = 0x0001;
-  static const int HAS_MANY_CONNECTIONS = 0x0002;
-  static const int HEARTBEAT            = 0x0004;
-
-  /**
    *  The CephContext this Messenger uses. Many other components initialize themselves
    *  from this value.
    */
@@ -112,6 +125,12 @@ public:
   int crcflags;
 
   using Policy = ceph::net::Policy<Throttle>;
+
+public:
+  // allow unauthenticated connections.  This is needed for
+  // compatibility with pre-nautilus OSDs, which do not authenticate
+  // the heartbeat sessions.
+  bool require_authorizer = true;
 
 protected:
   // for authentication
@@ -137,15 +156,15 @@ public:
    * @param name entity name to register
    * @param lname logical name of the messenger in this process (e.g., "client")
    * @param nonce nonce value to uniquely identify this instance on the current host
-   * @param features bits for the local connection
-   * @param cflags general std::set of flags to configure transport resources
    */
   static Messenger *create(CephContext *cct,
                            const std::string &type,
                            entity_name_t name,
 			   std::string lname,
-                           uint64_t nonce,
-			   uint64_t cflags);
+                           uint64_t nonce);
+
+  static uint64_t get_random_nonce();
+  static uint64_t get_pid_nonce();
 
   /**
    * create a new messenger
@@ -153,7 +172,6 @@ public:
    * Create a new messenger instance.
    * Same as the above, but a slightly simpler interface for clients:
    * - Generate a random nonce
-   * - use the default feature bits
    * - get the messenger type from cct
    * - use the client entity_type
    *
@@ -227,7 +245,7 @@ public:
   }
 
   /**
-   * std::Set the name of the local entity. The name is reported to others and
+   * set the name of the local entity. The name is reported to others and
    * can be changed while the system is running, but doing so at incorrect
    * times may have bad results.
    *
@@ -236,7 +254,7 @@ public:
   void set_myname(const entity_name_t& m) { my_name = m; }
 
   /**
-   * std::Set the unknown address components for this Messenger.
+   * set the unknown address components for this Messenger.
    * This is useful if the Messenger doesn't know its full address just by
    * binding, but another Messenger on the same interface has already learned
    * its full address. This function does not fill in known address elements,
@@ -246,7 +264,7 @@ public:
    */
   virtual bool set_addr_unknowns(const entity_addrvec_t &addrs) = 0;
   /**
-   * std::Set the address for this Messenger. This is useful if the Messenger
+   * set the address for this Messenger. This is useful if the Messenger
    * binds to a specific address but advertises a different address on the
    * the network.
    *
@@ -276,7 +294,7 @@ public:
    * @{
    */
   /**
-   * std::Set the cluster protocol in use by this daemon.
+   * set the cluster protocol in use by this daemon.
    * This is an init-time function and cannot be called after calling
    * start() or bind().
    *
@@ -284,7 +302,7 @@ public:
    */
   virtual void set_cluster_protocol(int p) = 0;
   /**
-   * std::Set a policy which is applied to all peers who do not have a type-specific
+   * set a policy which is applied to all peers who do not have a type-specific
    * Policy.
    * This is an init-time function and cannot be called after calling
    * start() or bind().
@@ -293,7 +311,7 @@ public:
    */
   virtual void set_default_policy(Policy p) = 0;
   /**
-   * std::Set a policy which is applied to all peers of the given type.
+   * set a policy which is applied to all peers of the given type.
    * This is an init-time function and cannot be called after calling
    * start() or bind().
    *
@@ -302,7 +320,7 @@ public:
    */
   virtual void set_policy(int type, Policy p) = 0;
   /**
-   * std::Set the Policy associated with a type of peer.
+   * set the Policy associated with a type of peer.
    *
    * This can be called either on initial setup, or after connections
    * are already established.  However, the policies for existing
@@ -320,7 +338,7 @@ public:
    */
   virtual Policy get_default_policy() = 0;
   /**
-   * std::Set Throttlers applied to all Messages from the given type of peer
+   * set Throttlers applied to all Messages from the given type of peer
    *
    * This is an init-time function and cannot be called after calling
    * start() or bind().
@@ -333,7 +351,7 @@ public:
    */
   virtual void set_policy_throttlers(int type, Throttle *bytes, Throttle *msgs=NULL) = 0;
   /**
-   * std::Set the default send priority
+   * set the default send priority
    *
    * This is an init-time function and must be called *before* calling
    * start().
@@ -345,7 +363,7 @@ public:
     default_send_priority = p;
   }
   /**
-   * std::Set the priority(SO_PRIORITY) for all packets to be sent on this socket.
+   * set the priority(SO_PRIORITY) for all packets to be sent on this socket.
    *
    * Linux uses this value to order the networking queues: packets with a higher
    * priority may be processed first depending on the selected device queueing
@@ -407,6 +425,8 @@ public:
    */
   virtual int bind(const entity_addr_t& bind_addr) = 0;
 
+  virtual int bindv(const entity_addrvec_t& addrs);
+
   /**
    * This function performs a full restart of the Messenger component,
    * whatever that means.  Other entities who connect to this
@@ -423,10 +443,15 @@ public:
    * is true.
    * @param bind_addr The address to bind to.
    * @return 0 on success, or -1 on error, or -errno if
+   * we can be more specific about the failure.
    */
   virtual int client_bind(const entity_addr_t& bind_addr) = 0;
 
-  virtual int bindv(const entity_addrvec_t& addrs);
+  /**
+   * reset the 'client' Messenger. Mark all the existing Connections down
+   * and update 'nonce'.
+   */
+  virtual int client_reset() = 0;
 
 
   virtual bool should_use_msgr2() {
@@ -445,7 +470,7 @@ public:
    * Perform any resource allocation, thread startup, etc
    * that is required before attempting to connect to other
    * Messengers or transmit messages.
-   * Once this function completes, started shall be std::set to true.
+   * Once this function completes, started shall be set to true.
    *
    * @return 0 on success; -errno on failure.
    */
@@ -500,14 +525,6 @@ public:
     Message *m, const entity_addrvec_t& addrs) {
     return send_to(m, CEPH_ENTITY_TYPE_MDS, addrs);
   }
-  int send_to_osd(
-    Message *m, const entity_addrvec_t& addrs) {
-    return send_to(m, CEPH_ENTITY_TYPE_OSD, addrs);
-  }
-  int send_to_mgr(
-    Message *m, const entity_addrvec_t& addrs) {
-    return send_to(m, CEPH_ENTITY_TYPE_MGR, addrs);
-  }
 
   /**
    * @} // Messaging
@@ -525,18 +542,23 @@ public:
    * @param dest The entity to get a connection for.
    */
   virtual ConnectionRef connect_to(
-    int type, const entity_addrvec_t& dest) = 0;
-  ConnectionRef connect_to_mon(const entity_addrvec_t& dest) {
-    return connect_to(CEPH_ENTITY_TYPE_MON, dest);
+    int type, const entity_addrvec_t& dest,
+    bool anon=false, bool not_local_dest=false) = 0;
+  ConnectionRef connect_to_mon(const entity_addrvec_t& dest,
+      bool anon=false, bool not_local_dest=false) {
+	return connect_to(CEPH_ENTITY_TYPE_MON, dest, anon, not_local_dest);
   }
-  ConnectionRef connect_to_mds(const entity_addrvec_t& dest) {
-    return connect_to(CEPH_ENTITY_TYPE_MDS, dest);
+  ConnectionRef connect_to_mds(const entity_addrvec_t& dest,
+      bool anon=false, bool not_local_dest=false) {
+	return connect_to(CEPH_ENTITY_TYPE_MDS, dest, anon, not_local_dest);
   }
-  ConnectionRef connect_to_osd(const entity_addrvec_t& dest) {
-    return connect_to(CEPH_ENTITY_TYPE_OSD, dest);
+  ConnectionRef connect_to_osd(const entity_addrvec_t& dest,
+      bool anon=false, bool not_local_dest=false) {
+	return connect_to(CEPH_ENTITY_TYPE_OSD, dest, anon, not_local_dest);
   }
-  ConnectionRef connect_to_mgr(const entity_addrvec_t& dest) {
-    return connect_to(CEPH_ENTITY_TYPE_MGR, dest);
+  ConnectionRef connect_to_mgr(const entity_addrvec_t& dest,
+      bool anon=false, bool not_local_dest=false) {
+	return connect_to(CEPH_ENTITY_TYPE_MGR, dest, anon, not_local_dest);
   }
 
   /**
@@ -642,7 +664,7 @@ public:
    *
    * @param m The Message we are testing.
    */
-  bool ms_can_fast_dispatch(const Message::const_ref& m) {
+  bool ms_can_fast_dispatch(const ceph::cref_t<Message>& m) {
     for (const auto &dispatcher : fast_dispatchers) {
       if (dispatcher->ms_can_fast_dispatch2(m))
 	return true;
@@ -656,7 +678,7 @@ public:
    * @param m The Message we are fast dispatching.
    * If none of our Dispatchers can handle it, ceph_abort().
    */
-  void ms_fast_dispatch(const Message::ref &m) {
+  void ms_fast_dispatch(const ceph::ref_t<Message> &m) {
     m->set_dispatch_stamp(ceph_clock_now());
     for (const auto &dispatcher : fast_dispatchers) {
       if (dispatcher->ms_can_fast_dispatch2(m)) {
@@ -667,12 +689,12 @@ public:
     ceph_abort();
   }
   void ms_fast_dispatch(Message *m) {
-    return ms_fast_dispatch(Message::ref(m, false)); /* consume ref */
+    return ms_fast_dispatch(ceph::ref_t<Message>(m, false)); /* consume ref */
   }
   /**
    *
    */
-  void ms_fast_preprocess(const Message::ref &m) {
+  void ms_fast_preprocess(const ceph::ref_t<Message> &m) {
     for (const auto &dispatcher : fast_dispatchers) {
       dispatcher->ms_fast_preprocess2(m);
     }
@@ -684,7 +706,7 @@ public:
    *
    *  @param m The Message to deliver.
    */
-  void ms_deliver_dispatch(const Message::ref &m) {
+  void ms_deliver_dispatch(const ceph::ref_t<Message> &m) {
     m->set_dispatch_stamp(ceph_clock_now());
     for (const auto &dispatcher : dispatchers) {
       if (dispatcher->ms_dispatch2(m))
@@ -695,7 +717,7 @@ public:
     ceph_assert(!cct->_conf->ms_die_on_unhandled_msg);
   }
   void ms_deliver_dispatch(Message *m) {
-    return ms_deliver_dispatch(Message::ref(m, false)); /* consume ref */
+    return ms_deliver_dispatch(ceph::ref_t<Message>(m, false)); /* consume ref */
   }
   /**
    * Notify each Dispatcher of a new Connection. Call
@@ -788,42 +810,9 @@ public:
     }
   }
 
-  /**
-   * Get the AuthAuthorizer for a new outgoing Connection.
-   *
-   * @param peer_type The peer type for the new Connection
-   * @param force_new True if we want to wait for new keys, false otherwise.
-   * @return A pointer to the AuthAuthorizer, if we have one; NULL otherwise
-   */
-  AuthAuthorizer *ms_deliver_get_authorizer(int peer_type) {
-    AuthAuthorizer *a = 0;
-    for (const auto& dispatcher : dispatchers) {
-      if (dispatcher->ms_get_authorizer(peer_type, &a))
-	return a;
-    }
-    return NULL;
+  void set_require_authorizer(bool b) {
+    require_authorizer = b;
   }
-  /**
-   * Verify that the authorizer on a new incoming Connection is correct.
-   *
-   * @param con The new incoming Connection
-   * @param peer_type The type of the endpoint on the new Connection
-   * @param protocol The ID of the protocol in use (at time of writing, cephx or none)
-   * @param authorizer The authorization string supplied by the remote
-   * @param authorizer_reply Output param: The string we should send back to
-   * the remote to authorize ourselves. Only filled in if isvalid
-   * @param isvalid Output param: True if authorizer is valid, false otherwise
-   *
-   * @return True if we were able to prove or disprove correctness of
-   * authorizer, false otherwise.
-   */
-  bool ms_deliver_verify_authorizer(
-    Connection *con, int peer_type,
-    int protocol, ceph::buffer::list& authorizer, ceph::buffer::list& authorizer_reply,
-    bool& isvalid,
-    CryptoKey& session_key,
-    std::string *connection_secret,
-    std::unique_ptr<AuthAuthorizerChallenge> *challenge);
 
   /**
    * @} // Dispatcher Interfacing

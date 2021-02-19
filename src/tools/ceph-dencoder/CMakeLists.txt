@@ -9,7 +9,15 @@ if(HAS_VTA)
 endif()
 
 set(dencoder_srcs
+  denc_registry.cc
   ceph_dencoder.cc
+  common_types.cc
+  mds_types.cc
+  osd_types.cc
+  rbd_types.cc
+  rgw_types.cc
+  ../../include/uuid.cc
+  ../../include/utime.cc
   $<TARGET_OBJECTS:common_texttable_obj>)
 if(WITH_RADOSGW)
   list(APPEND dencoder_srcs
@@ -24,7 +32,11 @@ if(WITH_RADOSGW)
     cls_rgw_client)
   if(WITH_RADOSGW_AMQP_ENDPOINT)
     list(APPEND DENCODER_EXTRALIBS
-      rabbitmq)
+      rabbitmq ssl)
+  endif()
+  if(WITH_RADOSGW_KAFKA_ENDPOINT)
+    list(APPEND DENCODER_EXTRALIBS
+      rdkafka)
   endif()
 endif()
 
@@ -59,6 +71,8 @@ target_link_libraries(ceph-dencoder
   cls_user_client
   cls_journal_client
   cls_timeindex_client
+  cls_cas_internal
+  cls_cas_client
   ${EXTRALIBS}
   ${CMAKE_DL_LIBS})
 install(TARGETS ceph-dencoder DESTINATION bin)

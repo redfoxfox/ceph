@@ -1,210 +1,280 @@
-@import '../../../../defaults';
+@use './src/styles/vendor/variables' as vv;
 
-/* Navbar */
-::ng-deep .navbar-main {
-  margin-bottom: 0;
-  background: $color-navbar-bg;
-  border: 0;
-  border-radius: 0;
-  border-top: 4px solid $color-nav-top-bar;
-  font-size: 1.2em;
+/* ---------------------------------------------------
+    NAVBAR STYLE
+--------------------------------------------------- */
 
-  .navbar-header {
-    display: flex;
-    float: none;
-  }
+::ng-deep cd-navigation .cd-navbar-top {
+  .cd-navbar-brand {
+    background: vv.$secondary;
+    border-top: 4px solid vv.$primary;
 
-  .navbar-brand,
-  .navbar-brand:hover {
-    color: $color-navbar-brand;
-    height: auto;
-    margin: 15px 0 15px 20px;
-    padding: 0;
-    -webkit-align-self: flex-start;
-    align-self: flex-start;
-  }
-
-  .navbar-brand > img {
-    height: 25px;
-  }
-
-  .navbar-toggle {
-    margin-left: auto;
-    border: 0;
-  }
-
-  .navbar-toggle:focus,
-  .navbar-toggle:hover {
-    background-color: transparent;
-    outline: 0;
-  }
-
-  .navbar-toggle .icon-bar {
-    background-color: $color-nav-toggle-bar;
-  }
-
-  .navbar-toggle:focus .icon-bar,
-  .navbar-toggle:hover .icon-bar {
-    -webkit-box-shadow: 0 0 3px $color-nav-toggle-shadow;
-    box-shadow: 0 0 3px $color-nav-toggle-shadow;
-  }
-
-  .navbar-collapse {
-    padding: 0;
-  }
-
-  .navbar-nav > li > .oa-navbar > [dropdown] > ul > li > .dropdown-item {
-    font-size: 12px;
-  }
-
-  .navbar-nav > li > .oa-navbar > [dropdown] > a,
-  .navbar-nav > li > .oa-navbar > a,
-  .navbar-nav > li > a {
-    color: $color-nav-links;
-    line-height: 1;
-    padding: 10px 18px;
-    position: relative;
-    display: block;
-    text-decoration: none;
-  }
-
-  .navbar-nav > li > .oa-navbar > [dropdown] > a:focus,
-  .navbar-nav > li > .oa-navbar > [dropdown] > a:hover,
-  .navbar-nav > li > .oa-navbar > a:focus,
-  .navbar-nav > li > .oa-navbar > a:hover,
-  .navbar-nav > li > a:focus,
-  .navbar-nav > li > a:hover {
-    color: $color-nav-links;
-  }
-
-  .navbar-nav > li > .oa-navbar > [dropdown] > a:hover,
-  .navbar-nav > li > .oa-navbar > [dropdown].open > a,
-  .navbar-nav > li > .oa-navbar > a:hover,
-  .navbar-nav > li > a:hover {
-    background-color: $color-nav-links-hover;
-  }
-
-  .navbar-nav > li a.dropdown-toggle span.caret {
-    margin-left: 5px;
-  }
-
-  .navbar-nav > .open > .oa-navbar > [dropdown] > a,
-  .navbar-nav > .open > .oa-navbar > [dropdown] > a:hover,
-  .navbar-nav > .open > .oa-navbar > a,
-  .navbar-nav > .open > .oa-navbar > a:focus,
-  .navbar-nav > .open > .oa-navbar > a:hover,
-  .navbar-nav > .open > .oa-navbar > li > a:focus,
-  .navbar-nav > .open > a,
-  .navbar-nav > .open > a:focus,
-  .navbar-nav > .open > a:hover {
-    color: $color-nav-links;
-    border-color: transparent;
-    background-color: transparent;
-  }
-
-  .navbar-primary > li > a {
-    border: 0;
-  }
-
-  .navbar-primary > .active > a,
-  .navbar-primary > .active > a:focus,
-  .navbar-primary > .active > a:hover {
-    color: $color-nav-links;
-    background-color: $color-nav-links-hover;
-    border: 0;
-  }
-
-  .navbar-utility .fa,
-  .navbar-utility a {
-    font-size: 1.1em;
-  }
-
-  .navbar-utility > .active > a {
-    color: $color-nav-links;
-    background-color: $color-nav-links-hover;
-  }
-
-  .navbar-utility > li > .open > a,
-  .navbar-utility > li > .open > a:focus,
-  .navbar-utility > li > .open > a:hover {
-    color: $color-nav-links;
-    border-color: transparent;
-    background-color: transparent;
-  }
-  @media (min-width: $screen-sm-min) {
-    .navbar-primary > li > a {
-      border-bottom: 4px solid transparent;
+    &.isPwdDisplayed {
+      top: vv.$top-notification-height;
     }
 
-    .navbar-primary > .active > a,
-    .navbar-primary > .active > a:focus,
-    .navbar-primary > .active > a:hover {
-      background-color: transparent;
-      border-bottom: 4px solid $color-nav-bottom-bar;
+    .navbar-brand,
+    .navbar-brand:hover {
+      color: vv.$gray-200;
+      height: auto;
+      padding: 0;
     }
 
-    .navbar-utility {
-      border-bottom: 0;
-      font-size: 11px;
-      position: absolute;
-      right: 0;
-      top: 0;
+    .navbar-brand > img {
+      height: 25px;
     }
-  }
-  @media (max-width: $screen-xs-max) {
-    .navbar-nav {
-      margin: 0;
 
-      .fa {
-        margin-right: 0.5em;
+    .navbar-toggler {
+      border: 0;
+
+      &:focus,
+      &:hover {
+        outline: 0;
       }
-    }
 
-    .navbar-collapse,
-    .navbar-form {
-      border-color: $color-nav-collapse-border;
+      .fa-navicon {
+        color: vv.$gray-200;
+      }
     }
 
     .navbar-collapse {
       padding: 0;
     }
 
-    .navbar-nav .open .dropdown-menu {
-      padding-top: 0;
-      padding-bottom: 0;
-      background-color: $color-nav-open-bg;
+    .cd-navbar-utility > .active > a {
+      background-color: vv.$primary;
+      color: vv.$gray-200;
     }
 
-    .navbar-nav .open .dropdown-menu .dropdown-header,
-    .navbar-nav .open .dropdown-menu > li > a {
-      padding: 5px 15px 5px 35px;
+    .cd-navbar-utility > li > .open > a,
+    .cd-navbar-utility > li > .open > a:focus,
+    .cd-navbar-utility > li > .open > a:hover {
+      background-color: transparent;
+      border-color: transparent;
+      color: vv.$gray-200;
     }
+  }
 
-    .navbar-nav .open .dropdown-menu > li > a {
-      color: $color-nav-links;
+  .navbar-nav > li > .cd-navbar > [ngbDropdown] > a,
+  .navbar-nav > li > .cd-navbar > a,
+  .navbar-nav > li > a {
+    color: vv.$gray-200;
+    display: block;
+    line-height: 1;
+    padding: 13.5px 18px !important;
+    position: relative;
+    text-decoration: none;
+  }
+
+  .navbar-nav .nav-link,
+  .navbar-nav .nav-link:hover {
+    color: vv.$gray-200;
+  }
+
+  .navbar-nav > li > .cd-navbar > [ngbDropdown] > a:hover,
+  .navbar-nav > li > .cd-navbar > [ngbDropdown].open > a,
+  .navbar-nav > li > .cd-navbar > a:hover,
+  .navbar-nav > li > a:hover,
+  .navbar-nav > li:hover {
+    background-color: vv.$primary;
+  }
+
+  .navbar-nav > .open > .cd-navbar > [ngbDropdown] > a,
+  .navbar-nav > .open > .cd-navbar > [ngbDropdown] > a:hover,
+  .navbar-nav > .open > .cd-navbar > a,
+  .navbar-nav > .open > .cd-navbar > a:focus,
+  .navbar-nav > .open > .cd-navbar > a:hover,
+  .navbar-nav > .open > .cd-navbar > li > a:focus,
+  .navbar-nav > .open > a,
+  .navbar-nav > .open > a:focus,
+  .navbar-nav > .open > a:hover {
+    background-color: transparent;
+    border-color: transparent;
+    color: vv.$gray-200;
+  }
+
+  @media (min-width: vv.$screen-md-min) {
+    .cd-navbar-utility {
+      border-bottom: 0;
+      font-size: 1.1rem;
+      position: absolute;
+      right: 0;
+      top: 0;
     }
+  }
 
-    .navbar-nav .open .dropdown-menu > .active > a {
-      color: $color-nav-links;
-      background-color: $color-nav-active-link-bg;
-    }
+  @media (max-width: vv.$screen-sm-max) {
+    .navbar-nav {
+      margin: 0;
 
-    .navbar-nav > li > a:hover {
-      background-color: $color-nav-active-link-bg;
-    }
+      .fa {
+        margin-right: 0.5em;
+      }
 
-    .navbar-utility {
-      border-top: 1px solid $color-nav-border-top-collapse;
+      .open .dropdown-menu {
+        background-color: vv.$primary;
+        border: 0;
+        padding-bottom: 0;
+        padding-top: 0;
+      }
 
-      a {
-        font-size: 1em;
+      .open .dropdown-menu > li > a {
+        color: vv.$gray-200;
+        padding: 5px 15px 5px 35px;
+      }
+
+      .open .dropdown-menu > .active > a {
+        background-color: vv.$primary;
       }
     }
 
-    .navbar-primary > .active > a,
-    .navbar-primary > .active > a:focus,
-    .navbar-primary > .active > a:hover {
-      background-color: $color-nav-active-link-bg;
+    .navbar-nav > li > a:hover {
+      background-color: vv.$primary;
+    }
+  }
+}
+
+/* ---------------------------------------------------
+    SIDEBAR STYLE
+--------------------------------------------------- */
+
+$sidebar-width: 200px;
+
+.cd-navbar-primary .active > a,
+.cd-navbar-primary > .active > a:focus,
+.cd-navbar-primary > .active > a:hover {
+  background-color: vv.$primary !important;
+  border: 0 !important;
+  color: vv.$gray-200 !important;
+}
+
+.wrapper {
+  display: flex;
+  width: 100%;
+
+  #sidebar {
+    background: vv.$secondary;
+    bottom: 0;
+    color: vv.$white;
+    left: 0;
+    overflow-y: auto;
+    position: fixed;
+    top: vv.$navbar-height;
+    transition: all 0.3s;
+    width: $sidebar-width;
+    z-index: 999;
+
+    &.active {
+      margin-left: -$sidebar-width;
+    }
+
+    ul {
+      &.component {
+        margin: 0;
+        padding: 20px 0;
+      }
+
+      p {
+        color: vv.$white;
+        padding: 10px;
+      }
+
+      li a {
+        color: vv.$white;
+        display: block;
+        font-size: 1.1em;
+        padding: 10px;
+        padding-left: 27px;
+
+        text-decoration: none;
+
+        &:hover {
+          background: vv.$primary;
+          color: vv.$white;
+        }
+
+        > .badge {
+          margin-left: 5px;
+        }
+      }
+
+      li.active > a,
+      li > a a[aria-expanded='true'] {
+        color: vv.$white;
+      }
+    }
+  }
+
+  a.dropdown-toggle {
+    position: relative;
+
+    &::after {
+      border: 0;
+      content: '\f054';
+      font-family: 'ForkAwesome';
+      font-size: 1rem;
+      position: absolute;
+      right: 20px;
+      transition: transform 0.3s ease-in-out;
+    }
+
+    &[aria-expanded='true']::after {
+      transform: rotate(90deg);
+    }
+  }
+
+  ul ul a {
+    background: lighten(vv.$secondary, 10);
+    font-size: 0.9em !important;
+    padding-left: 40px !important;
+  }
+
+  .cd-navbar-primary a:focus {
+    outline: none;
+  }
+
+  ngx-simplebar {
+    height: 100%;
+  }
+}
+
+/* ---------------------------------------------------
+    CONTENT STYLE
+--------------------------------------------------- */
+
+#content {
+  bottom: 0;
+  position: absolute;
+  right: 0;
+  top: vv.$navbar-height;
+  transition: all 0.3s;
+  width: calc(100% - #{$sidebar-width});
+
+  &.active {
+    width: 100vw;
+  }
+}
+
+/* ---------------------------------------------------
+    topNotification settings
+--------------------------------------------------- */
+
+@for $i from 1 through 2 {
+  :host.top-notification-#{$i} {
+    .cd-navbar-top .cd-navbar-brand {
+      top: vv.$top-notification-height * $i;
+    }
+
+    #sidebar {
+      top: vv.$navbar-height + vv.$top-notification-height * $i;
+    }
+
+    #content {
+      top: vv.$navbar-height + vv.$top-notification-height * $i;
+    }
+
+    cd-notifications-sidebar {
+      top: vv.$navbar-height + vv.$top-notification-height * $i + 10px;
     }
   }
 }

@@ -15,11 +15,9 @@
 #ifndef CEPH_MMDSFRAGMENTNOTIFYAck_H
 #define CEPH_MMDSFRAGMENTNOTIFYAck_H
 
-#include "msg/Message.h"
+#include "messages/MMDSOp.h"
 
-class MMDSFragmentNotifyAck : public MessageInstance<MMDSFragmentNotifyAck> {
-public:
-  friend factory;
+class MMDSFragmentNotifyAck final : public MMDSOp {
 private:
   dirfrag_t base_dirfrag;
   int8_t bits = 0;
@@ -28,20 +26,20 @@ private:
   dirfrag_t get_base_dirfrag() const { return base_dirfrag; }
   int get_bits() const { return bits; }
 
-  bufferlist basebl;
+  ceph::buffer::list basebl;
 
 protected:
-  MMDSFragmentNotifyAck() : MessageInstance(MSG_MDS_FRAGMENTNOTIFYACK) {}
+  MMDSFragmentNotifyAck() : MMDSOp{MSG_MDS_FRAGMENTNOTIFYACK} {}
   MMDSFragmentNotifyAck(dirfrag_t df, int b, uint64_t tid) :
-    MessageInstance(MSG_MDS_FRAGMENTNOTIFYACK),
+    MMDSOp{MSG_MDS_FRAGMENTNOTIFYACK},
     base_dirfrag(df), bits(b) {
     set_tid(tid);
   }
-  ~MMDSFragmentNotifyAck() override {}
+  ~MMDSFragmentNotifyAck() final {}
 
 public:
   std::string_view get_type_name() const override { return "fragment_notify_ack"; }
-  void print(ostream& o) const override {
+  void print(std::ostream& o) const override {
     o << "fragment_notify_ack(" << base_dirfrag << " " << (int)bits << ")";
   }
 
@@ -51,10 +49,14 @@ public:
     encode(bits, payload);
   }
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(base_dirfrag, p);
     decode(bits, p);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

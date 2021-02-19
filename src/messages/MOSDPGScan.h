@@ -17,9 +17,7 @@
 
 #include "MOSDFastDispatchOp.h"
 
-class MOSDPGScan : public MessageInstance<MOSDPGScan, MOSDFastDispatchOp> {
-public:
-  friend factory;
+class MOSDPGScan final : public MOSDFastDispatchOp {
 private:
   static constexpr int HEAD_VERSION = 2;
   static constexpr int COMPAT_VERSION = 2;
@@ -54,6 +52,7 @@ public:
   }
 
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(op, p);
     decode(map_epoch, p);
@@ -90,10 +89,10 @@ public:
   }
 
   MOSDPGScan()
-    : MessageInstance(MSG_OSD_PG_SCAN, HEAD_VERSION, COMPAT_VERSION) {}
+    : MOSDFastDispatchOp{MSG_OSD_PG_SCAN, HEAD_VERSION, COMPAT_VERSION} {}
   MOSDPGScan(__u32 o, pg_shard_t from,
 	     epoch_t e, epoch_t qe, spg_t p, hobject_t be, hobject_t en)
-    : MessageInstance(MSG_OSD_PG_SCAN, HEAD_VERSION, COMPAT_VERSION),
+    : MOSDFastDispatchOp{MSG_OSD_PG_SCAN, HEAD_VERSION, COMPAT_VERSION},
       op(o),
       map_epoch(e), query_epoch(qe),
       from(from),
@@ -101,17 +100,20 @@ public:
       begin(be), end(en) {
   }
 private:
-  ~MOSDPGScan() override {}
+  ~MOSDPGScan() final {}
 
 public:
   std::string_view get_type_name() const override { return "pg_scan"; }
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "pg_scan(" << get_op_name(op)
 	<< " " << pgid
 	<< " " << begin << "-" << end
 	<< " e " << map_epoch << "/" << query_epoch
 	<< ")";
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

@@ -16,26 +16,26 @@
 #ifndef CEPH_MEXPORTCAPSACK_H
 #define CEPH_MEXPORTCAPSACK_H
 
-#include "msg/Message.h"
+#include "messages/MMDSOp.h"
 
+class MExportCapsAck final : public MMDSOp {
+ static constexpr int HEAD_VERSION = 1;
+ static constexpr int COMPAT_VERSION = 1;
 
-class MExportCapsAck : public MessageInstance<MExportCapsAck> {
 public:  
-  friend factory;
-
   inodeno_t ino;
-  bufferlist cap_bl;
+  ceph::buffer::list cap_bl;
 
 protected:
   MExportCapsAck() :
-    MessageInstance(MSG_MDS_EXPORTCAPSACK) {}
+    MMDSOp{MSG_MDS_EXPORTCAPSACK, HEAD_VERSION, COMPAT_VERSION} {}
   MExportCapsAck(inodeno_t i) :
-    MessageInstance(MSG_MDS_EXPORTCAPSACK), ino(i) {}
-  ~MExportCapsAck() override {}
+    MMDSOp{MSG_MDS_EXPORTCAPSACK, HEAD_VERSION, COMPAT_VERSION}, ino(i) {}
+  ~MExportCapsAck() final {}
 
 public:
   std::string_view get_type_name() const override { return "export_caps_ack"; }
-  void print(ostream& o) const override {
+  void print(std::ostream& o) const override {
     o << "export_caps_ack(" << ino << ")";
   }
 
@@ -45,10 +45,14 @@ public:
     encode(cap_bl, payload);
   }
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(ino, p);
     decode(cap_bl, p);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

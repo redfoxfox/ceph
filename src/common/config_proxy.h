@@ -11,12 +11,8 @@
 // @c ConfigProxy is a facade of multiple config related classes. it exposes
 // the legacy settings with arrow operator, and the new-style config with its
 // member methods.
+namespace ceph::common {
 class ConfigProxy {
-  static ConfigValues get_config_values(const ConfigProxy &config_proxy) {
-    std::lock_guard locker(config_proxy.lock);
-    return config_proxy.values;
-  }
-
   /**
    * The current values of all settings described by the schema
    */
@@ -81,12 +77,17 @@ class ConfigProxy {
 
   std::map<md_config_obs_t*, CallGateRef> obs_call_gate;
 
-  void call_observers(rev_obs_map_t &rev_obs) {
+  void call_observers(std::unique_lock<ceph::recursive_mutex>& locker,
+                      rev_obs_map_t& rev_obs) {
+    // observers are notified outside of lock
+    locker.unlock();
     for (auto& [obs, keys] : rev_obs) {
       obs->handle_conf_change(*this, keys);
-      // this can be done outside the lock as call_gate_enter()
-      // and remove_observer() are serialized via lock
-      call_gate_leave(obs);
+    }
+    locker.lock();
+
+    for (auto& rev_ob : rev_obs) {
+      call_gate_leave(rev_ob.first);
     }
   }
 
@@ -109,7 +110,7 @@ public:
     : config{values, obs_mgr, is_daemon}
   {}
   explicit ConfigProxy(const ConfigProxy &config_proxy)
-    : values(get_config_values(config_proxy)),
+    : values(config_proxy.get_config_values()),
       config{values, obs_mgr, config_proxy.config.is_daemon}
   {}
   const ConfigValues* operator->() const noexcept {
@@ -117,6 +118,16 @@ public:
   }
   ConfigValues* operator->() noexcept {
     return &values;
+  }
+  ConfigValues get_config_values() const {
+    std::lock_guard l{lock};
+    return values;
+  }
+  void set_config_values(const ConfigValues& val) {
+#ifndef WITH_SEASTAR
+    std::lock_guard l{lock};
+#endif
+    values = val;
   }
   int get_val(const std::string_view key, char** buf, int len) const {
     std::lock_guard l{lock};
@@ -159,9 +170,9 @@ public:
     std::lock_guard l{lock};
     return config.diff(values, f, name);
   }
-  void get_my_sections(std::vector <std::string> &sections) const {
+  std::vector<std::string> get_my_sections() const {
     std::lock_guard l{lock};
-    config.get_my_sections(values, sections);
+    return config.get_my_sections(values);
   }
   int get_all_sections(std::vector<std::string>& sections) const {
     std::lock_guard l{lock};
@@ -184,16 +195,13 @@ public:
   }
   // for those want to reexpand special meta, e.g, $pid
   void finalize_reexpand_meta() {
+    std::unique_lock locker(lock);
     rev_obs_map_t rev_obs;
-    {
-      std::lock_guard l(lock);
-      if (config.finalize_reexpand_meta(values, obs_mgr)) {
-        _gather_changes(values.changed, &rev_obs, nullptr);
-        values.changed.clear();
-      }
+    if (config.finalize_reexpand_meta(values, obs_mgr)) {
+      _gather_changes(values.changed, &rev_obs, nullptr);
     }
 
-    call_observers(rev_obs);
+    call_observers(locker, rev_obs);
   }
   void add_observer(md_config_obs_t* obs) {
     std::lock_guard l(lock);
@@ -207,16 +215,14 @@ public:
     obs_mgr.remove_observer(obs);
   }
   void call_all_observers() {
+    std::unique_lock locker(lock);
     rev_obs_map_t rev_obs;
-    {
-      std::lock_guard l(lock);
-      obs_mgr.for_each_observer(
-        [this, &rev_obs](md_config_obs_t *obs, const std::string &key) {
-          map_observer_changes(obs, key, &rev_obs);
-        });
-    }
+    obs_mgr.for_each_observer(
+      [this, &rev_obs](md_config_obs_t *obs, const std::string &key) {
+        map_observer_changes(obs, key, &rev_obs);
+      });
 
-    call_observers(rev_obs);
+    call_observers(locker, rev_obs);
   }
   void set_safe_to_start_threads() {
     config.set_safe_to_start_threads();
@@ -242,18 +248,16 @@ public:
   }
   // Expand all metavariables. Make any pending observer callbacks.
   void apply_changes(std::ostream* oss) {
+    std::unique_lock locker(lock);
     rev_obs_map_t rev_obs;
-    {
-      std::lock_guard l{lock};
-      // apply changes until the cluster name is assigned
-      if (!values.cluster.empty()) {
-        // meta expands could have modified anything.  Copy it all out again.
-        _gather_changes(values.changed, &rev_obs, oss);
-        values.changed.clear();
-      }
+
+    // apply changes until the cluster name is assigned
+    if (!values.cluster.empty()) {
+      // meta expands could have modified anything.  Copy it all out again.
+      _gather_changes(values.changed, &rev_obs, oss);
     }
 
-    call_observers(rev_obs);
+    call_observers(locker, rev_obs);
   }
   void _gather_changes(std::set<std::string> &changes,
                        rev_obs_map_t *rev_obs, std::ostream* oss) {
@@ -262,6 +266,7 @@ public:
       [this, rev_obs](md_config_obs_t *obs, const std::string &key) {
         map_observer_changes(obs, key, rev_obs);
       }, oss);
+      changes.clear();
   }
   int set_val(const std::string_view key, const std::string& s,
               std::stringstream* err_ss=nullptr) {
@@ -279,29 +284,23 @@ public:
   int set_mon_vals(CephContext *cct,
 		   const std::map<std::string,std::string,std::less<>>& kv,
 		   md_config_t::config_callback config_cb) {
-    int ret;
-    rev_obs_map_t rev_obs;
-    {
-      std::lock_guard l{lock};
-      ret = config.set_mon_vals(cct, values, obs_mgr, kv, config_cb);
-      _gather_changes(values.changed, &rev_obs, nullptr);
-      values.changed.clear();
-    }
+    std::unique_lock locker(lock);
+    int ret = config.set_mon_vals(cct, values, obs_mgr, kv, config_cb);
 
-    call_observers(rev_obs);
+    rev_obs_map_t rev_obs;
+    _gather_changes(values.changed, &rev_obs, nullptr);
+
+    call_observers(locker, rev_obs);
     return ret;
   }
   int injectargs(const std::string &s, std::ostream *oss) {
-    int ret;
-    rev_obs_map_t rev_obs;
-    {
-      std::lock_guard l{lock};
-      ret = config.injectargs(values, obs_mgr, s, oss);
-      _gather_changes(values.changed, &rev_obs, oss);
-      values.changed.clear();
-    }
+    std::unique_lock locker(lock);
+    int ret = config.injectargs(values, obs_mgr, s, oss);
 
-    call_observers(rev_obs);
+    rev_obs_map_t rev_obs;
+    _gather_changes(values.changed, &rev_obs, oss);
+
+    call_observers(locker, rev_obs);
     return ret;
   }
   void parse_env(unsigned entity_type,
@@ -319,11 +318,14 @@ public:
     return config.parse_config_files(values, obs_mgr,
 				     conf_files, warnings, flags);
   }
-  size_t num_parse_errors() const {
-    return config.parse_errors.size();
+  bool has_parse_error() const {
+    return !config.parse_error.empty();
   }
-  void complain_about_parse_errors(CephContext *cct) {
-    return config.complain_about_parse_errors(cct);
+  std::string get_parse_error() {
+    return config.parse_error;
+  }
+  void complain_about_parse_error(CephContext *cct) {
+    return config.complain_about_parse_error(cct);
   }
   void do_argv_commands() const {
     std::lock_guard l{lock};
@@ -340,3 +342,5 @@ public:
     config.get_defaults_bl(values, bl);
   }
 };
+
+}

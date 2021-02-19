@@ -1,8 +1,8 @@
 import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 
-import { configureTestBed } from '../../../testing/unit-test-helper';
-import { UserFormModel } from '../../core/auth/user-form/user-form.model';
+import { UserFormModel } from '~/app/core/auth/user-form/user-form.model';
+import { configureTestBed } from '~/testing/unit-test-helper';
 import { UserService } from './user.service';
 
 describe('UserService', () => {
@@ -15,8 +15,8 @@ describe('UserService', () => {
   });
 
   beforeEach(() => {
-    service = TestBed.get(UserService);
-    httpTesting = TestBed.get(HttpTestingController);
+    service = TestBed.inject(UserService);
+    httpTesting = TestBed.inject(HttpTestingController);
   });
 
   afterEach(() => {
@@ -69,5 +69,33 @@ describe('UserService', () => {
     service.list().subscribe();
     const req = httpTesting.expectOne('api/user');
     expect(req.request.method).toBe('GET');
+  });
+
+  it('should call changePassword', () => {
+    service.changePassword('user0', 'foo', 'bar').subscribe();
+    const req = httpTesting.expectOne('api/user/user0/change_password');
+    expect(req.request.body).toEqual({
+      old_password: 'foo',
+      new_password: 'bar'
+    });
+    expect(req.request.method).toBe('POST');
+  });
+
+  it('should call validatePassword', () => {
+    service.validatePassword('foo').subscribe();
+    const req = httpTesting.expectOne('api/user/validate_password?password=foo');
+    expect(req.request.method).toBe('POST');
+  });
+
+  it('should call validatePassword (incl. name)', () => {
+    service.validatePassword('foo_bar', 'bar').subscribe();
+    const req = httpTesting.expectOne('api/user/validate_password?password=foo_bar&username=bar');
+    expect(req.request.method).toBe('POST');
+  });
+
+  it('should call validatePassword (incl. old password)', () => {
+    service.validatePassword('foo', null, 'foo').subscribe();
+    const req = httpTesting.expectOne('api/user/validate_password?password=foo&old_password=foo');
+    expect(req.request.method).toBe('POST');
   });
 });

@@ -24,8 +24,7 @@
 #include "common/subsys_types.h"
 #include "common/config_tracker.h"
 #include "common/config_values.h"
-
-class CephContext;
+#include "include/common_fwd.h"
 
 enum {
   CONF_DEFAULT,
@@ -101,7 +100,7 @@ public:
   std::map<std::string,std::string> ignored_mon_values;
 
   /// original raw values saved that may need to re-expand at certain time
-  mutable std::map<std::string, std::string> may_reexpand_meta;
+  mutable std::vector<std::string> may_reexpand_meta;
 
   /// encoded, cached copy of of values + ignored_mon_values
   ceph::bufferlist values_bl;
@@ -111,11 +110,6 @@ public:
 
   /// encoded copy of defaults (map<string,string>)
   ceph::bufferlist defaults_bl;
-
-  typedef enum {
-    OPT_INT, OPT_LONGLONG, OPT_STR, OPT_DOUBLE, OPT_FLOAT, OPT_BOOL,
-    OPT_ADDR, OPT_ADDRVEC, OPT_U32, OPT_U64, OPT_UUID
-  } opt_type_t;
 
   // Create a new md_config_t structure.
   explicit md_config_t(ConfigValues& values,
@@ -127,7 +121,10 @@ public:
   int parse_config_files(ConfigValues& values, const ConfigTracker& tracker,
 			 const char *conf_files,
 			 std::ostream *warnings, int flags);
-
+  int parse_buffer(ConfigValues& values, const ConfigTracker& tracker,
+		   const char* buf, size_t len,
+		   std::ostream *warnings);
+  void update_legacy_vals(ConfigValues& values);
   // Absorb config settings from the environment
   void parse_env(unsigned entity_type,
 		 ConfigValues& values, const ConfigTracker& tracker,
@@ -211,8 +208,7 @@ public:
   void get_all_keys(std::vector<std::string> *keys) const;
 
   // Return a list of all the sections that the current entity is a member of.
-  void get_my_sections(const ConfigValues& values,
-		       std::vector <std::string> &sections) const;
+  std::vector<std::string> get_my_sections(const ConfigValues& values) const;
 
   // Return a list of all sections
   int get_all_sections(std::vector <std::string> &sections) const;
@@ -237,7 +233,7 @@ public:
 	    std::string name = {}) const;
 
   /// print/log warnings/errors from parsing the config
-  void complain_about_parse_errors(CephContext *cct);
+  void complain_about_parse_error(CephContext *cct);
 
 private:
   // we use this to avoid variable expansion loops
@@ -271,9 +267,6 @@ private:
   void _show_config(const ConfigValues& values,
 		    std::ostream *out, ceph::Formatter *f) const;
 
-  void _get_my_sections(const ConfigValues& values,
-			std::vector<std::string> &sections) const;
-
   int _get_val_from_conf_file(const std::vector<std::string> &sections,
 			      const std::string_view key, std::string &out) const;
 
@@ -302,7 +295,6 @@ private:
   void assign_member(member_ptr_t ptr, const Option::value_t &val);
 
 
-  void update_legacy_vals(ConfigValues& values);
   void update_legacy_val(ConfigValues& values,
 			 const Option &opt,
 			 member_ptr_t member);
@@ -322,15 +314,17 @@ public:  // for global_init
   // for those want to reexpand special meta, e.g, $pid
   bool finalize_reexpand_meta(ConfigValues& values,
 			      const ConfigTracker& tracker);
+
+  std::list<std::string> get_conffile_paths(const ConfigValues& values,
+					    const char *conf_files,
+					    std::ostream *warnings,
+					    int flags) const;
 private:
-
-  /// expand all metavariables in config structure.
-  void expand_all_meta();
-
+  static std::string get_cluster_name(const char* conffile_path);
   // The configuration file we read, or NULL if we haven't read one.
   ConfFile cf;
 public:
-  std::deque<std::string> parse_errors;
+  std::string parse_error;
 private:
 
   // This will be set to true when it is safe to start threads.

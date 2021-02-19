@@ -1,42 +1,57 @@
-import { Component, Input, OnInit } from '@angular/core';
+import { Component, Input, OnChanges, OnInit, SimpleChanges } from '@angular/core';
 
-import * as _ from 'lodash';
+import _ from 'lodash';
 
-import { CdTableAction } from '../../models/cd-table-action';
-import { CdTableSelection } from '../../models/cd-table-selection';
-import { Permission } from '../../models/permissions';
+import { Icons } from '~/app/shared/enum/icons.enum';
+import { CdTableAction } from '~/app/shared/models/cd-table-action';
+import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
+import { Permission } from '~/app/shared/models/permissions';
 
 @Component({
   selector: 'cd-table-actions',
   templateUrl: './table-actions.component.html',
   styleUrls: ['./table-actions.component.scss']
 })
-export class TableActionsComponent implements OnInit {
+export class TableActionsComponent implements OnChanges, OnInit {
   @Input()
   permission: Permission;
   @Input()
   selection: CdTableSelection;
   @Input()
   tableActions: CdTableAction[];
+  @Input()
+  btnColor = 'accent';
 
   // Use this if you just want to display a drop down button,
   // labeled with the given text, with all actions in it.
   // This disables the main action button.
   @Input()
-  onlyDropDown?: string;
+  dropDownOnly?: string;
 
+  currentAction?: CdTableAction;
   // Array with all visible actions
   dropDownActions: CdTableAction[] = [];
 
-  constructor() {}
+  icons = Icons;
 
   ngOnInit() {
     this.removeActionsWithNoPermissions();
-    this.updateDropDownActions();
+    this.onSelectionChange();
   }
 
-  toClassName(name: string): string {
-    return name
+  ngOnChanges(changes: SimpleChanges) {
+    if (changes.selection) {
+      this.onSelectionChange();
+    }
+  }
+
+  onSelectionChange(): void {
+    this.updateDropDownActions();
+    this.updateCurrentAction();
+  }
+
+  toClassName(action: CdTableAction): string {
+    return action.name
       .replace(/ /g, '-')
       .replace(/[^a-z-]/gi, '')
       .toLowerCase();
@@ -56,7 +71,7 @@ export class TableActionsComponent implements OnInit {
     );
   }
 
-  private updateDropDownActions() {
+  private updateDropDownActions(): void {
     this.dropDownActions = this.tableActions.filter((action) =>
       action.visible ? action.visible(this.selection) : action
     );
@@ -70,18 +85,17 @@ export class TableActionsComponent implements OnInit {
    * Default button conditions of actions:
    * - 'create' actions can be used with no or multiple selections
    * - 'update' and 'delete' actions can be used with one selection
-   *
-   * @returns {CdTableAction}
    */
-  getCurrentButton(): CdTableAction {
-    if (this.onlyDropDown) {
+  private updateCurrentAction(): void {
+    if (this.dropDownOnly) {
+      this.currentAction = undefined;
       return;
     }
     let buttonAction = this.dropDownActions.find((tableAction) => this.showableAction(tableAction));
     if (!buttonAction && this.dropDownActions.length > 0) {
       buttonAction = this.dropDownActions[0];
     }
-    return buttonAction;
+    this.currentAction = buttonAction;
   }
 
   /**
@@ -99,7 +113,7 @@ export class TableActionsComponent implements OnInit {
 
   useRouterLink(action: CdTableAction): string {
     if (!action.routerLink || this.disableSelectionAction(action)) {
-      return;
+      return undefined;
     }
     return _.isString(action.routerLink) ? action.routerLink : action.routerLink();
   }
@@ -115,23 +129,33 @@ export class TableActionsComponent implements OnInit {
    * @returns {Boolean}
    */
   disableSelectionAction(action: CdTableAction): Boolean {
-    const permission = action.permission;
     const disable = action.disable;
     if (disable) {
       return Boolean(disable(this.selection));
     }
+    const permission = action.permission;
     const selected = this.selection.hasSingleSelection && this.selection.first();
     return Boolean(
       ['update', 'delete'].includes(permission) && (!selected || selected.cdExecuting)
     );
   }
 
-  showDropDownActions() {
-    this.updateDropDownActions();
-    return this.dropDownActions.length > 1;
+  useClickAction(action: CdTableAction) {
+    /**
+     * In order to show tooltips for deactivated menu items, the class
+     * 'pointer-events: auto;' has been added to the .scss file which also
+     * re-activates the click-event.
+     * To prevent calling the click-event on deactivated elements we also have
+     * to check here if it's disabled.
+     */
+    return !this.disableSelectionAction(action) && action.click && action.click();
   }
 
-  useClickAction(action: CdTableAction) {
-    return action.click && action.click();
+  useDisableDesc(action: CdTableAction) {
+    if (action.disable) {
+      const result = action.disable(this.selection);
+      return _.isString(result) ? result : undefined;
+    }
+    return undefined;
   }
 }

@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -53,13 +53,10 @@ namespace rgw {
       switch (type) {
       case TOKEN_AD:
 	return "ad";
-	break;
       case TOKEN_LDAP:
 	return "ldap";
-	break;
       case TOKEN_KEYSTONE:
 	return "keystone";
-	break;
       default:
 	return "none";
       };
@@ -84,10 +81,17 @@ namespace rgw {
 	     const std::string& _key)
       : type(_type), id(_id), key(_key) {};
 
-    RGWToken(const string& json) {
+    explicit RGWToken(const string& json) {
       JSONParser p;
       p.parse(json.c_str(), json.length());
       JSONDecoder::decode_json(RGWToken::type_name, *this, &p);
+    }
+
+    RGWToken& operator=(const std::string& json) {
+      JSONParser p;
+      p.parse(json.c_str(), json.length());
+      JSONDecoder::decode_json(RGWToken::type_name, *this, &p);
+      return *this;
     }
 
     void encode(bufferlist& bl) const {

@@ -77,7 +77,7 @@ public:
   bool is_mgr() const { return type() == TYPE_MGR; }
 
   operator ceph_entity_name() const {
-    ceph_entity_name n = { _type, {init_le64(_num)} };
+    ceph_entity_name n = { _type, init_le64(_num) };
     return n;
   }
 
@@ -154,8 +154,8 @@ namespace std {
 
 // define a wire format for sockaddr that matches Linux's.
 struct ceph_sockaddr_storage {
-  __le16 ss_family;
-  __u8 __ss_padding[128 - sizeof(__le16)];
+  ceph_le16 ss_family;
+  __u8 __ss_padding[128 - sizeof(ceph_le16)];
 
   void encode(ceph::buffer::list& bl) const {
     struct ceph_sockaddr_storage ss = *this;
@@ -193,9 +193,9 @@ static inline void encode(const sockaddr_storage& a, ceph::buffer::list& bl) {
   ::memcpy(dst, src, copy_size);
   encode(ss, bl);
 #else
-  ceph_sockaddr_storage ss{};
+  ceph_sockaddr_storage ss;
   ::memset(&ss, '\0', sizeof(ss));
-  ::memcpy(&wireaddr, &ss, std::min(sizeof(ss), sizeof(a)));
+  ::memcpy(&ss, &a, std::min(sizeof(ss), sizeof(a)));
   encode(ss, bl);
 #endif
 }
@@ -368,10 +368,8 @@ struct entity_addr_t {
     switch (u.sa.sa_family) {
     case AF_INET:
       return ntohs(u.sin.sin_port);
-      break;
     case AF_INET6:
       return ntohs(u.sin6.sin6_port);
-      break;
     }
     return 0;
   }
@@ -479,7 +477,7 @@ struct entity_addr_t {
       encode(type, bl);
     } else {
       // map any -> legacy for old clients.  this is primary for the benefit
-      // of OSDMap's blacklist, but is reasonable in general since any: is
+      // of OSDMap's blocklist, but is reasonable in general since any: is
       // meaningless for pre-nautilus clients or daemons.
       auto t = type;
       if (t == TYPE_ANY) {
@@ -489,16 +487,16 @@ struct entity_addr_t {
     }
     encode(nonce, bl);
     __u32 elen = get_sockaddr_len();
+#if (__FreeBSD__) || defined(__APPLE__)
+      elen -= sizeof(u.sa.sa_len);
+#endif
     encode(elen, bl);
     if (elen) {
-#if (__FreeBSD__) || defined(__APPLE__)
-      __le16 ss_family = u.sa.sa_family;
+      uint16_t ss_family = u.sa.sa_family;
+
       encode(ss_family, bl);
-      bl.append(u.sa.sa_data,
-		elen - sizeof(u.sa.sa_len) - sizeof(u.sa.sa_family));
-#else
-      bl.append((char*)get_sockaddr(), elen);
-#endif
+      elen -= sizeof(u.sa.sa_family);
+      bl.append(u.sa.sa_data, elen);
     }
     ENCODE_FINISH(bl);
   }
@@ -520,28 +518,18 @@ struct entity_addr_t {
     if (elen) {
 #if defined(__FreeBSD__) || defined(__APPLE__)
       u.sa.sa_len = 0;
-      __le16 ss_family;
+#endif
+      uint16_t ss_family;
       if (elen < sizeof(ss_family)) {
-	throw buffer::malformed_input("elen smaller than family len");
+	throw ceph::buffer::malformed_input("elen smaller than family len");
       }
       decode(ss_family, bl);
       u.sa.sa_family = ss_family;
       elen -= sizeof(ss_family);
       if (elen > get_sockaddr_len() - sizeof(u.sa.sa_family)) {
-	throw buffer::malformed_input("elen exceeds sockaddr len");
-      }
-      bl.copy(elen, u.sa.sa_data);
-#else
-      if (elen < sizeof(u.sa.sa_family)) {
-	throw ceph::buffer::malformed_input("elen smaller than family len");
-      }
-      bl.copy(sizeof(u.sa.sa_family), (char*)&u.sa.sa_family);
-      if (elen > get_sockaddr_len()) {
 	throw ceph::buffer::malformed_input("elen exceeds sockaddr len");
       }
-      elen -= sizeof(u.sa.sa_family);
       bl.copy(elen, u.sa.sa_data);
-#endif
     }
     DECODE_FINISH(bl);
   }
@@ -565,7 +553,7 @@ namespace std {
 template<> struct hash<entity_addr_t> {
   size_t operator()( const entity_addr_t& x ) const {
     static blobhash H;
-    return H((const char*)&x, sizeof(x));
+    return H(&x, sizeof(x));
   }
 };
 } // namespace std
@@ -580,12 +568,7 @@ struct entity_addrvec_t {
   bool empty() const { return v.empty(); }
 
   entity_addr_t legacy_addr() const {
-    for (auto& a : v) {
-      if (a.type == entity_addr_t::TYPE_LEGACY) {
-	return a;
-      }
-    }
-    return entity_addr_t();
+    return addr_of_type(entity_addr_t::TYPE_LEGACY);
   }
   entity_addr_t as_legacy_addr() const {
     for (auto& a : v) {
@@ -615,22 +598,14 @@ struct entity_addrvec_t {
 	return a;
       }
     }
-    if (!v.empty()) {
-      return v.front();
-    }
-    return entity_addr_t();
+    return front();
   }
   std::string get_legacy_str() const {
     return legacy_or_front_addr().get_legacy_str();
   }
 
   entity_addr_t msgr2_addr() const {
-    for (auto &a : v) {
-      if (a.type == entity_addr_t::TYPE_MSGR2) {
-        return a;
-      }
-    }
-    return entity_addr_t();
+    return addr_of_type(entity_addr_t::TYPE_MSGR2);
   }
   bool has_msgr2() const {
     for (auto& a : v) {
@@ -639,6 +614,35 @@ struct entity_addrvec_t {
       }
     }
     return false;
+  }
+
+  entity_addr_t pick_addr(uint32_t type) const {
+    entity_addr_t picked_addr;
+    switch (type) {
+    case entity_addr_t::TYPE_LEGACY:
+      [[fallthrough]];
+    case entity_addr_t::TYPE_MSGR2:
+      picked_addr = addr_of_type(type);
+      break;
+    case entity_addr_t::TYPE_ANY:
+      return front();
+    default:
+      return {};
+    }
+    if (!picked_addr.is_blank_ip()) {
+      return picked_addr;
+    } else {
+      return addr_of_type(entity_addr_t::TYPE_ANY);
+    }
+  }
+
+  entity_addr_t addr_of_type(uint32_t type) const {
+    for (auto &a : v) {
+      if (a.type == type) {
+        return a;
+      }
+    }
+    return entity_addr_t();
   }
 
   bool parse(const char *s, const char **end = 0);

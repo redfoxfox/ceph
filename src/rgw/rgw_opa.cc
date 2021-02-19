@@ -1,7 +1,8 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #include "rgw_opa.h"
+#include "rgw_http_client.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
@@ -43,9 +44,10 @@ int rgw_opa_authorize(RGWOp *& op,
   jf.dump_string("decoded_uri", s->decoded_uri.c_str());
   jf.dump_string("params", s->info.request_params.c_str());
   jf.dump_string("request_uri_aws4", s->info.request_uri_aws4.c_str());
-  jf.dump_string("object_name", s->object.name.c_str());
-  jf.dump_object("user_info", *s->user);
-  jf.dump_object("bucket_info", s->bucket_info);
+  jf.dump_string("object_name", s->object->get_name().c_str());
+  jf.dump_string("subuser", s->auth.identity->get_subuser().c_str());
+  jf.dump_object("user_info", s->user->get_info());
+  jf.dump_object("bucket_info", s->bucket->get_info());
   jf.close_section();
   jf.close_section();
 

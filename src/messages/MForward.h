@@ -24,10 +24,8 @@
 #include "include/encoding.h"
 #include "include/stringify.h"
 
-class MForward : public MessageInstance<MForward> {
+class MForward final : public Message {
 public:
-  friend factory;
-
   uint64_t tid;
   uint8_t client_type;
   entity_addrvec_t client_addrs;
@@ -37,16 +35,16 @@ public:
   EntityName entity_name;
   PaxosServiceMessage *msg;   // incoming or outgoing message
 
-  string msg_desc;  // for operator<< only
-  
+  std::string msg_desc;  // for operator<< only
+
   static constexpr int HEAD_VERSION = 4;
   static constexpr int COMPAT_VERSION = 4;
 
-  MForward() : MessageInstance(MSG_FORWARD, HEAD_VERSION, COMPAT_VERSION),
+  MForward() : Message{MSG_FORWARD, HEAD_VERSION, COMPAT_VERSION},
                tid(0), con_features(0), msg(NULL) {}
   MForward(uint64_t t, PaxosServiceMessage *m, uint64_t feat,
            const MonCap& caps) :
-    MessageInstance(MSG_FORWARD, HEAD_VERSION, COMPAT_VERSION),
+    Message{MSG_FORWARD, HEAD_VERSION, COMPAT_VERSION},
     tid(t), client_caps(caps), msg(NULL) {
     client_type = m->get_source().type();
     client_addrs = m->get_source_addrs();
@@ -57,7 +55,7 @@ public:
     msg = (PaxosServiceMessage*)m->get();
   }
 private:
-  ~MForward() override {
+  ~MForward() final {
     if (msg) {
       // message was unclaimed
       msg->put();
@@ -111,6 +109,7 @@ public:
   }
 
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(tid, p);
     if (header.version < 4) {
@@ -140,7 +139,7 @@ public:
   }
 
   std::string_view get_type_name() const override { return "forward"; }
-  void print(ostream& o) const override {
+  void print(std::ostream& o) const override {
     o << "forward(";
     if (msg) {
       o << *msg;
@@ -151,6 +150,9 @@ public:
       << " tid " << tid
       << " con_features " << con_features << ")";
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
   
 #endif

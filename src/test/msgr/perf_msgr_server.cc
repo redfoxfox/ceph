@@ -29,6 +29,7 @@ using namespace std;
 #include "msg/Messenger.h"
 #include "messages/MOSDOp.h"
 #include "messages/MOSDOpReply.h"
+#include "auth/DummyAuth.h"
 
 class ServerDispatcher : public Dispatcher {
   uint64_t think_time;
@@ -37,7 +38,7 @@ class ServerDispatcher : public Dispatcher {
     list<Message*> messages;
 
    public:
-    OpWQ(time_t timeout, time_t suicide_timeout, ThreadPool *tp)
+    OpWQ(ceph::timespan timeout, ceph::timespan suicide_timeout, ThreadPool *tp)
       : ThreadPool::WorkQueue<Message>("ServerDispatcher::OpWQ", timeout, suicide_timeout, tp) {}
 
     bool _enqueue(Message *m) override {
@@ -72,7 +73,7 @@ class ServerDispatcher : public Dispatcher {
  public:
   ServerDispatcher(int threads, uint64_t delay): Dispatcher(g_ceph_context), think_time(delay),
     op_tp(g_ceph_context, "ServerDispatcher::op_tp", "tp_serv_disp", threads, "serverdispatcher_op_threads"),
-    op_wq(30, 30, &op_tp) {
+    op_wq(ceph::make_timespan(30), ceph::make_timespan(30), &op_tp) {
     op_tp.start();
   }
   ~ServerDispatcher() override {
@@ -109,12 +110,16 @@ class MessengerServer {
   string type;
   string bindaddr;
   ServerDispatcher dispatcher;
+  DummyAuthClientServer dummy_auth;
 
  public:
   MessengerServer(const string &t, const string &addr, int threads, int delay):
-      msgr(NULL), type(t), bindaddr(addr), dispatcher(threads, delay) {
-    msgr = Messenger::create(g_ceph_context, type, entity_name_t::OSD(0), "server", 0, 0);
+      msgr(NULL), type(t), bindaddr(addr), dispatcher(threads, delay),
+      dummy_auth(g_ceph_context) {
+    msgr = Messenger::create(g_ceph_context, type, entity_name_t::OSD(0), "server", 0);
     msgr->set_default_policy(Messenger::Policy::stateless_server(0));
+    dummy_auth.auth_registry.refresh_config();
+      msgr->set_auth_server(&dummy_auth);
   }
   ~MessengerServer() {
     msgr->shutdown();

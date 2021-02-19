@@ -93,7 +93,8 @@ OutputDataSocket::OutputDataSocket(CephContext *cct, uint64_t _backlog)
     m_shutdown_rd_fd(-1),
     m_shutdown_wr_fd(-1),
     going_down(false),
-    data_size(0)
+    data_size(0),
+    skipped(0)
 {
 }
 
@@ -118,7 +119,7 @@ OutputDataSocket::~OutputDataSocket()
 std::string OutputDataSocket::create_shutdown_pipe(int *pipe_rd, int *pipe_wr)
 {
   int pipefd[2];
-  if (pipe_cloexec(pipefd) < 0) {
+  if (pipe_cloexec(pipefd, 0) < 0) {
     int e = errno;
     ostringstream oss;
     oss << "OutputDataSocket::create_shutdown_pipe error: " << cpp_strerror(e);
@@ -151,6 +152,7 @@ std::string OutputDataSocket::bind_and_listen(const std::string &sock_path, int 
 	<< "failed to create socket: " << cpp_strerror(err);
     return oss.str();
   }
+  // FIPS zeroization audit 20191115: this memset is not security related.
   memset(&address, 0, sizeof(struct sockaddr_un));
   address.sun_family = AF_UNIX;
   snprintf(address.sun_path, sizeof(address.sun_path),
@@ -197,6 +199,7 @@ void* OutputDataSocket::entry()
   ldout(m_cct, 5) << "entry start" << dendl;
   while (true) {
     struct pollfd fds[2];
+    // FIPS zeroization audit 20191115: this memset is not security related.
     memset(fds, 0, sizeof(fds));
     fds[0].fd = m_sock_fd;
     fds[0].events = POLLIN | POLLRDBAND;
@@ -252,7 +255,7 @@ bool OutputDataSocket::do_accept()
 
 void OutputDataSocket::handle_connection(int fd)
 {
-  bufferlist bl;
+  ceph::buffer::list bl;
 
   m_lock.lock();
   init_connection(bl);
@@ -291,20 +294,21 @@ void OutputDataSocket::handle_connection(int fd)
 int OutputDataSocket::dump_data(int fd)
 {
   m_lock.lock();
-  list<bufferlist> l = std::move(data);
+  auto l = std::move(data);
   data.clear();
   data_size = 0;
   m_lock.unlock();
 
-  for (list<bufferlist>::iterator iter = l.begin(); iter != l.end(); ++iter) {
-    bufferlist& bl = *iter;
+  for (auto iter = l.begin(); iter != l.end(); ++iter) {
+    ceph::buffer::list& bl = *iter;
     int ret = safe_write(fd, bl.c_str(), bl.length());
     if (ret >= 0) {
       ret = safe_write(fd, delim.c_str(), delim.length());
     }
     if (ret < 0) {
+      std::scoped_lock lock(m_lock);
       for (; iter != l.end(); ++iter) {
-        bufferlist& bl = *iter;
+        ceph::buffer::list& bl = *iter;
 	data.push_back(bl);
 	data_size += bl.length();
       }
@@ -380,16 +384,22 @@ void OutputDataSocket::shutdown()
   m_path.clear();
 }
 
-void OutputDataSocket::append_output(bufferlist& bl)
+void OutputDataSocket::append_output(ceph::buffer::list& bl)
 {
   std::lock_guard l(m_lock);
 
   if (data_size + bl.length() > data_max_backlog) {
-    ldout(m_cct, 20) << "dropping data output, max backlog reached" << dendl;
+    if (skipped % 100 == 0) {
+      ldout(m_cct, 0) << "dropping data output, max backlog reached (skipped=="
+		      << skipped << ")"
+		      << dendl;
+      skipped = 1;
+    } else
+      ++skipped;
+    return;
   }
+
   data.push_back(bl);
-
   data_size += bl.length();
-
   cond.notify_all();
 }

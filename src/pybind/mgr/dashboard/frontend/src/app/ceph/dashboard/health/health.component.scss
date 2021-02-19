@@ -1,71 +1,23 @@
-@import '../../../../defaults';
+@use './src/styles/vendor/variables' as vv;
 
 cd-info-card {
-  padding: 0 0.5vw 0 0.5vw;
+  padding: 0 0.5vw;
 }
 
-.cd-container-flex {
-  margin: 0;
-  padding: 0;
-  display: -webkit-box;
-  display: -webkit-flex;
-  display: -ms-flexbox;
-  display: flex;
-  flex-flow: row wrap;
-  justify-content: space-between;
-}
-
-.cd-col-5 {
-  width: 20%;
-}
-
-@media (max-width: 1599px) {
-  .cd-col-5 {
-    width: 25%;
-  }
-}
-
-@media (max-width: $screen-md-max) {
-  .cd-col-5 {
-    width: 33%;
-  }
-}
-
-@media (max-width: $screen-sm-max) {
-  .cd-col-5 {
-    width: 50%;
-  }
-}
-
-@media (max-width: $screen-xs-max) {
-  cd-info-card {
-    padding: 0;
-  }
-
-  .cd-col-5 {
-    width: 100%;
-  }
-}
-
-.info-group {
-  margin: 0;
-  padding: 0;
-}
-
-::ng-deep .pg-status-popover-wrapper {
+::ng-deep cd-health .pg-status-popover-wrapper {
   position: relative;
 
   .popover {
+    max-height: 20vh;
+    max-width: unset !important;
+    min-width: unset !important;
     position: absolute;
     width: 116%;
-    max-height: 20vh;
-    min-width: unset !important;
-    max-width: unset !important;
 
     .popover-body {
-      max-width: 100%;
+      font-size: 1rem;
       max-height: 19vh;
-      font-size: 12px;
+      max-width: 100%;
     }
   }
 }
@@ -75,15 +27,15 @@ cd-info-card {
 }
 
 .card-text-error {
+  color: vv.$danger;
   display: inline;
-  color: $color-solid-red;
 }
 
-.card-text-line-break:after {
+.card-text-line-break::after {
   content: '\A';
   white-space: pre;
 }
 
-.mgr-active-name:hover {
+.popover-info:hover {
   cursor: pointer;
 }

@@ -16,18 +16,16 @@
 #define CEPH_MMGRCONFIGURE_H_
 
 #include "msg/Message.h"
+#include "mgr/MetricTypes.h"
 #include "mgr/OSDPerfMetricTypes.h"
 
 /**
  * This message is sent from ceph-mgr to MgrClient, instructing it
  * it about what data to send back to ceph-mgr at what frequency.
  */
-class MMgrConfigure : public MessageInstance<MMgrConfigure> {
-public:
-  friend factory;
+class MMgrConfigure : public Message {
 private:
-
-  static constexpr int HEAD_VERSION = 3;
+  static constexpr int HEAD_VERSION = 4;
   static constexpr int COMPAT_VERSION = 1;
 
 public:
@@ -37,6 +35,8 @@ public:
   uint32_t stats_threshold = 0;
 
   std::map<OSDPerfMetricQuery, OSDPerfMetricLimits> osd_perf_metric_queries;
+
+  boost::optional<MetricConfigMessage> metric_config_message;
 
   void decode_payload() override
   {
@@ -49,6 +49,9 @@ public:
     if (header.version >= 3) {
       decode(osd_perf_metric_queries, p);
     }
+    if (header.version >= 4) {
+      decode(metric_config_message, p);
+    }
   }
 
   void encode_payload(uint64_t features) override {
@@ -56,6 +59,12 @@ public:
     encode(stats_period, payload);
     encode(stats_threshold, payload);
     encode(osd_perf_metric_queries, payload);
+    if (metric_config_message && metric_config_message->should_encode(features)) {
+      encode(metric_config_message, payload);
+    } else {
+      boost::optional<MetricConfigMessage> empty;
+      encode(empty, payload);
+    }
   }
 
   std::string_view get_type_name() const override { return "mgrconfigure"; }
@@ -64,9 +73,14 @@ public:
 			   << ", threshold=" << stats_threshold << ")";
   }
 
+private:
   MMgrConfigure()
-    : MessageInstance(MSG_MGR_CONFIGURE, HEAD_VERSION, COMPAT_VERSION)
+    : Message{MSG_MGR_CONFIGURE, HEAD_VERSION, COMPAT_VERSION}
   {}
+  using RefCountedObject::put;
+  using RefCountedObject::get;
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

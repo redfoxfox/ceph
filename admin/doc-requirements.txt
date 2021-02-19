@@ -1,6 +1,13 @@
-Sphinx == 1.8.3
+Sphinx == 3.2.1
 git+https://github.com/ceph/sphinx-ditaa.git@py3#egg=sphinx-ditaa
-git+https://github.com/michaeljones/breathe#egg=breathe
-# 4.2 is not yet release at the time of writing, to address CVE-2017-18342,
-# we have to use its beta release.
-pyyaml>=4.2b1
+breathe >= 4.20.0
+Jinja2
+pyyaml >= 5.1.2
+Cython
+pcpp
+prettytable
+sphinx-autodoc-typehints
+sphinx-prompt
+Sphinx-Substitution-Extensions
+typed-ast
+sphinxcontrib-openapi

@@ -79,6 +79,11 @@ int get_cgroup_memory_limit(uint64_t *limit);
 /// collect info from @p uname(2), @p /proc/meminfo and @p /proc/cpuinfo
 void collect_sys_info(std::map<std::string, std::string> *m, CephContext *cct);
 
+#ifdef _WIN32
+/// Retrieve the actual Windows version, regardless of the app manifest.
+int get_windows_version(POSVERSIONINFOEXW ver);
+#endif
+
 /// dump service ids grouped by their host to the specified formatter
 /// @param f formatter for the output
 /// @param services a map from hostname to a list of service id hosted by this host
@@ -93,7 +98,7 @@ void dump_services(ceph::Formatter* f,
 void dump_services(ceph::Formatter* f, const std::map<std::string,
 		   std::list<std::string> >& services, const char* type);
 
-std::string cleanbin(ceph::buffer::list &bl, bool &b64);
+std::string cleanbin(ceph::buffer::list &bl, bool &b64, bool show = false);
 std::string cleanbin(std::string &str);
 
 namespace ceph::util {

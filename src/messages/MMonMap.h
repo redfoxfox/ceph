@@ -21,18 +21,16 @@
 #include "msg/MessageRef.h"
 #include "mon/MonMap.h"
 
-class MMonMap : public MessageInstance<MMonMap> {
+class MMonMap final : public Message {
 public:
-  friend factory;
-
   ceph::buffer::list monmapbl;
 
-  MMonMap() : MessageInstance(CEPH_MSG_MON_MAP) { }
-  explicit MMonMap(ceph::buffer::list &bl) : MessageInstance(CEPH_MSG_MON_MAP) { 
-    monmapbl.claim(bl);
+  MMonMap() : Message{CEPH_MSG_MON_MAP} { }
+  explicit MMonMap(ceph::buffer::list &bl) : Message{CEPH_MSG_MON_MAP} {
+    monmapbl = std::move(bl);
   }
 private:
-  ~MMonMap() override {}
+  ~MMonMap() final {}
 
 public:
   std::string_view get_type_name() const override { return "mon_map"; }
@@ -56,6 +54,9 @@ public:
     auto p = payload.cbegin();
     decode(monmapbl, p);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

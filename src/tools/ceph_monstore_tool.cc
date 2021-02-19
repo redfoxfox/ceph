@@ -43,7 +43,7 @@ class TraceIter {
   MonitorDBStore::TransactionRef t;
 public:
   explicit TraceIter(string fname) : fd(-1), idx(-1) {
-    fd = ::open(fname.c_str(), O_RDONLY);
+    fd = ::open(fname.c_str(), O_RDONLY|O_BINARY);
     t.reset(new MonitorDBStore::Transaction);
   }
   bool valid() {
@@ -473,13 +473,24 @@ static int update_auth(MonitorDBStore& st, const string& keyring_path)
       cerr << "no caps granted to: " << auth_inc.name << std::endl;
       return -EINVAL;
     }
+    map<string,string> caps;
+    std::transform(begin(auth_inc.auth.caps), end(auth_inc.auth.caps),
+		   inserter(caps, end(caps)),
+		   [](auto& cap) {
+		     string c;
+		     auto p = cap.second.cbegin();
+		     decode(c, p);
+		     return make_pair(cap.first, c);
+		   });
+    cout << "adding auth for '"
+	 << auth_inc.name << "': " << auth_inc.auth
+	 << " with caps(" << caps << ")" << std::endl;
     auth_inc.op = KeyServerData::AUTH_INC_ADD;
 
     AuthMonitor::Incremental inc;
     inc.inc_type = AuthMonitor::AUTH_DATA;
     encode(auth_inc, inc.auth_data);
     inc.auth_type = CEPH_AUTH_CEPHX;
-
     inc.encode(bl, CEPH_FEATURES_ALL);
   }
 
@@ -496,7 +507,9 @@ static int update_auth(MonitorDBStore& st, const string& keyring_path)
   return 0;
 }
 
-static int update_mkfs(MonitorDBStore& st, const string& monmap_path)
+static int update_mkfs(MonitorDBStore& st,
+		       const string& monmap_path,
+		       const vector<string>& mon_ids)
 {
   MonMap monmap;
   if (!monmap_path.empty()) {
@@ -516,6 +529,29 @@ static int update_mkfs(MonitorDBStore& st, const string& monmap_path)
     if (r) {
       cerr << "no initial monitors" << std::endl;
       return -EINVAL;
+    }
+    vector<string> new_names;
+    if (!mon_ids.empty()) {
+      if (mon_ids.size() != monmap.size()) {
+	cerr << "Please pass the same number of <mon-ids> to name the hosts "
+	     << "listed in 'mon_host'. "
+	     << mon_ids.size() << " mon-id(s) specified, "
+	     << "while you have " << monmap.size() << " mon hosts." << std::endl;
+	return -EINVAL;
+      }
+      new_names = mon_ids;
+    } else {
+      for (unsigned rank = 0; rank < monmap.size(); rank++) {
+	string new_name{"a"};
+	new_name[0] += rank;
+	new_names.push_back(std::move(new_name));
+      }
+    }
+    for (unsigned rank = 0; rank < monmap.size(); rank++) {
+      auto name = monmap.get_name(rank);
+      if (name.compare(0, 7, "noname-") == 0) {
+	monmap.rename(name, new_names[rank]);
+      }
     }
   }
   monmap.print(cout);
@@ -548,7 +584,7 @@ static int update_creating_pgs(MonitorDBStore& st)
   auto last_osdmap_epoch = st.get("osdmap", "last_committed");
   int r = st.get("osdmap", st.combine_strings("full", last_osdmap_epoch), bl);
   if (r < 0) {
-    cerr << "unable to losd osdmap e" << last_osdmap_epoch << std::endl;
+    cerr << "unable to load osdmap e" << last_osdmap_epoch << std::endl;
     return r;
   }
 
@@ -561,7 +597,7 @@ static int update_creating_pgs(MonitorDBStore& st)
   creating.last_scan_epoch = last_osdmap_epoch;
 
   bufferlist newbl;
-  ::encode(creating, newbl);
+  encode(creating, newbl, CEPH_FEATURES_ALL);
 
   auto t = make_shared<MonitorDBStore::Transaction>();
   t->put("osd_pg_creating", "creating", newbl);
@@ -597,7 +633,7 @@ static int update_mgrmap(MonitorDBStore& st)
     }
     bufferlist bl;
     encode(mgr_command_descs, bl);
-    t->put("mgr_command_desc", "", bl);
+    t->put("mgr_command_descs", "", bl);
   }
   return st.apply_transaction(t);
 }
@@ -641,13 +677,18 @@ int rebuild_monstore(const char* progname,
   po::options_description op_desc("Allowed 'rebuild' options");
   string keyring_path;
   string monmap_path;
+  vector<string> mon_ids;
   op_desc.add_options()
     ("keyring", po::value<string>(&keyring_path),
      "path to the client.admin key")
     ("monmap", po::value<string>(&monmap_path),
-     "path to the initial monmap");
+     "path to the initial monmap")
+    ("mon-ids", po::value<vector<string>>(&mon_ids)->multitoken(),
+     "mon ids, use 'a', 'b', ... if not specified");
+  po::positional_options_description pos_desc;
+  pos_desc.add("mon-ids", -1);
   po::variables_map op_vm;
-  int r = parse_cmd_args(&op_desc, nullptr, nullptr, subcmds, &op_vm);
+  int r = parse_cmd_args(&op_desc, nullptr, &pos_desc, subcmds, &op_vm);
   if (r) {
     return -r;
   }
@@ -666,7 +707,7 @@ int rebuild_monstore(const char* progname,
   if ((r = update_paxos(st))) {
     return r;
   }
-  if ((r = update_mkfs(st, monmap_path))) {
+  if ((r = update_mkfs(st, monmap_path, mon_ids))) {
     return r;
   }
   if ((r = update_monitor(st))) {
@@ -792,7 +833,6 @@ int main(int argc, char **argv) {
   } else if (cmd == "get") {
     unsigned v = 0;
     string outpath;
-    bool readable = false;
     string map_type;
     // visible options for this command
     po::options_description op_desc("Allowed 'get' options");
@@ -802,8 +842,7 @@ int main(int argc, char **argv) {
        "output file (default: stdout)")
       ("version,v", po::value<unsigned>(&v),
        "map version to obtain")
-      ("readable,r", po::value<bool>(&readable)->default_value(false),
-       "print the map information in human readable format")
+      ("readable,r", "print the map information in human readable format")
       ;
     // this is going to be a positional argument; we don't want to show
     // it as an option during --help, but we do want to have it captured
@@ -840,7 +879,7 @@ int main(int argc, char **argv) {
 
     int fd = STDOUT_FILENO;
     if (!outpath.empty()){
-      fd = ::open(outpath.c_str(), O_WRONLY|O_CREAT|O_TRUNC, 0666);
+      fd = ::open(outpath.c_str(), O_WRONLY|O_CREAT|O_TRUNC|O_BINARY, 0666);
       if (fd < 0) {
         std::cerr << "error opening output file: "
           << cpp_strerror(errno) << std::endl;
@@ -877,7 +916,7 @@ int main(int argc, char **argv) {
       goto done;
     }
 
-    if (readable) {
+    if (op_vm.count("readable")) {
       stringstream ss;
       bufferlist out;
       try {
@@ -913,7 +952,7 @@ int main(int argc, char **argv) {
         }
       } catch (const buffer::error &err) {
         std::cerr << "Could not decode for human readable output (you may still"
-                     " use non-readable mode).  Detail: " << err << std::endl;
+	  " use non-readable mode).  Detail: " << err.what() << std::endl;
       }
 
       out.append(ss);

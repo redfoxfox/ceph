@@ -15,6 +15,8 @@
 #include "include/compat.h"
 #include "common/debug.h"
 
+using std::ostringstream;
+
 namespace ceph {
   static CephContext *g_assert_context = NULL;
 
@@ -156,7 +158,7 @@ namespace ceph {
   }
 
   [[gnu::cold]] void __ceph_abort(const char *file, int line,
-				  const char *func, const string& msg)
+				  const char *func, const std::string& msg)
   {
     ostringstream tss;
     tss << ceph_clock_now();
@@ -172,8 +174,10 @@ namespace ceph {
     BackTrace *bt = new BackTrace(1);
     snprintf(g_assert_msg, sizeof(g_assert_msg),
              "%s: In function '%s' thread %llx time %s\n"
-	     "%s: %d: abort()\n", file, func, (unsigned long long)pthread_self(),
-	     tss.str().c_str(), file, line);
+	     "%s: %d: ceph_abort_msg(\"%s\")\n", file, func,
+	     (unsigned long long)pthread_self(),
+	     tss.str().c_str(), file, line,
+	     msg.c_str());
     dout_emergency(g_assert_msg);
 
     // TODO: get rid of this memory allocation.

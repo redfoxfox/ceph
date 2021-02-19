@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab ft=cpp
+
 #include "common/errno.h"
 
 #include "rgw_cr_tools.h"
@@ -7,6 +10,8 @@
 #include "rgw_acl_s3.h"
 #include "rgw_zone.h"
 
+#include "services/svc_zone.h"
+
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
@@ -15,7 +20,8 @@ int RGWUserCreateCR::Request::_send_request()
 {
   CephContext *cct = store->ctx();
 
-  int32_t default_max_buckets = cct->_conf->rgw_user_max_buckets;
+  const int32_t default_max_buckets =
+    cct->_conf.get_val<int64_t>("rgw_user_max_buckets");
 
   RGWUserAdminOpState op_state;
 
@@ -81,29 +87,27 @@ int RGWUserCreateCR::Request::_send_request()
   }
 
   RGWNullFlusher flusher;
-  return RGWUserAdminOp_User::create(store, op_state, flusher);
+  return RGWUserAdminOp_User::create(dpp, store, op_state, flusher, null_yield);
 }
 
 template<>
 int RGWGetUserInfoCR::Request::_send_request()
 {
-  return rgw_get_user_info_by_uid(store, params.user, *result);
+  return store->ctl()->user->get_info_by_uid(dpp, params.user, result.get(), null_yield);
 }
 
 template<>
 int RGWGetBucketInfoCR::Request::_send_request()
 {
-  RGWSysObjectCtx obj_ctx(store->svc.sysobj->init_obj_ctx());
-  return store->get_bucket_info(obj_ctx, params.tenant, params.bucket_name,
-                                result->bucket_info, &result->mtime, &result->attrs);
+  return store->getRados()->get_bucket_info(store->svc(), params.tenant, params.bucket_name,
+                                result->bucket_info, &result->mtime, null_yield, dpp, &result->attrs);
 }
 
 template<>
 int RGWBucketCreateLocalCR::Request::_send_request()
 {
   CephContext *cct = store->ctx();
-  auto& zone_svc = store->svc.zone;
-  auto& sysobj_svc = store->svc.sysobj;
+  auto& zone_svc = store->svc()->zone;
 
   const auto& user_info = params.user_info.get();
   const auto& user = user_info->user_id;
@@ -120,12 +124,11 @@ int RGWBucketCreateLocalCR::Request::_send_request()
 
   /* we need to make sure we read bucket info, it's not read before for this
    * specific request */
-  RGWSysObjectCtx sysobj_ctx(sysobj_svc->init_obj_ctx());
   RGWBucketInfo bucket_info;
   map<string, bufferlist> bucket_attrs;
 
-  int ret = store->get_bucket_info(sysobj_ctx, user.tenant, bucket_name,
-				  bucket_info, nullptr, &bucket_attrs);
+  int ret = store->getRados()->get_bucket_info(store->svc(), user.tenant, bucket_name,
+				  bucket_info, nullptr, null_yield, dpp, &bucket_attrs);
   if (ret < 0 && ret != -ENOENT)
     return ret;
   bool bucket_exists = (ret != -ENOENT);
@@ -135,8 +138,8 @@ int RGWBucketCreateLocalCR::Request::_send_request()
   bucket_owner.set_id(user);
   bucket_owner.set_name(user_info->display_name);
   if (bucket_exists) {
-    ret = rgw_op_get_bucket_policy_from_attr(cct, store, bucket_info,
-                                             bucket_attrs, &old_policy);
+    ret = rgw_op_get_bucket_policy_from_attr(dpp, cct, store, bucket_info,
+                                             bucket_attrs, &old_policy, null_yield);
     if (ret >= 0)  {
       if (old_policy.get_owner().get_id().compare(user) != 0) {
         return -EEXIST;
@@ -157,8 +160,8 @@ int RGWBucketCreateLocalCR::Request::_send_request()
     bucket.tenant = user.tenant;
     bucket.name = bucket_name;
     ret = zone_svc->select_bucket_placement(*user_info, zonegroup_id,
-                                         placement_rule,
-                                         &selected_placement_rule, nullptr);
+					    placement_rule,
+					    &selected_placement_rule, nullptr, null_yield);
     if (selected_placement_rule != bucket_info.placement_rule) {
       ldout(cct, 0) << "bucket already exists on a different placement rule: "
         << " selected_rule= " << selected_placement_rule
@@ -187,11 +190,11 @@ int RGWBucketCreateLocalCR::Request::_send_request()
   RGWBucketInfo info;
   obj_version ep_objv;
 
-  ret = store->create_bucket(*user_info, bucket, zonegroup_id,
+  ret = store->getRados()->create_bucket(*user_info, bucket, zonegroup_id,
                                 placement_rule, bucket_info.swift_ver_location,
                                 pquota_info, attrs,
                                 info, nullptr, &ep_objv, creation_time,
-                                pmaster_bucket, pmaster_num_shards, true);
+				pmaster_bucket, pmaster_num_shards, null_yield, dpp, true);
 
 
   if (ret && ret != -EEXIST)
@@ -201,26 +204,25 @@ int RGWBucketCreateLocalCR::Request::_send_request()
 
   if (existed) {
     if (info.owner != user) {
-      ldout(cct, 20) << "NOTICE: bucket already exists under a different user (bucket=" << bucket << " user=" << user << " bucket_owner=" << info.owner << dendl;
+      ldpp_dout(dpp, 20) << "NOTICE: bucket already exists under a different user (bucket=" << bucket << " user=" << user << " bucket_owner=" << info.owner << dendl;
       return -EEXIST;
     }
     bucket = info.bucket;
   }
 
-  ret = rgw_link_bucket(store, user, bucket,
-                        info.creation_time, false);
+  ret = store->ctl()->bucket->link_bucket(user, bucket, info.creation_time, null_yield, dpp, false);
   if (ret && !existed && ret != -EEXIST) {
     /* if it exists (or previously existed), don't remove it! */
-    int r = rgw_unlink_bucket(store, user, bucket.tenant, bucket.name);
+    int r = store->ctl()->bucket->unlink_bucket(user, bucket, null_yield, dpp);
     if (r < 0) {
-      ldout(cct, 0) << "WARNING: failed to unlink bucket: ret=" << r << dendl;
+      ldpp_dout(dpp, 0) << "WARNING: failed to unlink bucket: ret=" << r << dendl;
     }
   } else if (ret == -EEXIST || (ret == 0 && existed)) {
     ret = -ERR_BUCKET_EXISTS;
   }
 
   if (ret < 0) {
-    ldout(cct, 0) << "ERROR: bucket creation (bucket=" << bucket << ") return ret=" << ret << dendl;
+    ldpp_dout(dpp, 0) << "ERROR: bucket creation (bucket=" << bucket << ") return ret=" << ret << dendl;
   }
 
   return ret;
@@ -243,9 +245,9 @@ int RGWObjectSimplePutCR::Request::_send_request()
     obj->set_user_data(*params.user_data);
   }
 
-  ret = obj->put(params.data, params.attrs);
+  ret = obj->put(params.data, params.attrs, dpp, null_yield);
   if (ret < 0) {
-    lderr(cct) << "ERROR: put object returned error: " << cpp_strerror(-ret) << dendl;
+    ldpp_dout(dpp, -1) << "ERROR: put object returned error: " << cpp_strerror(-ret) << dendl;
   }
 
   return 0;
@@ -256,7 +258,7 @@ int RGWBucketLifecycleConfigCR::Request::_send_request()
 {
   CephContext *cct = store->ctx();
 
-  RGWLC *lc = store->get_lc();
+  RGWLC *lc = store->getRados()->get_lc();
   if (!lc) {
     lderr(cct) << "ERROR: lifecycle object is not initialized!" << dendl;
     return -EIO;
@@ -268,6 +270,24 @@ int RGWBucketLifecycleConfigCR::Request::_send_request()
   if (ret < 0) {
     lderr(cct) << "ERROR: failed to set lifecycle on bucke: " << cpp_strerror(-ret) << dendl;
     return -ret;
+  }
+
+  return 0;
+}
+
+template<>
+int RGWBucketGetSyncPolicyHandlerCR::Request::_send_request()
+{
+  CephContext *cct = store->ctx();
+
+  int r = store->ctl()->bucket->get_sync_policy_handler(params.zone,
+                                                        params.bucket,
+                                                        &result->policy_handler,
+                                                        null_yield,
+                                                        dpp);
+  if (r < 0) {
+    ldpp_dout(dpp, -1) << "ERROR: " << __func__ << "(): get_sync_policy_handler() returned " << r << dendl;
+    return  r;
   }
 
   return 0;

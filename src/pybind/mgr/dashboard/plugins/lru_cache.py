@@ -6,8 +6,8 @@ Based on Python 3 functools and backports.functools_lru_cache.
 """
 from __future__ import absolute_import
 
-from functools import wraps
 from collections import OrderedDict
+from functools import wraps
 from threading import RLock
 
 
@@ -19,12 +19,9 @@ def lru_cache(maxsize=128, typed=False):
         cache = OrderedDict()
         stats = [0, 0]
         rlock = RLock()
-        setattr(
-            function,
-            'cache_info',
-            lambda:
-            "hits={}, misses={}, maxsize={}, currsize={}".format(
-                stats[0], stats[1], maxsize, len(cache)))
+        setattr(function, 'cache_info', lambda:
+                "hits={}, misses={}, maxsize={}, currsize={}".format(
+                    stats[0], stats[1], maxsize, len(cache)))
 
         @wraps(function)
         def wrapper(*args, **kwargs):

@@ -1,27 +1,28 @@
 import { Component, ViewChild } from '@angular/core';
 
-import { I18n } from '@ngx-translate/i18n-polyfill';
 import { BlockUI, NgBlockUI } from 'ng-block-ui';
 import { timer as observableTimer } from 'rxjs';
 
-import { MgrModuleService } from '../../../../shared/api/mgr-module.service';
-import { TableComponent } from '../../../../shared/datatable/table/table.component';
-import { CellTemplate } from '../../../../shared/enum/cell-template.enum';
-import { CdTableAction } from '../../../../shared/models/cd-table-action';
-import { CdTableColumn } from '../../../../shared/models/cd-table-column';
-import { CdTableFetchDataContext } from '../../../../shared/models/cd-table-fetch-data-context';
-import { CdTableSelection } from '../../../../shared/models/cd-table-selection';
-import { Permission } from '../../../../shared/models/permissions';
-import { AuthStorageService } from '../../../../shared/services/auth-storage.service';
-import { NotificationService } from '../../../../shared/services/notification.service';
+import { MgrModuleService } from '~/app/shared/api/mgr-module.service';
+import { ListWithDetails } from '~/app/shared/classes/list-with-details.class';
+import { TableComponent } from '~/app/shared/datatable/table/table.component';
+import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
+import { Icons } from '~/app/shared/enum/icons.enum';
+import { CdTableAction } from '~/app/shared/models/cd-table-action';
+import { CdTableColumn } from '~/app/shared/models/cd-table-column';
+import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data-context';
+import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
+import { Permission } from '~/app/shared/models/permissions';
+import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
+import { NotificationService } from '~/app/shared/services/notification.service';
 
 @Component({
   selector: 'cd-mgr-module-list',
   templateUrl: './mgr-module-list.component.html',
   styleUrls: ['./mgr-module-list.component.scss']
 })
-export class MgrModuleListComponent {
-  @ViewChild(TableComponent)
+export class MgrModuleListComponent extends ListWithDetails {
+  @ViewChild(TableComponent, { static: true })
   table: TableComponent;
   @BlockUI()
   blockUI: NgBlockUI;
@@ -35,19 +36,26 @@ export class MgrModuleListComponent {
   constructor(
     private authStorageService: AuthStorageService,
     private mgrModuleService: MgrModuleService,
-    private notificationService: NotificationService,
-    private i18n: I18n
+    private notificationService: NotificationService
   ) {
+    super();
     this.permission = this.authStorageService.getPermissions().configOpt;
     this.columns = [
       {
-        name: this.i18n('Name'),
+        name: $localize`Name`,
         prop: 'name',
         flexGrow: 1
       },
       {
-        name: this.i18n('Enabled'),
+        name: $localize`Enabled`,
         prop: 'enabled',
+        flexGrow: 1,
+        cellClass: 'text-center',
+        cellTransformation: CellTemplate.checkIcon
+      },
+      {
+        name: $localize`Always-On`,
+        prop: 'always_on',
         flexGrow: 1,
         cellClass: 'text-center',
         cellTransformation: CellTemplate.checkIcon
@@ -57,7 +65,7 @@ export class MgrModuleListComponent {
       this.selection.first() && encodeURIComponent(this.selection.first().name);
     this.tableActions = [
       {
-        name: this.i18n('Edit'),
+        name: $localize`Edit`,
         permission: 'update',
         disable: () => {
           if (!this.selection.hasSelection) {
@@ -67,21 +75,21 @@ export class MgrModuleListComponent {
           return Object.values(this.selection.first().options).length === 0;
         },
         routerLink: () => `/mgr-modules/edit/${getModuleUri()}`,
-        icon: 'fa-pencil'
+        icon: Icons.edit
       },
       {
-        name: this.i18n('Enable'),
+        name: $localize`Enable`,
         permission: 'update',
         click: () => this.updateModuleState(),
         disable: () => this.isTableActionDisabled('enabled'),
-        icon: 'fa-play'
+        icon: Icons.start
       },
       {
-        name: this.i18n('Disable'),
+        name: $localize`Disable`,
         permission: 'update',
         click: () => this.updateModuleState(),
-        disable: () => this.isTableActionDisabled('disabled'),
-        icon: 'fa-stop'
+        disable: () => this.getTableActionDisabledDesc(),
+        icon: Icons.stop
       }
     ];
   }
@@ -111,18 +119,31 @@ export class MgrModuleListComponent {
     if (!this.selection.hasSelection) {
       return true;
     }
+    const selected = this.selection.first();
     // Make sure the user can't modify the run state of the 'Dashboard' module.
     // This check is only done in the UI because the REST API should still be
     // able to do so.
-    if (this.selection.first().name === 'dashboard') {
+    if (selected.name === 'dashboard') {
+      return true;
+    }
+    // Always-on modules can't be disabled.
+    if (selected.always_on) {
       return true;
     }
     switch (state) {
       case 'enabled':
-        return this.selection.first().enabled;
+        return selected.enabled;
       case 'disabled':
-        return !this.selection.first().enabled;
+        return !selected.enabled;
     }
+  }
+
+  getTableActionDisabledDesc(): string | boolean {
+    if (this.selection.first()?.always_on) {
+      return $localize`This Manager module is always on.`;
+    }
+
+    return this.isTableActionDisabled('disabled');
   }
 
   /**
@@ -163,13 +184,13 @@ export class MgrModuleListComponent {
       $obs = this.mgrModuleService.enable(module.name);
     }
     $obs.subscribe(
-      () => {},
+      () => undefined,
       () => {
         // Suspend showing the notification toasties.
         this.notificationService.suspendToasties(true);
         // Block the whole UI to prevent user interactions until
         // the connection to the backend is reestablished
-        this.blockUI.start(this.i18n('Reconnecting, please wait ...'));
+        this.blockUI.start($localize`Reconnecting, please wait ...`);
         fnWaitUntilReconnected();
       }
     );

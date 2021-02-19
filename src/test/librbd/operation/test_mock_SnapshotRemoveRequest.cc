@@ -10,12 +10,10 @@
 #include "librbd/internal.h"
 #include "librbd/Operations.h"
 #include "librbd/image/DetachChildRequest.h"
+#include "librbd/mirror/snapshot/RemoveImageStateRequest.h"
 #include "librbd/operation/SnapshotRemoveRequest.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-
-// template definitions
-#include "librbd/operation/SnapshotRemoveRequest.cc"
 
 namespace librbd {
 namespace image {
@@ -44,6 +42,40 @@ DetachChildRequest<MockImageCtx> *DetachChildRequest<MockImageCtx>::s_instance;
 
 } // namespace image
 
+namespace mirror {
+namespace snapshot {
+
+template<>
+class RemoveImageStateRequest<MockImageCtx> {
+public:
+  static RemoveImageStateRequest *s_instance;
+  Context *on_finish = nullptr;
+
+  static RemoveImageStateRequest *create(MockImageCtx *image_ctx,
+                                         uint64_t snap_id,
+                                         Context *on_finish) {
+    ceph_assert(s_instance != nullptr);
+    s_instance->on_finish = on_finish;
+    return s_instance;
+  }
+
+  RemoveImageStateRequest() {
+    s_instance = this;
+  }
+
+  MOCK_METHOD0(send, void());
+};
+
+RemoveImageStateRequest<MockImageCtx> *RemoveImageStateRequest<MockImageCtx>::s_instance;
+
+} // namespace snapshot
+} // namespace mirror
+} // namespace librbd
+
+// template definitions
+#include "librbd/operation/SnapshotRemoveRequest.cc"
+
+namespace librbd {
 namespace operation {
 
 using ::testing::_;
@@ -59,6 +91,7 @@ class TestMockOperationSnapshotRemoveRequest : public TestMockFixture {
 public:
   typedef SnapshotRemoveRequest<MockImageCtx> MockSnapshotRemoveRequest;
   typedef image::DetachChildRequest<MockImageCtx> MockDetachChildRequest;
+  typedef mirror::snapshot::RemoveImageStateRequest<MockImageCtx> MockRemoveImageStateRequest;
 
   int create_snapshot(const char *snap_name) {
     librbd::ImageCtx *ictx;
@@ -88,7 +121,7 @@ public:
     auto &expect = EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
                                exec(mock_image_ctx.header_oid, _, StrEq("rbd"),
                                StrEq("snapshot_trash_add"),
-                                _, _, _));
+                               _, _, _, _));
     if (r < 0) {
       expect.WillOnce(Return(r));
     } else {
@@ -105,11 +138,41 @@ public:
     using ceph::encode;
     EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
                 exec(mock_image_ctx.header_oid, _, StrEq("rbd"),
-                     StrEq("snapshot_get"), _, _, _))
+                     StrEq("snapshot_get"), _, _, _, _))
       .WillOnce(WithArg<5>(Invoke([snap_info, r](bufferlist* bl) {
                              encode(snap_info, *bl);
                              return r;
                            })));
+  }
+
+  void expect_children_list(MockImageCtx &mock_image_ctx,
+                            const cls::rbd::ChildImageSpecs& child_images, int r) {
+    if (mock_image_ctx.old_format) {
+      return;
+    }
+
+    using ceph::encode;
+    EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
+                exec(mock_image_ctx.header_oid, _, StrEq("rbd"),
+                     StrEq("children_list"), _, _, _, _))
+      .WillOnce(WithArg<5>(Invoke([child_images, r](bufferlist* bl) {
+                             encode(child_images, *bl);
+                             return r;
+                           })));
+  }
+
+  void expect_detach_stale_child(MockImageCtx &mock_image_ctx, int r) {
+    auto& parent_spec = mock_image_ctx.parent_md.spec;
+
+    bufferlist bl;
+    encode(parent_spec.snap_id, bl);
+    encode(cls::rbd::ChildImageSpec{mock_image_ctx.md_ctx.get_id(), "",
+                                    mock_image_ctx.id}, bl);
+    EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
+                exec(util::header_name(parent_spec.image_id),
+                     _, StrEq("rbd"), StrEq("child_detach"), ContentsEqual(bl),
+                     _, _, _))
+      .WillOnce(Return(r));
   }
 
   void expect_object_map_snap_remove(MockImageCtx &mock_image_ctx, int r) {
@@ -118,6 +181,14 @@ public:
                     .WillOnce(WithArg<1>(CompleteContext(
                       r, mock_image_ctx.image_ctx->op_work_queue)));
     }
+  }
+
+  void expect_remove_image_state(
+      MockImageCtx &mock_image_ctx,
+      MockRemoveImageStateRequest &mock_remove_image_state_request, int r) {
+    EXPECT_CALL(mock_remove_image_state_request, send())
+      .WillOnce(FinishRequest(&mock_remove_image_state_request, r,
+                              &mock_image_ctx));
   }
 
   void expect_get_parent_spec(MockImageCtx &mock_image_ctx, int r) {
@@ -146,7 +217,7 @@ public:
                                exec(mock_image_ctx.header_oid, _, StrEq("rbd"),
                                StrEq(mock_image_ctx.old_format ? "snap_remove" :
                                                                   "snapshot_remove"),
-                                _, _, _));
+                                _, _, _, _));
     if (r < 0) {
       expect.WillOnce(Return(r));
     } else {
@@ -205,7 +276,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, Success) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(0, cond_ctx.wait());
@@ -241,6 +312,8 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, SuccessCloneParent) {
                       {snap_id, {cls::rbd::UserSnapshotNamespace{}},
                        "snap1", 123, {}, 1}, 0);
 
+  const cls::rbd::ChildImageSpecs child_images;
+  expect_children_list(mock_image_ctx, child_images, 0);
   expect_get_parent_spec(mock_image_ctx, 0);
 
   C_SaferCond cond_ctx;
@@ -248,7 +321,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, SuccessCloneParent) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(0, cond_ctx.wait());
@@ -297,7 +370,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, SuccessTrash) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(0, cond_ctx.wait());
@@ -362,7 +435,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, FlattenedCloneRemovesChild) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(0, cond_ctx.wait());
@@ -373,8 +446,9 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, TrashCloneParent) {
 
   librbd::ImageCtx *ictx;
   ASSERT_EQ(0, open_image(m_image_name, &ictx));
+  NoOpProgressContext prog_ctx;
   ASSERT_EQ(0, ictx->operations->snap_create(
-                 {cls::rbd::TrashSnapshotNamespace{}}, "snap1"));
+                 {cls::rbd::TrashSnapshotNamespace{}}, "snap1", 0, prog_ctx));
   ASSERT_EQ(0, ictx->state->refresh_if_required());
 
   MockImageCtx mock_image_ctx(*ictx);
@@ -397,6 +471,8 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, TrashCloneParent) {
   expect_snapshot_get(mock_image_ctx,
                       {snap_id, {cls::rbd::TrashSnapshotNamespace{}},
                        "snap1", 123, {}, 1}, 0);
+  const cls::rbd::ChildImageSpecs child_images;
+  expect_children_list(mock_image_ctx, child_images, 0);
   expect_get_parent_spec(mock_image_ctx, 0);
 
   C_SaferCond cond_ctx;
@@ -404,10 +480,59 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, TrashCloneParent) {
     mock_image_ctx, &cond_ctx, cls::rbd::TrashSnapshotNamespace{}, "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(-EBUSY, cond_ctx.wait());
+}
+
+TEST_F(TestMockOperationSnapshotRemoveRequest, MirrorSnapshot) {
+  REQUIRE_FORMAT_V2();
+
+  librbd::ImageCtx *ictx;
+  ASSERT_EQ(0, open_image(m_image_name, &ictx));
+  ASSERT_EQ(0, snap_create(*ictx, "snap1"));
+  ASSERT_EQ(0, ictx->state->refresh_if_required());
+
+  MockImageCtx mock_image_ctx(*ictx);
+
+  MockExclusiveLock mock_exclusive_lock;
+  if (ictx->test_features(RBD_FEATURE_EXCLUSIVE_LOCK)) {
+    mock_image_ctx.exclusive_lock = &mock_exclusive_lock;
+  }
+
+  MockObjectMap mock_object_map;
+  if (ictx->test_features(RBD_FEATURE_OBJECT_MAP)) {
+    mock_image_ctx.object_map = &mock_object_map;
+  }
+
+  expect_op_work_queue(mock_image_ctx);
+
+  ::testing::InSequence seq;
+  expect_snapshot_trash_add(mock_image_ctx, 0);
+
+  uint64_t snap_id = ictx->snap_info.rbegin()->first;
+  expect_snapshot_get(mock_image_ctx,
+                      {snap_id, {cls::rbd::MirrorSnapshotNamespace{}},
+                       "mirror", 123, {}, 0}, 0);
+
+  expect_get_parent_spec(mock_image_ctx, 0);
+  expect_object_map_snap_remove(mock_image_ctx, 0);
+  MockRemoveImageStateRequest mock_remove_image_state_request;
+  expect_remove_image_state(mock_image_ctx, mock_remove_image_state_request, 0);
+  expect_release_snap_id(mock_image_ctx);
+  expect_snap_remove(mock_image_ctx, 0);
+  expect_rm_snap(mock_image_ctx);
+
+  C_SaferCond cond_ctx;
+  MockSnapshotRemoveRequest *req = new MockSnapshotRemoveRequest(
+    mock_image_ctx, &cond_ctx, cls::rbd::MirrorSnapshotNamespace(),
+    "mirror", snap_id);
+  {
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
+    req->send();
+  }
+  ASSERT_EQ(0, cond_ctx.wait());
 }
 
 TEST_F(TestMockOperationSnapshotRemoveRequest, SnapshotTrashAddNotSupported) {
@@ -447,7 +572,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, SnapshotTrashAddNotSupported) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(0, cond_ctx.wait());
@@ -473,7 +598,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, SnapshotTrashAddError) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(-EINVAL, cond_ctx.wait());
@@ -503,7 +628,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, SnapshotGetError) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(-EOPNOTSUPP, cond_ctx.wait());
@@ -540,7 +665,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, ObjectMapSnapRemoveError) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(-EINVAL, cond_ctx.wait());
@@ -578,7 +703,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, RemoveChildParentError) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(-ENOENT, cond_ctx.wait());
@@ -629,7 +754,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, RemoveChildError) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(-EINVAL, cond_ctx.wait());
@@ -673,7 +798,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, RemoveSnapError) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(-ENOENT, cond_ctx.wait());
@@ -705,10 +830,94 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, MissingSnap) {
     mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
     snap_id);
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
   }
   ASSERT_EQ(-ENOENT, cond_ctx.wait());
+}
+
+TEST_F(TestMockOperationSnapshotRemoveRequest, ListChildrenError) {
+  REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
+
+  librbd::ImageCtx *ictx;
+  ASSERT_EQ(0, open_image(m_image_name, &ictx));
+  ASSERT_EQ(0, snap_create(*ictx, "snap1"));
+  ASSERT_EQ(0, ictx->state->refresh_if_required());
+
+  MockImageCtx mock_image_ctx(*ictx);
+
+  MockExclusiveLock mock_exclusive_lock;
+  if (ictx->test_features(RBD_FEATURE_EXCLUSIVE_LOCK)) {
+    mock_image_ctx.exclusive_lock = &mock_exclusive_lock;
+  }
+
+  MockObjectMap mock_object_map;
+  if (ictx->test_features(RBD_FEATURE_OBJECT_MAP)) {
+    mock_image_ctx.object_map = &mock_object_map;
+  }
+
+  expect_op_work_queue(mock_image_ctx);
+
+  ::testing::InSequence seq;
+  expect_snapshot_trash_add(mock_image_ctx, 0);
+
+  uint64_t snap_id = ictx->snap_info.rbegin()->first;
+  expect_snapshot_get(mock_image_ctx,
+                      {snap_id, {cls::rbd::UserSnapshotNamespace{}},
+                       "snap1", 123, {}, 1}, 0);
+  const cls::rbd::ChildImageSpecs child_images;
+  expect_children_list(mock_image_ctx, child_images, -EINVAL);
+
+  C_SaferCond cond_ctx;
+  MockSnapshotRemoveRequest *req = new MockSnapshotRemoveRequest(
+    mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
+    snap_id);
+  {
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
+    req->send();
+  }
+  ASSERT_EQ(-EINVAL, cond_ctx.wait());
+}
+
+TEST_F(TestMockOperationSnapshotRemoveRequest, DetachStaleChildError) {
+  REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
+
+  ASSERT_EQ(0, create_snapshot("snap1"));
+
+  int order = 22;
+  uint64_t features;
+  ASSERT_TRUE(::get_features(&features));
+  std::string clone_name = get_temp_image_name();
+  ASSERT_EQ(0, librbd::clone(m_ioctx, m_image_name.c_str(), "snap1", m_ioctx,
+                             clone_name.c_str(), features, &order, 0, 0));
+
+  librbd::ImageCtx *ictx;
+  ASSERT_EQ(0, open_image(clone_name, &ictx));
+  ASSERT_EQ(0, snap_create(*ictx, "snap1"));
+  ASSERT_EQ(0, ictx->state->refresh_if_required());
+
+  MockImageCtx mock_image_ctx(*ictx);
+  expect_op_work_queue(mock_image_ctx);
+
+  ::testing::InSequence seq;
+  expect_snapshot_trash_add(mock_image_ctx, 0);
+
+  uint64_t snap_id = ictx->snap_info.rbegin()->first;
+  expect_snapshot_get(mock_image_ctx,
+                      {snap_id, {cls::rbd::UserSnapshotNamespace{}},
+                       "snap1", 123, {}, 1}, 0);
+  const cls::rbd::ChildImageSpecs child_images;
+  expect_children_list(mock_image_ctx, child_images, -EINVAL);
+
+  C_SaferCond cond_ctx;
+  MockSnapshotRemoveRequest *req = new MockSnapshotRemoveRequest(
+    mock_image_ctx, &cond_ctx, cls::rbd::UserSnapshotNamespace(), "snap1",
+    snap_id);
+  {
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
+    req->send();
+  }
+  ASSERT_EQ(-EINVAL, cond_ctx.wait());
 }
 
 } // namespace operation

@@ -24,19 +24,9 @@
 #include <fcntl.h>
 #include <string.h>
 
-// <macro hackery>
-// temporarily remap __le* to ceph_le* for benefit of shared kernel/userland headers
-#define __le16 ceph_le16
-#define __le32 ceph_le32
-#define __le64 ceph_le64
 #include "ceph_fs.h"
 #include "ceph_frag.h"
 #include "rbd_types.h"
-#undef __le16
-#undef __le32
-#undef __le64
-// </macro hackery>
-
 
 #ifdef __cplusplus
 #ifndef _BACKWARD_BACKWARD_WARNING_H
@@ -58,7 +48,8 @@ extern "C" {
 #include <boost/container/flat_map.hpp>
 #include <map>
 #include <vector>
-#include <iostream>
+#include <optional>
+#include <ostream>
 #include <iomanip>
 
 
@@ -106,6 +97,8 @@ template<class A, class Comp, class Alloc>
 inline std::ostream& operator<<(std::ostream& out, const std::deque<A,Alloc>& v);
 template<typename... Ts>
 inline std::ostream& operator<<(std::ostream& out, const std::tuple<Ts...> &t);
+template<typename T>
+inline std::ostream& operator<<(std::ostream& out, const std::optional<T> &t);
 template<class A, class Alloc>
 inline std::ostream& operator<<(std::ostream& out, const std::list<A,Alloc>& ilist);
 template<class A, class Comp, class Alloc>
@@ -181,6 +174,16 @@ inline std::ostream& operator<<(std::ostream& out, const std::tuple<Ts...> &t) {
       out << ",";
   };
   ceph::for_each(t, f);
+  return out;
+}
+
+// Mimics boost::optional
+template<typename T>
+inline std::ostream& operator<<(std::ostream& out, const std::optional<T> &t) {
+  if (!t)
+    out << "--" ;
+  else
+    out << ' ' << *t ;
   return out;
 }
 
@@ -321,7 +324,8 @@ WRITE_RAW_ENCODER(ceph_mds_request_head)
 WRITE_RAW_ENCODER(ceph_mds_request_release)
 WRITE_RAW_ENCODER(ceph_filelock)
 WRITE_RAW_ENCODER(ceph_mds_caps_head)
-WRITE_RAW_ENCODER(ceph_mds_caps_body_legacy)
+WRITE_RAW_ENCODER(ceph_mds_caps_export_body)
+WRITE_RAW_ENCODER(ceph_mds_caps_non_export_body)
 WRITE_RAW_ENCODER(ceph_mds_cap_peer)
 WRITE_RAW_ENCODER(ceph_mds_cap_release)
 WRITE_RAW_ENCODER(ceph_mds_cap_item)
@@ -520,9 +524,12 @@ WRITE_EQ_OPERATORS_1(shard_id_t, id)
 WRITE_CMP_OPERATORS_1(shard_id_t, id)
 std::ostream &operator<<(std::ostream &lhs, const shard_id_t &rhs);
 
-#if defined(__sun) || defined(_AIX) || defined(__APPLE__) || defined(__FreeBSD__)
+#if defined(__sun) || defined(_AIX) || defined(__APPLE__) || \
+    defined(__FreeBSD__) || defined(_WIN32)
+extern "C" {
 __s32  ceph_to_hostos_errno(__s32 e);
 __s32  hostos_to_ceph_errno(__s32 e);
+}
 #else
 #define  ceph_to_hostos_errno(e) (e)
 #define  hostos_to_ceph_errno(e) (e)
@@ -571,7 +578,7 @@ struct sha_digest_t {
     for (size_t i = 0; i < S; i++) {
       ::sprintf(&str[i * 2], "%02x", static_cast<int>(v[i]));
     }
-    return string(str);
+    return std::string(str);
   }
   sha_digest_t(const unsigned char *_v) { memcpy(v, _v, SIZE); };
   sha_digest_t() {}
@@ -609,6 +616,11 @@ WRITE_CLASS_ENCODER(sha1_digest_t)
 
 using sha256_digest_t = sha_digest_t<32>;
 WRITE_CLASS_ENCODER(sha256_digest_t)
+
+using sha512_digest_t = sha_digest_t<64>;
+
+using md5_digest_t = sha_digest_t<16>;
+WRITE_CLASS_ENCODER(md5_digest_t)
 
 
 #endif

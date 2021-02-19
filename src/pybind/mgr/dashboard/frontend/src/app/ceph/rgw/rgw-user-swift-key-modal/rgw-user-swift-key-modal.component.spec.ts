@@ -2,11 +2,11 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { FormsModule } from '@angular/forms';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { ToastModule } from 'ng2-toastr';
-import { BsModalRef } from 'ngx-bootstrap/modal';
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
+import { ToastrModule } from 'ngx-toastr';
 
-import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
-import { SharedModule } from '../../../shared/shared.module';
+import { SharedModule } from '~/app/shared/shared.module';
+import { configureTestBed } from '~/testing/unit-test-helper';
 import { RgwUserSwiftKeyModalComponent } from './rgw-user-swift-key-modal.component';
 
 describe('RgwUserSwiftKeyModalComponent', () => {
@@ -15,8 +15,8 @@ describe('RgwUserSwiftKeyModalComponent', () => {
 
   configureTestBed({
     declarations: [RgwUserSwiftKeyModalComponent],
-    imports: [ToastModule.forRoot(), FormsModule, SharedModule, RouterTestingModule],
-    providers: [BsModalRef, i18nProviders]
+    imports: [ToastrModule.forRoot(), FormsModule, SharedModule, RouterTestingModule],
+    providers: [NgbActiveModal]
   });
 
   beforeEach(() => {

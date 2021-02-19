@@ -24,7 +24,7 @@
 void MDSContext::complete(int r) {
   MDSRank *mds = get_mds();
   ceph_assert(mds != nullptr);
-  ceph_assert(mds->mds_lock.is_locked_by_me());
+  ceph_assert(ceph_mutex_is_locked_by_me(mds->mds_lock));
   dout(10) << "MDSContext::complete: " << typeid(*this).name() << dendl;
   return Context::complete(r);
 }
@@ -34,24 +34,30 @@ void MDSInternalContextWrapper::finish(int r)
   fin->complete(r);
 }
 
-elist<MDSIOContextBase*> MDSIOContextBase::ctx_list(member_offset(MDSIOContextBase, list_item));
-ceph::spinlock MDSIOContextBase::ctx_list_lock;
+struct MDSIOContextList {
+  elist<MDSIOContextBase*> list;
+  ceph::spinlock lock;
+  MDSIOContextList() : list(member_offset(MDSIOContextBase, list_item)) {}
+  ~MDSIOContextList() {
+    list.clear(); // avoid assertion in elist's destructor
+  }
+} ioctx_list;
 
 MDSIOContextBase::MDSIOContextBase(bool track)
 {
   created_at = ceph::coarse_mono_clock::now();
   if (track) {
-    ctx_list_lock.lock();
-    ctx_list.push_back(&list_item);
-    ctx_list_lock.unlock();
+    ioctx_list.lock.lock();
+    ioctx_list.list.push_back(&list_item);
+    ioctx_list.lock.unlock();
   }
 }
 
 MDSIOContextBase::~MDSIOContextBase()
 {
-  ctx_list_lock.lock();
+  ioctx_list.lock.lock();
   list_item.remove_myself();
-  ctx_list_lock.unlock();
+  ioctx_list.lock.unlock();
 }
 
 bool MDSIOContextBase::check_ios_in_flight(ceph::coarse_mono_time cutoff,
@@ -61,8 +67,8 @@ bool MDSIOContextBase::check_ios_in_flight(ceph::coarse_mono_time cutoff,
   static const unsigned MAX_COUNT = 100;
   unsigned slow = 0;
 
-  ctx_list_lock.lock();
-  for (elist<MDSIOContextBase*>::iterator p = ctx_list.begin(); !p.end(); ++p) {
+  ioctx_list.lock.lock();
+  for (elist<MDSIOContextBase*>::iterator p = ioctx_list.list.begin(); !p.end(); ++p) {
     MDSIOContextBase *c = *p;
     if (c->created_at >= cutoff)
       break;
@@ -72,7 +78,7 @@ bool MDSIOContextBase::check_ios_in_flight(ceph::coarse_mono_time cutoff,
     if (slow == 1)
       oldest = c->created_at;
   }
-  ctx_list_lock.unlock();
+  ioctx_list.lock.unlock();
 
   if (slow > 0) {
     if (slow > MAX_COUNT)
@@ -90,6 +96,9 @@ void MDSIOContextBase::complete(int r) {
 
   dout(10) << "MDSIOContextBase::complete: " << typeid(*this).name() << dendl;
   ceph_assert(mds != NULL);
+  // Note, MDSIOContext is passed outside the MDS and, strangely, we grab the
+  // lock here when MDSContext::complete would otherwise assume the lock is
+  // already acquired.
   std::lock_guard l(mds->mds_lock);
 
   if (mds->is_daemon_stopping()) {
@@ -98,8 +107,8 @@ void MDSIOContextBase::complete(int r) {
     return;
   }
 
-  if (r == -EBLACKLISTED) {
-    derr << "MDSIOContextBase: blacklisted!  Restarting..." << dendl;
+  if (r == -EBLOCKLISTED) {
+    derr << "MDSIOContextBase: blocklisted!  Restarting..." << dendl;
     mds->respawn();
   } else {
     MDSContext::complete(r);
@@ -110,8 +119,9 @@ void MDSLogContextBase::complete(int r) {
   MDLog *mdlog = get_mds()->mdlog;
   uint64_t safe_pos = write_pos;
   pre_finish(r);
-  // MDSContextBase::complete() free this
+  // MDSIOContext::complete() free this
   MDSIOContextBase::complete(r);
+  // safe_pos must be updated after MDSIOContext::complete() call
   mdlog->set_safe_pos(safe_pos);
 }
 

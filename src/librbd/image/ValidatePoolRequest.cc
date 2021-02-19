@@ -6,9 +6,9 @@
 #include "include/ceph_assert.h"
 #include "common/dout.h"
 #include "common/errno.h"
-#include "common/WorkQueue.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -31,7 +31,7 @@ using util::create_async_context_callback;
 
 template <typename I>
 ValidatePoolRequest<I>::ValidatePoolRequest(librados::IoCtx& io_ctx,
-                                            ContextWQ *op_work_queue,
+                                            asio::ContextWQ *op_work_queue,
                                             Context *on_finish)
     : m_cct(reinterpret_cast<CephContext*>(io_ctx.cct())),
       m_op_work_queue(op_work_queue), m_on_finish(on_finish) {
@@ -97,7 +97,7 @@ void ValidatePoolRequest<I>::create_snapshot() {
 
   // allocate a self-managed snapshot id if this a new pool to force
   // self-managed snapshot mode
-  auto ctx = new FunctionContext([this](int r) {
+  auto ctx = new LambdaContext([this](int r) {
       r = m_io_ctx.selfmanaged_snap_create(&m_snap_id);
       handle_create_snapshot(r);
     });
@@ -161,7 +161,7 @@ template <typename I>
 void ValidatePoolRequest<I>::remove_snapshot() {
   ldout(m_cct, 5) << dendl;
 
-  auto ctx = new FunctionContext([this](int r) {
+  auto ctx = new LambdaContext([this](int r) {
       r = m_io_ctx.selfmanaged_snap_remove(m_snap_id);
       handle_remove_snapshot(r);
     });

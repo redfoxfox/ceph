@@ -1,18 +1,14 @@
 import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 
-import { ToastModule } from 'ng2-toastr';
-import { of } from 'rxjs';
+import { ToastrModule } from 'ngx-toastr';
+import { Observable, of } from 'rxjs';
 
-import {
-  configureTestBed,
-  i18nProviders,
-  PrometheusHelper
-} from '../../../testing/unit-test-helper';
+import { configureTestBed, PrometheusHelper } from '~/testing/unit-test-helper';
 import { PrometheusService } from '../api/prometheus.service';
 import { NotificationType } from '../enum/notification-type.enum';
 import { CdNotificationConfig } from '../models/cd-notification';
-import { PrometheusAlert } from '../models/prometheus-alerts';
+import { AlertmanagerAlert } from '../models/prometheus-alerts';
 import { SharedModule } from '../shared.module';
 import { NotificationService } from './notification.service';
 import { PrometheusAlertFormatter } from './prometheus-alert-formatter';
@@ -21,13 +17,13 @@ import { PrometheusAlertService } from './prometheus-alert.service';
 describe('PrometheusAlertService', () => {
   let service: PrometheusAlertService;
   let notificationService: NotificationService;
-  let alerts: PrometheusAlert[];
+  let alerts: AlertmanagerAlert[];
   let prometheusService: PrometheusService;
   let prometheus: PrometheusHelper;
 
   configureTestBed({
-    imports: [ToastModule.forRoot(), SharedModule, HttpClientTestingModule],
-    providers: [PrometheusAlertService, PrometheusAlertFormatter, i18nProviders]
+    imports: [ToastrModule.forRoot(), SharedModule, HttpClientTestingModule],
+    providers: [PrometheusAlertService, PrometheusAlertFormatter]
   });
 
   beforeEach(() => {
@@ -35,40 +31,91 @@ describe('PrometheusAlertService', () => {
   });
 
   it('should create', () => {
-    expect(TestBed.get(PrometheusAlertService)).toBeTruthy();
+    expect(TestBed.inject(PrometheusAlertService)).toBeTruthy();
   });
 
-  it('tests error case ', () => {
-    const resp = { status: 500, error: {} };
-    service = new PrometheusAlertService(null, <PrometheusService>{
-      ifAlertmanagerConfigured: (fn) => fn(),
-      list: () => ({ subscribe: (_fn, err) => err(resp) })
+  describe('test failing status codes and verify disabling of the alertmanager', () => {
+    const isDisabledByStatusCode = (statusCode: number, expectedStatus: boolean, done: any) => {
+      service = TestBed.inject(PrometheusAlertService);
+      prometheusService = TestBed.inject(PrometheusService);
+      spyOn(prometheusService, 'ifAlertmanagerConfigured').and.callFake((fn) => fn());
+      spyOn(prometheusService, 'getAlerts').and.returnValue(
+        new Observable((observer: any) => observer.error({ status: statusCode, error: {} }))
+      );
+      const disableFn = spyOn(prometheusService, 'disableAlertmanagerConfig').and.callFake(() => {
+        expect(expectedStatus).toBe(true);
+        done();
+      });
+
+      if (!expectedStatus) {
+        expect(disableFn).not.toHaveBeenCalled();
+        done();
+      }
+
+      service.getAlerts();
+    };
+
+    it('disables on 504 error which is thrown if the mgr failed', (done) => {
+      isDisabledByStatusCode(504, true, done);
     });
 
-    expect(service['connected']).toBe(true);
-    service.refresh();
-    expect(service['connected']).toBe(false);
-    expect(resp['application']).toBe('Prometheus');
-    expect(resp.error['detail']).toBe(
-      'Please check if <a target="_blank" href="undefined">Prometheus Alertmanager</a> is still running'
+    it('disables on 404 error which is thrown if the external api cannot be reached', (done) => {
+      isDisabledByStatusCode(404, true, done);
+    });
+
+    it('does not disable on 400 error which is thrown if the external api receives unexpected data', (done) => {
+      isDisabledByStatusCode(400, false, done);
+    });
+  });
+
+  it('should flatten the response of getRules()', () => {
+    service = TestBed.inject(PrometheusAlertService);
+    prometheusService = TestBed.inject(PrometheusService);
+
+    spyOn(service['prometheusService'], 'ifPrometheusConfigured').and.callFake((fn) => fn());
+    spyOn(prometheusService, 'getRules').and.returnValue(
+      of({
+        groups: [
+          {
+            name: 'group1',
+            rules: [{ name: 'nearly_full', type: 'alerting' }]
+          },
+          {
+            name: 'test',
+            rules: [
+              { name: 'load_0', type: 'alerting' },
+              { name: 'load_1', type: 'alerting' },
+              { name: 'load_2', type: 'alerting' }
+            ]
+          }
+        ]
+      })
     );
+
+    service.getRules();
+
+    expect(service.rules as any).toEqual([
+      { name: 'nearly_full', type: 'alerting', group: 'group1' },
+      { name: 'load_0', type: 'alerting', group: 'test' },
+      { name: 'load_1', type: 'alerting', group: 'test' },
+      { name: 'load_2', type: 'alerting', group: 'test' }
+    ]);
   });
 
   describe('refresh', () => {
     beforeEach(() => {
-      service = TestBed.get(PrometheusAlertService);
+      service = TestBed.inject(PrometheusAlertService);
       service['alerts'] = [];
       service['canAlertsBeNotified'] = false;
 
       spyOn(window, 'setTimeout').and.callFake((fn: Function) => fn());
 
-      notificationService = TestBed.get(NotificationService);
-      spyOn(notificationService, 'queueNotifications').and.callThrough();
+      notificationService = TestBed.inject(NotificationService);
       spyOn(notificationService, 'show').and.stub();
 
-      prometheusService = TestBed.get(PrometheusService);
+      prometheusService = TestBed.inject(PrometheusService);
       spyOn(prometheusService, 'ifAlertmanagerConfigured').and.callFake((fn) => fn());
-      spyOn(prometheusService, 'list').and.callFake(() => of(alerts));
+      spyOn(prometheusService, 'getAlerts').and.callFake(() => of(alerts));
 
       alerts = [prometheus.createAlert('alert0')];
       service.refresh();
@@ -86,7 +133,7 @@ describe('PrometheusAlertService', () => {
     it('should notify on alert change', () => {
       alerts = [prometheus.createAlert('alert0', 'suppressed')];
       service.refresh();
-      expect(notificationService.queueNotifications).toHaveBeenCalledWith([
+      expect(notificationService.show).toHaveBeenCalledWith(
         new CdNotificationConfig(
           NotificationType.info,
           'alert0 (suppressed)',
@@ -94,7 +141,7 @@ describe('PrometheusAlertService', () => {
           undefined,
           'Prometheus'
         )
-      ]);
+      );
     });
 
     it('should notify on a new alert', () => {
@@ -133,22 +180,29 @@ describe('PrometheusAlertService', () => {
       service.refresh();
       alerts = [alert1, prometheus.createAlert('alert2')];
       service.refresh();
-      expect(notificationService.queueNotifications).toHaveBeenCalledWith([
-        new CdNotificationConfig(
-          NotificationType.error,
-          'alert2 (active)',
-          'alert2 is active ' + prometheus.createLink('http://alert2'),
-          undefined,
-          'Prometheus'
-        ),
-        new CdNotificationConfig(
-          NotificationType.success,
-          'alert0 (resolved)',
-          'alert0 is active ' + prometheus.createLink('http://alert0'),
-          undefined,
-          'Prometheus'
-        )
-      ]);
+      expect(notificationService.show).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('alert badge', () => {
+    beforeEach(() => {
+      service = TestBed.inject(PrometheusAlertService);
+
+      prometheusService = TestBed.inject(PrometheusService);
+      spyOn(prometheusService, 'ifAlertmanagerConfigured').and.callFake((fn) => fn());
+      spyOn(prometheusService, 'getAlerts').and.callFake(() => of(alerts));
+
+      alerts = [
+        prometheus.createAlert('alert0', 'active'),
+        prometheus.createAlert('alert1', 'suppressed'),
+        prometheus.createAlert('alert2', 'suppressed')
+      ];
+      service.refresh();
+    });
+
+    it('should count active alerts', () => {
+      service.refresh();
+      expect(service.activeAlerts).toBe(1);
     });
   });
 });

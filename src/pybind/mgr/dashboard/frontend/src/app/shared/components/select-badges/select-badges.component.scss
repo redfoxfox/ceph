@@ -1,8 +1,9 @@
-@import '../../../../defaults';
+@use './src/styles/vendor/variables' as vv;
 
-::ng-deep .select-menu-edit {
-  margin-left: -20px;
-}
 .badge-remove {
-  color: $color-solid-white;
+  color: vv.$white;
+}
+
+i.fa-pencil {
+  font-size: 1.1rem;
 }

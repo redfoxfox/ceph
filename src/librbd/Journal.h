@@ -8,15 +8,15 @@
 #include "include/Context.h"
 #include "include/interval_set.h"
 #include "include/rados/librados_fwd.hpp"
+#include "common/AsyncOpTracker.h"
 #include "common/Cond.h"
-#include "common/Mutex.h"
-#include "common/Cond.h"
-#include "common/WorkQueue.h"
+#include "common/RefCountedObj.h"
 #include "journal/Future.h"
 #include "journal/JournalMetadataListener.h"
 #include "journal/ReplayEntry.h"
 #include "journal/ReplayHandler.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 #include "librbd/journal/Types.h"
 #include "librbd/journal/TypeTraits.h"
 
@@ -26,10 +26,9 @@
 #include <atomic>
 #include <unordered_map>
 
+class ContextWQ;
 class SafeTimer;
-namespace journal {
-class Journaler;
-}
+namespace journal { class Journaler; }
 
 namespace librbd {
 
@@ -38,7 +37,7 @@ class ImageCtx;
 namespace journal { template <typename> class Replay; }
 
 template <typename ImageCtxT = ImageCtx>
-class Journal {
+class Journal : public RefCountedObject {
 public:
   /**
    * @verbatim
@@ -91,6 +90,8 @@ public:
   Journal(ImageCtxT &image_ctx);
   ~Journal();
 
+  static void get_work_queue(CephContext *cct, ContextWQ **work_queue);
+
   static bool is_journal_supported(ImageCtxT &image_ctx);
   static int create(librados::IoCtx &io_ctx, const std::string &image_id,
                     uint8_t order, uint8_t splay_width,
@@ -101,11 +102,11 @@ public:
   static void is_tag_owner(ImageCtxT *image_ctx, bool *is_tag_owner,
                            Context *on_finish);
   static void is_tag_owner(librados::IoCtx& io_ctx, std::string& image_id,
-                           bool *is_tag_owner, ContextWQ *op_work_queue,
+                           bool *is_tag_owner, asio::ContextWQ *op_work_queue,
                            Context *on_finish);
   static void get_tag_owner(librados::IoCtx& io_ctx, std::string& image_id,
                             std::string *mirror_uuid,
-                            ContextWQ *op_work_queue, Context *on_finish);
+                            asio::ContextWQ *op_work_queue, Context *on_finish);
   static int request_resync(ImageCtxT *image_ctx);
   static void promote(ImageCtxT *image_ctx, Context *on_finish);
   static void demote(ImageCtxT *image_ctx, Context *on_finish);
@@ -129,6 +130,8 @@ public:
                     Context *on_finish);
 
   void flush_commit_position(Context *on_finish);
+
+  void user_flushed();
 
   uint64_t append_write_event(uint64_t offset, size_t length,
                               const bufferlist &bl,
@@ -253,13 +256,6 @@ private:
     ReplayHandler(Journal *_journal) : journal(_journal) {
     }
 
-    void get() override {
-      // TODO
-    }
-    void put() override {
-      // TODO
-    }
-
     void handle_entries_available() override {
       journal->handle_replay_ready();
     }
@@ -270,10 +266,10 @@ private:
 
   ContextWQ *m_work_queue = nullptr;
   SafeTimer *m_timer = nullptr;
-  Mutex *m_timer_lock = nullptr;
+  ceph::mutex *m_timer_lock = nullptr;
 
   Journaler *m_journaler;
-  mutable Mutex m_lock;
+  mutable ceph::mutex m_lock = ceph::make_mutex("Journal<I>::m_lock");
   State m_state;
   uint64_t m_max_append_size = 0;
   uint64_t m_tag_class = 0;
@@ -287,9 +283,11 @@ private:
   ReplayHandler m_replay_handler;
   bool m_close_pending;
 
-  Mutex m_event_lock;
+  ceph::mutex m_event_lock = ceph::make_mutex("Journal<I>::m_event_lock");
   uint64_t m_event_tid;
   Events m_events;
+
+  std::atomic<bool> m_user_flushed = false;
 
   std::atomic<uint64_t> m_op_tid = { 0 };
   TidToFutures m_op_futures;
@@ -299,36 +297,31 @@ private:
 
   journal::Replay<ImageCtxT> *m_journal_replay;
 
-  util::AsyncOpTracker m_async_journal_op_tracker;
+  AsyncOpTracker m_async_journal_op_tracker;
 
   struct MetadataListener : public ::journal::JournalMetadataListener {
     Journal<ImageCtxT> *journal;
 
     MetadataListener(Journal<ImageCtxT> *journal) : journal(journal) { }
 
-    void handle_update(::journal::JournalMetadata *) override {
-      FunctionContext *ctx = new FunctionContext([this](int r) {
-        journal->handle_metadata_updated();
-      });
-      journal->m_work_queue->queue(ctx, 0);
-    }
+    void handle_update(::journal::JournalMetadata *) override;
   } m_metadata_listener;
 
   typedef std::set<journal::Listener *> Listeners;
   Listeners m_listeners;
-  Cond m_listener_cond;
+  ceph::condition_variable m_listener_cond;
   bool m_listener_notify = false;
 
   uint64_t m_refresh_sequence = 0;
 
-  bool is_journal_replaying(const Mutex &) const;
-  bool is_tag_owner(const Mutex &) const;
+  bool is_journal_replaying(const ceph::mutex &) const;
+  bool is_tag_owner(const ceph::mutex &) const;
 
   uint64_t append_io_events(journal::EventType event_type,
                             const Bufferlists &bufferlists,
                             uint64_t offset, size_t length, bool flush_entry,
                             int filter_ret_val);
-  Future wait_event(Mutex &lock, uint64_t tid, Context *on_safe);
+  Future wait_event(ceph::mutex &lock, uint64_t tid, Context *on_safe);
 
   void create_journaler();
   void destroy_journaler(int r);

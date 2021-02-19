@@ -1,26 +1,18 @@
-<cd-loading-panel *ngIf="loading && !error"
-                  i18n>Loading configuration...</cd-loading-panel>
-<cd-error-panel *ngIf="loading && error"
-                i18n>The configuration could not be loaded.</cd-error-panel>
-
-<div class="col-sm-12 col-lg-6"
-     *ngIf="!loading && !error">
+<div class="cd-col-form"
+     *cdFormLoading="loading">
   <form name="mgrModuleForm"
-        class="form-horizontal"
         #frm="ngForm"
         [formGroup]="mgrModuleForm"
         novalidate>
-    <div class="panel panel-default">
-      <div class="panel-heading">
-        <h3 class="panel-title" i18n>Edit Manager module</h3>
-      </div>
-      <div class="panel-body">
-        <div class="form-group"
-             [ngClass]="{'has-error': mgrModuleForm.showError(moduleOption.value.name, frm)}"
+    <div class="card">
+      <div class="card-header"
+           i18n>Edit Manager module</div>
+      <div class="card-body">
+        <div class="form-group row"
              *ngFor="let moduleOption of moduleOptions | keyvalue">
 
           <!-- Field label -->
-          <label class="control-label col-sm-3"
+          <label class="cd-col-form-label"
                  for="{{ moduleOption.value.name }}">
             {{ moduleOption.value.name }}
             <cd-helper *ngIf="moduleOption.value.long_desc || moduleOption.value.desc">
@@ -30,18 +22,20 @@
 
           <!-- Field control -->
           <!-- bool -->
-          <div class="col-sm-7"
+          <div class="cd-col-form-input"
                *ngIf="moduleOption.value.type === 'bool'">
-            <div class="checkbox checkbox-primary">
+            <div class="custom-control custom-checkbox">
               <input id="{{ moduleOption.value.name }}"
                      type="checkbox"
+                     class="custom-control-input"
                      formControlName="{{ moduleOption.value.name }}">
-              <label for="{{ moduleOption.value.name }}"></label>
+              <label class="custom-control-label"
+                     for="{{ moduleOption.value.name }}"></label>
             </div>
           </div>
 
           <!-- addr|str|uuid -->
-          <div class="col-sm-7"
+          <div class="cd-col-form-input"
                *ngIf="['addr', 'str', 'uuid'].includes(moduleOption.value.type)">
             <input id="{{ moduleOption.value.name }}"
                    class="form-control"
@@ -49,7 +43,7 @@
                    formControlName="{{ moduleOption.value.name }}"
                    *ngIf="moduleOption.value.enum_allowed.length === 0">
             <select id="{{ moduleOption.value.name }}"
-                    class="form-control"
+                    class="form-control custom-select"
                     formControlName="{{ moduleOption.value.name }}"
                     *ngIf="moduleOption.value.enum_allowed.length > 0">
               <option *ngFor="let value of moduleOption.value.enum_allowed"
@@ -57,16 +51,16 @@
                 {{ value }}
               </option>
             </select>
-            <span class="help-block"
+            <span class="invalid-feedback"
                   *ngIf="mgrModuleForm.showError(moduleOption.value.name, frm, 'invalidUuid')"
                   i18n>The entered value is not a valid UUID, e.g.: 67dcac9f-2c03-4d6c-b7bd-1210b3a259a8</span>
-            <span class="help-block"
+            <span class="invalid-feedback"
                   *ngIf="mgrModuleForm.showError(moduleOption.value.name, frm, 'pattern')"
                   i18n>The entered value needs to be a valid IP address.</span>
           </div>
 
           <!-- uint|int|size|secs -->
-          <div class="col-sm-7"
+          <div class="cd-col-form-input"
                *ngIf="['uint', 'int', 'size', 'secs'].includes(moduleOption.value.type)">
             <input id="{{ moduleOption.value.name }}"
                    class="form-control"
@@ -74,49 +68,42 @@
                    formControlName="{{ moduleOption.value.name }}"
                    min="{{ moduleOption.value.min }}"
                    max="{{ moduleOption.value.max }}">
-            <span class="help-block"
+            <span class="invalid-feedback"
                   *ngIf="mgrModuleForm.showError(moduleOption.value.name, frm, 'required')"
                   i18n>This field is required.</span>
-            <span class="help-block"
+            <span class="invalid-feedback"
                   *ngIf="mgrModuleForm.showError(moduleOption.value.name, frm, 'max')"
                   i18n>The entered value is too high! It must be lower or equal to {{ moduleOption.value.max }}.</span>
-            <span class="help-block"
+            <span class="invalid-feedback"
                   *ngIf="mgrModuleForm.showError(moduleOption.value.name, frm, 'min')"
                   i18n>The entered value is too low! It must be greater or equal to {{ moduleOption.value.min }}.</span>
-            <span class="help-block"
+            <span class="invalid-feedback"
                   *ngIf="mgrModuleForm.showError(moduleOption.value.name, frm, 'pattern')"
                   i18n>The entered value needs to be a number.</span>
           </div>
 
           <!-- float -->
-          <div class="col-sm-7"
+          <div class="cd-col-form-input"
                *ngIf="moduleOption.value.type === 'float'">
             <input id="{{ moduleOption.value.name }}"
                    class="form-control"
                    type="number"
                    formControlName="{{ moduleOption.value.name }}">
-            <span class="help-block"
+            <span class="invalid-feedback"
                   *ngIf="mgrModuleForm.showError(moduleOption.value.name, frm, 'required')"
                   i18n>This field is required.</span>
-            <span class="help-block"
+            <span class="invalid-feedback"
                   *ngIf="mgrModuleForm.showError(moduleOption.value.name, frm, 'pattern')"
                   i18n>The entered value needs to be a number or decimal.</span>
           </div>
 
         </div>
       </div>
-      <div class="panel-footer">
-        <div class="button-group text-right">
-          <cd-submit-button type="button"
-                            (submitAction)="onSubmit()"
-                            [form]="mgrModuleForm">
-            <ng-container i18n>Update</ng-container>
-          </cd-submit-button>
-          <button type="button"
-                  class="btn btn-sm btn-default"
-                  routerLink="/mgr-modules"
-                  i18n>Back</button>
-        </div>
+      <div class="card-footer">
+        <cd-form-button-panel (submitActionEvent)="onSubmit()"
+                              [form]="mgrModuleForm"
+                              [submitText]="actionLabels.UPDATE"
+                              wrappingClass="text-right"></cd-form-button-panel>
       </div>
     </div>
   </form>

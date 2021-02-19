@@ -48,7 +48,7 @@
 #include "common/ceph_argparse.h"
 #include "common/Cycles.h"
 #include "common/Cond.h"
-#include "common/Mutex.h"
+#include "common/ceph_mutex.h"
 #include "common/Thread.h"
 #include "common/Timer.h"
 #include "msg/async/Event.h"
@@ -159,11 +159,11 @@ double atomic_int_set()
 double mutex_nonblock()
 {
   int count = 1000000;
-  Mutex m("mutex_nonblock::m");
+  ceph::mutex m = ceph::make_mutex("mutex_nonblock::m");
   uint64_t start = Cycles::rdtsc();
   for (int i = 0; i < count; i++) {
-    m.Lock();
-    m.Unlock();
+    m.lock();
+    m.unlock();
   }
   uint64_t stop = Cycles::rdtsc();
   return Cycles::to_seconds(stop - start)/count;
@@ -246,7 +246,7 @@ double buffer_copy()
   char copy[10];
   uint64_t start = Cycles::rdtsc();
   for (int i = 0; i < count; i++) {
-    b.copy(2, 6, copy);
+    b.cbegin(2).copy(6, copy);
   }
   uint64_t stop = Cycles::rdtsc();
   return Cycles::to_seconds(stop - start)/count;
@@ -305,11 +305,11 @@ double buffer_iterator()
 
 // Implements the CondPingPong test.
 class CondPingPong {
-  Mutex mutex;
-  Cond cond;
-  int prod;
-  int cons;
-  const int count;
+  ceph::mutex mutex = ceph::make_mutex("CondPingPong::mutex");
+  ceph::condition_variable cond;
+  int prod = 0;
+  int cons = 0;
+  const int count = 10000;
 
   class Consumer : public Thread {
     CondPingPong *p;
@@ -322,7 +322,7 @@ class CondPingPong {
   } consumer;
 
  public:
-  CondPingPong(): mutex("CondPingPong::mutex"), prod(0), cons(0), count(10000), consumer(this) {}
+  CondPingPong(): consumer(this) {}
 
   double run() {
     consumer.create("consumer");
@@ -334,22 +334,20 @@ class CondPingPong {
   }
 
   void produce() {
-    Mutex::Locker l(mutex);
+    std::unique_lock l{mutex};
     while (cons < count) {
-      while (cons < prod)
-        cond.Wait(mutex);
+      cond.wait(l, [this] { return cons >= prod; });
       ++prod;
-      cond.Signal();
+      cond.notify_all();
     }
   }
 
   void consume() {
-    Mutex::Locker l(mutex);
+    std::unique_lock l{mutex};
     while (cons < count) {
-      while (cons == prod)
-        cond.Wait(mutex);
+      cond.wait(l, [this] { return cons != prod; });
       ++cons;
-      cond.Signal();
+      cond.notify_all();
     }
   }
 };
@@ -380,6 +378,18 @@ double div32()
                          "=a"(quotient), "=d"(remainder) :
                          "a"(numeratorLo), "d"(numeratorHi), "r"(divisor) :
                          "cc");
+  }
+  uint64_t stop = Cycles::rdtsc();
+  return Cycles::to_seconds(stop - start)/count;
+#elif defined(__aarch64__)
+  int count = 1000000;
+  uint64_t start = Cycles::rdtsc();
+  uint64_t numerator = 0xa5a5a5a555aa55aaUL;
+  uint32_t divisor = 0xaa55aa55U;
+  uint32_t result;
+  for (int i = 0; i < count; i++) {
+    asm volatile("udiv %0, %1, %2" : "=r"(result) :
+                  "r"(numerator), "r"(divisor));
   }
   uint64_t stop = Cycles::rdtsc();
   return Cycles::to_seconds(stop - start)/count;
@@ -612,12 +622,20 @@ static inline void prefetch(const void *object, uint64_t num_bytes)
     for (uint64_t i = 0; i < offset + num_bytes; i += 64)
         _mm_prefetch(p + i, _MM_HINT_T0);
 }
+#elif defined(__aarch64__)
+static inline void prefetch(const void *object, uint64_t num_bytes)
+{
+    uint64_t offset = reinterpret_cast<uint64_t>(object) & 0x3fUL;
+    const char* ptr = reinterpret_cast<const char*>(object) - offset;
+    for (uint64_t i = 0; i < offset + num_bytes; i += 64, ptr += 64)
+        asm volatile("prfm pldl1keep, %a0\n" : : "p" (ptr));
+}
 #endif
 
 // Measure the cost of the prefetch instruction.
 double perf_prefetch()
 {
-#ifdef HAVE_SSE
+#if defined(HAVE_SSE) || defined(__aarch64__)
   uint64_t total_ticks = 0;
   int count = 10;
   char buf[16 * 64];
@@ -694,6 +712,14 @@ double lfence()
   }
   uint64_t stop = Cycles::rdtsc();
   return Cycles::to_seconds(stop - start)/count;
+#elif defined(__aarch64__)
+  int count = 1000000;
+  uint64_t start = Cycles::rdtsc();
+  for (int i = 0; i < count; i++) {
+    asm volatile("dmb ishld" ::: "memory");
+  }
+  uint64_t stop = Cycles::rdtsc();
+  return Cycles::to_seconds(stop - start)/count;
 #else
   return -1;
 #endif
@@ -707,6 +733,14 @@ double sfence()
   uint64_t start = Cycles::rdtsc();
   for (int i = 0; i < count; i++) {
     __asm__ __volatile__("sfence" ::: "memory");
+  }
+  uint64_t stop = Cycles::rdtsc();
+  return Cycles::to_seconds(stop - start)/count;
+#elif defined(__aarch64__)
+  int count = 1000000;
+  uint64_t start = Cycles::rdtsc();
+  for (int i = 0; i < count; i++) {
+    asm volatile("dmb ishst" ::: "memory");
   }
   uint64_t stop = Cycles::rdtsc();
   return Cycles::to_seconds(stop - start)/count;
@@ -759,14 +793,14 @@ class FakeContext : public Context {
 double perf_timer()
 {
   int count = 1000000;
-  Mutex lock("perf_timer::lock");
+  ceph::mutex lock = ceph::make_mutex("perf_timer::lock");
   SafeTimer timer(g_ceph_context, lock);
   FakeContext **c = new FakeContext*[count];
   for (int i = 0; i < count; i++) {
     c[i] = new FakeContext();
   }
   uint64_t start = Cycles::rdtsc();
-  Mutex::Locker l(lock);
+  std::lock_guard l{lock};
   for (int i = 0; i < count; i++) {
     if (timer.add_event_after(12345, c[i])) {
       timer.cancel_event(c[i]);

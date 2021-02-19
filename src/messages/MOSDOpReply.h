@@ -29,9 +29,7 @@
  *
  */
 
-class MOSDOpReply : public MessageInstance<MOSDOpReply> {
-public:
-  friend factory;
+class MOSDOpReply final : public Message {
 private:
   static constexpr int HEAD_VERSION = 8;
   static constexpr int COMPAT_VERSION = 2;
@@ -101,12 +99,22 @@ public:
   void claim_op_out_data(std::vector<OSDOp>& o) {
     ceph_assert(ops.size() == o.size());
     for (unsigned i = 0; i < o.size(); i++) {
-      ops[i].outdata.claim(o[i].outdata);
+      ops[i].outdata = std::move(o[i].outdata);
     }
   }
   void claim_ops(std::vector<OSDOp>& o) {
     o.swap(ops);
     bdata_encode = false;
+  }
+  void set_op_returns(const std::vector<pg_log_op_return_item_t>& op_returns) {
+    if (op_returns.size()) {
+      ceph_assert(ops.empty() || ops.size() == op_returns.size());
+      ops.resize(op_returns.size());
+      for (unsigned i = 0; i < op_returns.size(); ++i) {
+	ops[i].rval = op_returns[i].rval;
+	ops[i].outdata = op_returns[i].bl;
+      }
+    }
   }
 
   /**
@@ -128,13 +136,13 @@ public:
 
 public:
   MOSDOpReply()
-    : MessageInstance(CEPH_MSG_OSD_OPREPLY, HEAD_VERSION, COMPAT_VERSION),
+    : Message{CEPH_MSG_OSD_OPREPLY, HEAD_VERSION, COMPAT_VERSION},
     bdata_encode(false) {
     do_redirect = false;
   }
   MOSDOpReply(const MOSDOp *req, int r, epoch_t e, int acktype,
 	      bool ignore_out_data)
-    : MessageInstance(CEPH_MSG_OSD_OPREPLY, HEAD_VERSION, COMPAT_VERSION),
+    : Message{CEPH_MSG_OSD_OPREPLY, HEAD_VERSION, COMPAT_VERSION},
       oid(req->hobj.oid), pgid(req->pgid.pgid), ops(req->ops),
       bdata_encode(false) {
 
@@ -147,15 +155,17 @@ public:
     retry_attempt = req->get_retry_attempt();
     do_redirect = false;
 
-    // zero out ops payload_len and possibly out data
     for (unsigned i = 0; i < ops.size(); i++) {
-      ops[i].op.payload_len = 0;
-      if (ignore_out_data)
+      // zero out input data
+      ops[i].indata.clear();
+      if (ignore_out_data) {
+	// original request didn't set the RETURNVEC flag
 	ops[i].outdata.clear();
+      }
     }
   }
 private:
-  ~MOSDOpReply() override {}
+  ~MOSDOpReply() final {}
 
 public:
   void encode_payload(uint64_t features) override {
@@ -334,6 +344,9 @@ public:
     out << ")";
   }
 
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 

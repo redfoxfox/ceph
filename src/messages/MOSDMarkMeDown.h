@@ -17,9 +17,7 @@
 
 #include "messages/PaxosServiceMessage.h"
 
-class MOSDMarkMeDown : public MessageInstance<MOSDMarkMeDown, PaxosServiceMessage> {
-public:
-  friend factory;
+class MOSDMarkMeDown final : public PaxosServiceMessage {
 private:
   static constexpr int HEAD_VERSION = 3;
   static constexpr int COMPAT_VERSION = 3;
@@ -32,21 +30,22 @@ private:
   bool request_ack = false;          // ack requested
 
   MOSDMarkMeDown()
-    : MessageInstance(MSG_OSD_MARK_ME_DOWN, 0,
-			  HEAD_VERSION, COMPAT_VERSION) { }
+    : PaxosServiceMessage{MSG_OSD_MARK_ME_DOWN, 0,
+			  HEAD_VERSION, COMPAT_VERSION} { }
   MOSDMarkMeDown(const uuid_d &fs, int osd, const entity_addrvec_t& av,
 		 epoch_t e, bool request_ack)
-    : MessageInstance(MSG_OSD_MARK_ME_DOWN, e,
-			  HEAD_VERSION, COMPAT_VERSION),
+    : PaxosServiceMessage{MSG_OSD_MARK_ME_DOWN, e,
+			  HEAD_VERSION, COMPAT_VERSION},
       fsid(fs), target_osd(osd), target_addrs(av),
       epoch(e), request_ack(request_ack) {}
  private:
-  ~MOSDMarkMeDown() override {}
+  ~MOSDMarkMeDown() final {}
 
 public: 
   epoch_t get_epoch() const { return epoch; }
 
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     paxos_decode(p);
     if (header.version <= 2) {
@@ -90,7 +89,7 @@ public:
   }
 
   std::string_view get_type_name() const override { return "MOSDMarkMeDown"; }
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "MOSDMarkMeDown("
 	<< "request_ack=" << request_ack
 	<< ", osd." << target_osd
@@ -98,6 +97,9 @@ public:
 	<< ", fsid=" << fsid
 	<< ")";
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

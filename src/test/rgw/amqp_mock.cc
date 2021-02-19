@@ -3,11 +3,13 @@
 
 #include "amqp_mock.h"
 #include <amqp.h>
+#include <amqp_ssl_socket.h>
 #include <amqp_tcp_socket.h>
 #include <string>
 #include <stdarg.h>
 #include <mutex>
 #include <boost/lockfree/queue.hpp>
+#include <openssl/ssl.h>
 
 namespace amqp_mock {
 
@@ -39,6 +41,19 @@ void set_valid_user(const std::string& user, const std::string& password) {
   VALID_PASSWORD = password;
 }
 
+std::atomic<unsigned> g_tag_skip = 0;
+std::atomic<int> g_multiple = 0;
+
+void set_multiple(unsigned tag_skip) {
+    g_multiple = 1;
+    g_tag_skip = tag_skip;
+}
+
+void reset_multiple() {
+    g_multiple = 0;
+    g_tag_skip = 0;
+}
+
 bool FAIL_NEXT_WRITE(false);
 bool FAIL_NEXT_READ(false);
 bool REPLY_ACK(true);
@@ -61,6 +76,7 @@ struct amqp_connection_state_t_ {
   amqp_rpc_reply_t reply;
   amqp_basic_ack_t ack;
   amqp_basic_nack_t nack;
+  bool use_ssl;
   // ctor
   amqp_connection_state_t_() : 
     socket(nullptr), 
@@ -73,15 +89,18 @@ struct amqp_connection_state_t_ {
     login_called(false),
     ack_list(1024),
     nack_list(1024),
-    delivery_tag(1) {
+    delivery_tag(1),
+    use_ssl(false) {
       reply.reply_type = AMQP_RESPONSE_NONE;
     }
 };
 
 struct amqp_socket_t_ {
+  void *klass;
+  void *ssl_ctx;
   bool open_called;
   // ctor
-  amqp_socket_t_() : open_called(false) {
+  amqp_socket_t_() : klass(nullptr), ssl_ctx(nullptr), open_called(false) {
   }
 };
 
@@ -105,6 +124,35 @@ int amqp_destroy_connection(amqp_connection_state_t state) {
 amqp_socket_t* amqp_tcp_socket_new(amqp_connection_state_t state) {
   state->socket = new amqp_socket_t;
   return state->socket;
+}
+
+amqp_socket_t* amqp_ssl_socket_new(amqp_connection_state_t state) {
+  state->socket = new amqp_socket_t;
+  state->use_ssl = true;
+  return state->socket;
+}
+
+int amqp_ssl_socket_set_cacert(amqp_socket_t *self, const char *cacert) {
+  // do nothing
+  return AMQP_STATUS_OK;
+}
+
+void amqp_ssl_socket_set_verify_peer(amqp_socket_t *self, amqp_boolean_t verify) {
+  // do nothing
+}
+
+void amqp_ssl_socket_set_verify_hostname(amqp_socket_t *self, amqp_boolean_t verify) {
+  // do nothing
+}
+
+#if AMQP_VERSION >= AMQP_VERSION_CODE(0, 10, 0, 1)
+void* amqp_ssl_socket_get_context(amqp_socket_t *self) {
+  return nullptr;
+}
+#endif
+
+int SSL_CTX_set_default_verify_paths(SSL_CTX *ctx) {
+  return 1;
 }
 
 int amqp_socket_open(amqp_socket_t *self, const char *host, int port) {
@@ -250,28 +298,49 @@ int amqp_simple_wait_frame_noblock(amqp_connection_state_t state, amqp_frame_t *
     // "wait" for queue
     usleep(tv->tv_sec*1000000+tv->tv_usec);
     // read from queue
-    if (REPLY_ACK) {
-      if (state->ack_list.pop(state->ack)) {
-        decoded_frame->frame_type = AMQP_FRAME_METHOD;
+    if (g_multiple) {
+      // pop multiples and reply once at the end
+      for (auto i = 0U; i < g_tag_skip; ++i) {
+        if (REPLY_ACK && !state->ack_list.pop(state->ack)) {
+          // queue is empty
+          return AMQP_STATUS_TIMEOUT;
+        } else if (!REPLY_ACK && !state->nack_list.pop(state->nack)) {
+          // queue is empty
+          return AMQP_STATUS_TIMEOUT;
+        }
+      }
+      if (REPLY_ACK) {
+        state->ack.multiple = g_multiple;
         decoded_frame->payload.method.id = AMQP_BASIC_ACK_METHOD;
         decoded_frame->payload.method.decoded = &state->ack;
-        state->reply.reply_type = AMQP_RESPONSE_NORMAL;
-        return AMQP_STATUS_OK;
       } else {
-        // queue is empty
-        return AMQP_STATUS_TIMEOUT;
-      }
-    } else {
-      if (state->nack_list.pop(state->nack)) {
-        decoded_frame->frame_type = AMQP_FRAME_METHOD;
+        state->nack.multiple = g_multiple;
         decoded_frame->payload.method.id = AMQP_BASIC_NACK_METHOD;
         decoded_frame->payload.method.decoded = &state->nack;
-        state->reply.reply_type = AMQP_RESPONSE_NORMAL;
-        return AMQP_STATUS_OK;
-      } else {
-        // queue is empty
-        return AMQP_STATUS_TIMEOUT;
       }
+      decoded_frame->frame_type = AMQP_FRAME_METHOD;
+      state->reply.reply_type = AMQP_RESPONSE_NORMAL;
+      reset_multiple();
+      return AMQP_STATUS_OK;
+    }
+    // pop replies one by one
+    if (REPLY_ACK && state->ack_list.pop(state->ack)) {
+      state->ack.multiple = g_multiple;
+      decoded_frame->frame_type = AMQP_FRAME_METHOD;
+      decoded_frame->payload.method.id = AMQP_BASIC_ACK_METHOD;
+      decoded_frame->payload.method.decoded = &state->ack;
+      state->reply.reply_type = AMQP_RESPONSE_NORMAL;
+      return AMQP_STATUS_OK;
+    } else if (!REPLY_ACK && state->nack_list.pop(state->nack)) {
+      state->nack.multiple = g_multiple;
+      decoded_frame->frame_type = AMQP_FRAME_METHOD;
+      decoded_frame->payload.method.id = AMQP_BASIC_NACK_METHOD;
+      decoded_frame->payload.method.decoded = &state->nack;
+      state->reply.reply_type = AMQP_RESPONSE_NORMAL;
+      return AMQP_STATUS_OK;
+    } else {
+      // queue is empty
+      return AMQP_STATUS_TIMEOUT;
     }
   }
   return AMQP_STATUS_CONNECTION_CLOSED;

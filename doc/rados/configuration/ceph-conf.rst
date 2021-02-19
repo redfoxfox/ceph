@@ -4,22 +4,26 @@
  Configuring Ceph
 ==================
 
-When you start the Ceph service, the initialization process activates a series
+When Ceph services start, the initialization process activates a series
 of daemons that run in the background. A :term:`Ceph Storage Cluster` runs 
-three types of daemons:
+at a minimum three types of daemons:
 
 - :term:`Ceph Monitor` (``ceph-mon``)
 - :term:`Ceph Manager` (``ceph-mgr``)
 - :term:`Ceph OSD Daemon` (``ceph-osd``)
 
-Ceph Storage Clusters that support the :term:`Ceph Filesystem` run at
+Ceph Storage Clusters that support the :term:`Ceph File System` also run at
 least one :term:`Ceph Metadata Server` (``ceph-mds``). Clusters that
-support :term:`Ceph Object Storage` run Ceph Gateway daemons
-(``radosgw``).
+support :term:`Ceph Object Storage` run Ceph RADOS Gateway daemons
+(``radosgw``) as well.
 
-Each daemon has a series of configuration options, each of which has a
-default values.  You may adjust the behavior of the system by changing these
-configuration options.
+Each daemon has a number of configuration options, each of which has a
+default value.  You may adjust the behavior of the system by changing these
+configuration options.  Be careful to understand the consequences before
+overriding default values, as it is possible to significantly degrade the
+performance and stability of your cluster.  Also note that default values
+sometimes change between releases, so it is best to review the version of
+this documentation that aligns with your Ceph release.
 
 Option names
 ============
@@ -33,7 +37,9 @@ When option names are specified on the command line, either underscore
 ``--mon-host`` is equivalent to ``--mon_host``).
 
 When option names appear in configuration files, spaces can also be
-used in place of underscore or dash.
+used in place of underscore or dash.  We suggest, though, that for
+clarity and convenience you consistently use underscores, as we do
+throughout this documentation.
 
 Config sources
 ==============
@@ -56,6 +62,8 @@ cluster to retrieve configuration stored centrally for the entire
 cluster.  Once a complete view of the configuration is available, the
 daemon or process startup will proceed.
 
+.. _bootstrap-options:
+
 Bootstrap options
 -----------------
 
@@ -65,7 +73,12 @@ configuration, they may need to be stored locally on the node and set
 in a local configuration file.  These options include:
 
   - ``mon_host``, the list of monitors for the cluster
-  - ``mon_dns_serv_name`` (default: `ceph-mon`), the name of the DNS
+  - ``mon_host_override``, the list of monitors for the cluster to
+    **initially** contact when beginning a new instance of communication with the
+    Ceph cluster.  This overrides the known monitor list derived from MonMap
+    updates sent to older Ceph instances (like librados cluster handles).  It is
+    expected this option is primarily useful for debugging.
+  - ``mon_dns_srv_name`` (default: `ceph-mon`), the name of the DNS
     SRV record to check to identify the cluster monitors via DNS
   - ``mon_data``, ``osd_data``, ``mds_data``, ``mgr_data``, and
     similar options that define which local directory the daemon
@@ -144,12 +157,12 @@ These sections include:
               the Ceph Storage Cluster, and override the same setting in
               ``global``.
 
-:Example: ``mds_cache_size = 10G``
+:Example: ``mds_cache_memory_limit = 10G``
 
 ``client``
 
 :Description: Settings under ``client`` affect all Ceph Clients
-              (e.g., mounted Ceph Filesystems, mounted Ceph Block Devices,
+              (e.g., mounted Ceph File Systems, mounted Ceph Block Devices,
               etc.) as well as Rados Gateway (RGW) daemons.
 
 :Example: ``objecter_inflight_ops = 512``
@@ -165,6 +178,9 @@ Settings in the most-specific section take precedence, so for example
 if the same option is specified in both ``global``, ``mon``, and
 ``mon.foo`` on the same source (i.e., in the same configurationfile),
 the ``mon.foo`` value will be used.
+
+If multiple values of the same configuration option are specified in the same
+section, the last value wins.
 
 Note that values from the local configuration file always take
 precedence over values from the monitor configuration database,
@@ -241,8 +257,8 @@ following locations:
 
 where ``$cluster`` is the cluster's name (default ``ceph``).
 
-The Ceph configuration file uses an *ini* style syntax. You can add comments
-by preceding comments with a pound sign (#) or a semi-colon (;).  For example:
+The Ceph configuration file uses an *ini* style syntax. You can add comment
+text after a pound sign (#) or a semi-colon (;).  For example:
 
 .. code-block:: ini
 
@@ -265,18 +281,130 @@ surrounded by square brackets. For example,
 .. code-block:: ini
 
 	[global]
-	debug ms = 0
+	debug_ms = 0
 	
 	[osd]
-	debug ms = 1
+	debug_ms = 1
 
 	[osd.1]
-	debug ms = 10
+	debug_ms = 10
 
 	[osd.2]
-	debug ms = 10
+	debug_ms = 10
 
 
+Config file option values
+-------------------------
+
+The value of a configuration option is a string. If it is too long to
+fit in a single line, you can put a backslash (``\``) at the end of line
+as the line continuation marker, so the value of the option will be
+the string after ``=`` in current line combined with the string in the next
+line::
+
+  [global]
+  foo = long long ago\
+  long ago
+
+In the example above, the value of "``foo``" would be "``long long ago long ago``".
+
+Normally, the option value ends with a new line, or a comment, like
+
+.. code-block:: ini
+
+    [global]
+    obscure_one = difficult to explain # I will try harder in next release
+    simpler_one = nothing to explain
+
+In the example above, the value of "``obscure one``" would be "``difficult to explain``";
+and the value of "``simpler one`` would be "``nothing to explain``".
+
+If an option value contains spaces, and we want to make it explicit, we
+could quote the value using single or double quotes, like
+
+.. code-block:: ini
+
+    [global]
+    line = "to be, or not to be"
+
+Certain characters are not allowed to be present in the option values directly.
+They are ``=``, ``#``, ``;`` and ``[``. If we have to, we need to escape them,
+like
+
+.. code-block:: ini
+
+    [global]
+    secret = "i love \# and \["
+
+Every configuration option is typed with one of the types below:
+
+``int``
+
+:Description: 64-bit signed integer, Some SI prefixes are supported, like "K", "M", "G",
+              "T", "P", "E", meaning, respectively, 10\ :sup:`3`, 10\ :sup:`6`,
+              10\ :sup:`9`, etc.  And "B" is the only supported unit. So, "1K", "1M", "128B" and "-1" are all valid
+              option values. Some times, a negative value implies "unlimited" when it comes to
+              an option for threshold or limit.
+:Example: ``42``, ``-1``
+
+``uint``
+
+:Description: It is almost identical to ``integer``. But a negative value will be rejected.
+:Example: ``256``, ``0``
+
+``str``
+
+:Description: Free style strings encoded in UTF-8, but some characters are not allowed. Please
+              reference the above notes for the details.
+:Example: ``"hello world"``, ``"i love \#"``, ``yet-another-name``
+
+``boolean``
+
+:Description: one of the two values ``true`` or ``false``. But an integer is also accepted,
+              where "0" implies ``false``, and any non-zero values imply ``true``.
+:Example: ``true``, ``false``, ``1``, ``0``
+
+``addr``
+
+:Description: a single address optionally prefixed with ``v1``, ``v2`` or ``any`` for the messenger
+              protocol. If the prefix is not specified, ``v2`` protocol is used. Please see
+              :ref:`address_formats` for more details.
+:Example: ``v1:1.2.3.4:567``, ``v2:1.2.3.4:567``, ``1.2.3.4:567``, ``2409:8a1e:8fb6:aa20:1260:4bff:fe92:18f5::567``, ``[::1]:6789``
+
+``addrvec``
+
+:Description: a set of addresses separated by ",". The addresses can be optionally quoted with ``[`` and ``]``.
+:Example: ``[v1:1.2.3.4:567,v2:1.2.3.4:568]``, ``v1:1.2.3.4:567,v1:1.2.3.14:567``  ``[2409:8a1e:8fb6:aa20:1260:4bff:fe92:18f5::567], [2409:8a1e:8fb6:aa20:1260:4bff:fe92:18f5::568]``
+
+``uuid``
+
+:Description: the string format of a uuid defined by `RFC4122 <https://www.ietf.org/rfc/rfc4122.txt>`_.
+              And some variants are also supported, for more details, see
+              `Boost document <https://www.boost.org/doc/libs/1_74_0/libs/uuid/doc/uuid.html#String%20Generator>`_.
+:Example: ``f81d4fae-7dec-11d0-a765-00a0c91e6bf6``
+
+``size``
+
+:Description: denotes a 64-bit unsigned integer. Both SI prefixes and IEC prefixes are
+              supported. And "B" is the only supported unit. A negative value will be
+              rejected.
+:Example: ``1Ki``, ``1K``, ``1KiB`` and ``1B``.
+
+``secs``
+
+:Description: denotes a duration of time. By default the unit is second if not specified.
+              Following units of time are supported:
+
+              * second: "s", "sec", "second", "seconds"
+              * minute: "m", "min", "minute", "minutes"
+              * hour: "hs", "hr", "hour", "hours"
+              * day: "d", "day", "days"
+              * week: "w", "wk", "week", "weeks"
+              * month: "mo", "month", "months"
+              * year: "y", "yr", "year", "years"
+:Example: ``1 m``, ``1m`` and ``1 week``
+
+.. _ceph-conf-database:
 
 Monitor configuration database
 ==============================
@@ -489,3 +617,35 @@ will report the value of a single option.
 
 
 
+Changes since Nautilus
+======================
+
+With the Octopus release We changed the way the configuration file is parsed.
+These changes are as follows:
+
+- Repeated configuration options are allowed, and no warnings will be printed.
+  The value of the last one is used, which means that the setting last in the file
+  is the one that takes effect. Before this change, we would print warning messages
+  when lines with duplicated options were encountered, like::
+
+    warning line 42: 'foo' in section 'bar' redefined
+
+- Invalid UTF-8 options were ignored with warning messages. But since Octopus,
+  they are treated as fatal errors.
+
+- Backslash ``\`` is used as the line continuation marker to combine the next
+  line with current one. Before Octopus, it was required to follow a backslash with
+  a non-empty line. But in Octopus, an empty line following a backslash is now allowed.
+
+- In the configuration file, each line specifies an individual configuration
+  option. The option's name and its value are separated with ``=``, and the
+  value may be quoted using single or double quotes. If an invalid
+  configuration is specified, we will treat it as an invalid configuration
+  file ::
+
+    bad option ==== bad value
+
+- Before Octopus, if no section name was specified in the configuration file,
+  all options would be set as though they were within the ``global`` section. This is
+  now discouraged. Since Octopus, only a single option is allowed for
+  configuration files without a section name.

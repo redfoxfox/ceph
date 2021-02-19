@@ -1,46 +1,91 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
-import cherrypy
-import jwt
+import http.cookies
+import logging
+import sys
 
-from . import ApiController, RESTController
-from .. import logger, mgr
-from ..exceptions import DashboardException
+from .. import mgr
+from ..exceptions import InvalidCredentialsError, UserDoesNotExist
 from ..services.auth import AuthManager, JwtManager
-from ..services.access_control import UserDoesNotExist
+from ..settings import Settings
+from . import ApiController, ControllerDoc, EndpointDoc, RESTController, \
+    allow_empty_body, set_cookies
+
+# Python 3.8 introduced `samesite` attribute:
+# https://docs.python.org/3/library/http.cookies.html#morsel-objects
+if sys.version_info < (3, 8):
+    http.cookies.Morsel._reserved["samesite"] = "SameSite"  # type: ignore  # pylint: disable=W0212
+
+logger = logging.getLogger('controllers.auth')
+
+AUTH_CHECK_SCHEMA = {
+    "username": (str, "Username"),
+    "permissions": ({
+        "cephfs": ([str], "")
+    }, "List of permissions acquired"),
+    "sso": (bool, "Uses single sign on?"),
+    "pwdUpdateRequired": (bool, "Is password update required?")
+}
 
 
 @ApiController('/auth', secure=False)
+@ControllerDoc("Initiate a session with Ceph", "Auth")
 class Auth(RESTController):
     """
     Provide authenticates and returns JWT token.
     """
-
     def create(self, username, password):
-        user_perms = AuthManager.authenticate(username, password)
-        if user_perms is not None:
-            logger.debug('Login successful')
-            token = JwtManager.gen_token(username)
-            token = token.decode('utf-8')
-            logger.debug("JWT Token: %s", token)
-            cherrypy.response.headers['Authorization'] = "Bearer: {}".format(token)
-            return {
-                'token': token,
-                'username': username,
-                'permissions': user_perms
-            }
+        user_data = AuthManager.authenticate(username, password)
+        user_perms, pwd_expiration_date, pwd_update_required = None, None, None
+        max_attempt = Settings.ACCOUNT_LOCKOUT_ATTEMPTS
+        if max_attempt == 0 or mgr.ACCESS_CTRL_DB.get_attempt(username) < max_attempt:
+            if user_data:
+                user_perms = user_data.get('permissions')
+                pwd_expiration_date = user_data.get('pwdExpirationDate', None)
+                pwd_update_required = user_data.get('pwdUpdateRequired', False)
 
-        logger.debug('Login failed')
-        raise DashboardException(msg='Invalid credentials',
-                                 code='invalid_credentials',
-                                 component='auth')
+            if user_perms is not None:
+                url_prefix = 'https' if mgr.get_localized_module_option('ssl') else 'http'
+
+                logger.info('Login successful: %s', username)
+                mgr.ACCESS_CTRL_DB.reset_attempt(username)
+                mgr.ACCESS_CTRL_DB.save()
+                token = JwtManager.gen_token(username)
+                token = token.decode('utf-8')
+                set_cookies(url_prefix, token)
+                return {
+                    'token': token,
+                    'username': username,
+                    'permissions': user_perms,
+                    'pwdExpirationDate': pwd_expiration_date,
+                    'sso': mgr.SSO_DB.protocol == 'saml2',
+                    'pwdUpdateRequired': pwd_update_required
+                }
+            mgr.ACCESS_CTRL_DB.increment_attempt(username)
+            mgr.ACCESS_CTRL_DB.save()
+        else:
+            try:
+                user = mgr.ACCESS_CTRL_DB.get_user(username)
+                user.enabled = False
+                mgr.ACCESS_CTRL_DB.save()
+                logging.warning('Maximum number of unsuccessful log-in attempts '
+                                '(%d) reached for '
+                                'username "%s" so the account was blocked. '
+                                'An administrator will need to re-enable the account',
+                                max_attempt, username)
+                raise InvalidCredentialsError
+            except UserDoesNotExist:
+                raise InvalidCredentialsError
+        logger.info('Login failed: %s', username)
+        raise InvalidCredentialsError
 
     @RESTController.Collection('POST')
+    @allow_empty_body
     def logout(self):
         logger.debug('Logout successful')
         token = JwtManager.get_token_from_header()
-        JwtManager.blacklist_token(token)
+        JwtManager.blocklist_token(token)
         redirect_url = '#/login'
         if mgr.SSO_DB.protocol == 'saml2':
             redirect_url = 'auth/saml2/slo'
@@ -53,31 +98,20 @@ class Auth(RESTController):
             return 'auth/saml2/login'
         return '#/login'
 
-    @RESTController.Collection('POST')
+    @RESTController.Collection('POST', query_params=['token'])
+    @EndpointDoc("Check token Authentication",
+                 parameters={'token': (str, 'Authentication Token')},
+                 responses={201: AUTH_CHECK_SCHEMA})
     def check(self, token):
         if token:
-            try:
-                token = JwtManager.decode_token(token)
-                if not JwtManager.is_blacklisted(token['jti']):
-                    user = AuthManager.get_user(token['username'])
-                    if user.lastUpdate <= token['iat']:
-                        return {
-                            'username': user.username,
-                            'permissions': user.permissions_dict(),
-                        }
-
-                    logger.debug("AMT: user info changed after token was"
-                                 " issued, iat=%s lastUpdate=%s",
-                                 token['iat'], user.lastUpdate)
-                else:
-                    logger.debug('AMT: Token is black-listed')
-            except jwt.exceptions.ExpiredSignatureError:
-                logger.debug("AMT: Token has expired")
-            except jwt.exceptions.InvalidTokenError:
-                logger.debug("AMT: Failed to decode token")
-            except UserDoesNotExist:
-                logger.debug("AMT: Invalid token: user %s does not exist",
-                             token['username'])
+            user = JwtManager.get_user(token)
+            if user:
+                return {
+                    'username': user.username,
+                    'permissions': user.permissions_dict(),
+                    'sso': mgr.SSO_DB.protocol == 'saml2',
+                    'pwdUpdateRequired': user.pwd_update_required
+                }
         return {
-            'login_url': self._get_login_url()
+            'login_url': self._get_login_url(),
         }

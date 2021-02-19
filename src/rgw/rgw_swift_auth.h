@@ -1,14 +1,17 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #ifndef CEPH_RGW_SWIFT_AUTH_H
 #define CEPH_RGW_SWIFT_AUTH_H
 
+#include "rgw_common.h"
+#include "rgw_user.h"
 #include "rgw_op.h"
 #include "rgw_rest.h"
 #include "rgw_auth.h"
 #include "rgw_auth_keystone.h"
 #include "rgw_auth_filters.h"
+#include "rgw_sal.h"
 
 #define RGW_SWIFT_TOKEN_EXPIRATION (15 * 60)
 
@@ -39,26 +42,28 @@ class TempURLEngine : public rgw::auth::Engine {
   using result_t = rgw::auth::Engine::result_t;
 
   CephContext* const cct;
-  /* const */ RGWRados* const store;
+  /* const */ RGWCtl* const ctl;
   const TempURLApplier::Factory* const apl_factory;
 
   /* Helper methods. */
   void get_owner_info(const DoutPrefixProvider* dpp, 
                       const req_state* s,
-                      RGWUserInfo& owner_info) const;
+                      RGWUserInfo& owner_info,
+		      optional_yield y) const;
   std::string convert_from_iso8601(std::string expires) const;
   bool is_applicable(const req_state* s) const noexcept;
   bool is_expired(const std::string& expires) const;
+  bool is_disallowed_header_present(const req_info& info) const;
 
   class SignatureHelper;
   class PrefixableSignatureHelper;
 
 public:
   TempURLEngine(CephContext* const cct,
-                /*const*/ RGWRados* const store,
+                /*const*/ RGWCtl* const ctl,
                 const TempURLApplier::Factory* const apl_factory)
     : cct(cct),
-      store(store),
+      ctl(ctl),
       apl_factory(apl_factory) {
   }
 
@@ -67,7 +72,7 @@ public:
     return "rgw::auth::swift::TempURLEngine";
   }
 
-  result_t authenticate(const DoutPrefixProvider* dpp, const req_state* const s) const override;
+  result_t authenticate(const DoutPrefixProvider* dpp, const req_state* const s, optional_yield y) const override;
 };
 
 
@@ -76,22 +81,23 @@ class SignedTokenEngine : public rgw::auth::Engine {
   using result_t = rgw::auth::Engine::result_t;
 
   CephContext* const cct;
-  RGWRados* const store;
+  RGWCtl* const ctl;
   const rgw::auth::TokenExtractor* const extractor;
   const rgw::auth::LocalApplier::Factory* const apl_factory;
 
   bool is_applicable(const std::string& token) const noexcept;
+  using rgw::auth::Engine::authenticate;
   result_t authenticate(const DoutPrefixProvider* dpp,
                         const std::string& token,
                         const req_state* s) const;
 
 public:
   SignedTokenEngine(CephContext* const cct,
-                    /* const */RGWRados* const store,
+                    /* const */RGWCtl* const ctl,
                     const rgw::auth::TokenExtractor* const extractor,
                     const rgw::auth::LocalApplier::Factory* const apl_factory)
     : cct(cct),
-      store(store),
+      ctl(ctl),
       extractor(extractor),
       apl_factory(apl_factory) {
   }
@@ -100,7 +106,8 @@ public:
     return "rgw::auth::swift::SignedTokenEngine";
   }
 
-  result_t authenticate(const DoutPrefixProvider* dpp, const req_state* const s) const override {
+  result_t authenticate(const DoutPrefixProvider* dpp, const req_state* const s,
+			optional_yield y) const override {
     return authenticate(dpp, extractor->get_token(s), s);
   }
 };
@@ -111,22 +118,22 @@ class ExternalTokenEngine : public rgw::auth::Engine {
   using result_t = rgw::auth::Engine::result_t;
 
   CephContext* const cct;
-  RGWRados* const store;
+  RGWCtl* const ctl;
   const rgw::auth::TokenExtractor* const extractor;
   const rgw::auth::LocalApplier::Factory* const apl_factory;
 
   bool is_applicable(const std::string& token) const noexcept;
   result_t authenticate(const DoutPrefixProvider* dpp,
                         const std::string& token,
-                        const req_state* s) const;
+                        const req_state* s, optional_yield y) const;
 
 public:
   ExternalTokenEngine(CephContext* const cct,
-                      /* const */RGWRados* const store,
+                      /* const */RGWCtl* const ctl,
                       const rgw::auth::TokenExtractor* const extractor,
                       const rgw::auth::LocalApplier::Factory* const apl_factory)
     : cct(cct),
-      store(store),
+      ctl(ctl),
       extractor(extractor),
       apl_factory(apl_factory) {
   }
@@ -135,11 +142,22 @@ public:
     return "rgw::auth::swift::ExternalTokenEngine";
   }
 
-  result_t authenticate(const DoutPrefixProvider* dpp, const req_state* const s) const override {
-    return authenticate(dpp, extractor->get_token(s), s);
+  result_t authenticate(const DoutPrefixProvider* dpp, const req_state* const s,
+			optional_yield y) const override {
+    return authenticate(dpp, extractor->get_token(s), s, y);
   }
 };
 
+/* SwiftAnonymous: applier. */
+class SwiftAnonymousApplier : public rgw::auth::LocalApplier {
+  public:
+    SwiftAnonymousApplier(CephContext* const cct,
+                          const RGWUserInfo& user_info)
+      : LocalApplier(cct, user_info, LocalApplier::NO_SUBUSER, boost::none) {
+      };
+    bool is_admin_of(const rgw_user& uid) const {return false;}
+    bool is_owner_of(const rgw_user& uid) const {return uid.id.compare(RGW_USER_ANON_ID) == 0;}
+};
 
 class SwiftAnonymousEngine : public rgw::auth::AnonymousEngine {
   const rgw::auth::TokenExtractor* const extractor;
@@ -150,7 +168,7 @@ class SwiftAnonymousEngine : public rgw::auth::AnonymousEngine {
 
 public:
   SwiftAnonymousEngine(CephContext* const cct,
-                       const rgw::auth::LocalApplier::Factory* const apl_factory,
+                       const SwiftAnonymousApplier::Factory* const apl_factory,
                        const rgw::auth::TokenExtractor* const extractor)
     : AnonymousEngine(cct, apl_factory),
       extractor(extractor) {
@@ -167,7 +185,8 @@ class DefaultStrategy : public rgw::auth::Strategy,
                         public rgw::auth::RemoteApplier::Factory,
                         public rgw::auth::LocalApplier::Factory,
                         public rgw::auth::swift::TempURLApplier::Factory {
-  RGWRados* const store;
+  RGWCtl* const ctl;
+  ImplicitTenants& implicit_tenant_context;
 
   /* The engines. */
   const rgw::auth::swift::TempURLEngine tempurl_engine;
@@ -193,10 +212,11 @@ class DefaultStrategy : public rgw::auth::Strategy,
                              acl_strategy_t&& extra_acl_strategy,
                              const rgw::auth::RemoteApplier::AuthInfo &info) const override {
     auto apl = \
-      rgw::auth::add_3rdparty(store, s->account_name,
-        rgw::auth::add_sysreq(cct, store, s,
-          rgw::auth::RemoteApplier(cct, store, std::move(extra_acl_strategy), info,
-                                   cct->_conf->rgw_keystone_implicit_tenants)));
+      rgw::auth::add_3rdparty(ctl, rgw_user(s->account_name),
+        rgw::auth::add_sysreq(cct, ctl, s,
+          rgw::auth::RemoteApplier(cct, ctl, std::move(extra_acl_strategy), info,
+                                   implicit_tenant_context,
+                                   rgw::auth::ImplicitTenants::IMPLICIT_TENANTS_SWIFT)));
     /* TODO(rzarzynski): replace with static_ptr. */
     return aplptr_t(new decltype(apl)(std::move(apl)));
   }
@@ -207,8 +227,8 @@ class DefaultStrategy : public rgw::auth::Strategy,
                             const std::string& subuser,
                             const boost::optional<uint32_t>& perm_mask) const override {
     auto apl = \
-      rgw::auth::add_3rdparty(store, s->account_name,
-        rgw::auth::add_sysreq(cct, store, s,
+      rgw::auth::add_3rdparty(ctl, rgw_user(s->account_name),
+        rgw::auth::add_sysreq(cct, ctl, s,
           rgw::auth::LocalApplier(cct, user_info, subuser, perm_mask)));
     /* TODO(rzarzynski): replace with static_ptr. */
     return aplptr_t(new decltype(apl)(std::move(apl)));
@@ -225,21 +245,23 @@ class DefaultStrategy : public rgw::auth::Strategy,
 
 public:
   DefaultStrategy(CephContext* const cct,
-                  RGWRados* const store)
-    : store(store),
+                  ImplicitTenants& implicit_tenant_context,
+                  RGWCtl* const ctl)
+    : ctl(ctl),
+      implicit_tenant_context(implicit_tenant_context),
       tempurl_engine(cct,
-                     store,
+                     ctl,
                      static_cast<rgw::auth::swift::TempURLApplier::Factory*>(this)),
       signed_engine(cct,
-                    store,
+                    ctl,
                     static_cast<rgw::auth::TokenExtractor*>(this),
                     static_cast<rgw::auth::LocalApplier::Factory*>(this)),
       external_engine(cct,
-                      store,
+                      ctl,
                       static_cast<rgw::auth::TokenExtractor*>(this),
                       static_cast<rgw::auth::LocalApplier::Factory*>(this)),
       anon_engine(cct,
-                  static_cast<rgw::auth::LocalApplier::Factory*>(this),
+                  static_cast<SwiftAnonymousApplier::Factory*>(this),
                   static_cast<rgw::auth::TokenExtractor*>(this)) {
     /* When the constructor's body is being executed, all member engines
      * should be initialized. Thus, we can safely add them. */
@@ -281,8 +303,8 @@ public:
   RGW_SWIFT_Auth_Get() {}
   ~RGW_SWIFT_Auth_Get() override {}
 
-  int verify_permission() override { return 0; }
-  void execute() override;
+  int verify_permission(optional_yield) override { return 0; }
+  void execute(optional_yield y) override;
   const char* name() const override { return "swift_auth_get"; }
   dmc::client_id dmclock_client() override { return dmc::client_id::auth; }
 };
@@ -293,10 +315,10 @@ public:
   ~RGWHandler_SWIFT_Auth() override {}
   RGWOp *op_get() override;
 
-  int init(RGWRados *store, struct req_state *state, rgw::io::BasicClient *cio) override;
-  int authorize(const DoutPrefixProvider *dpp) override;
-  int postauth_init() override { return 0; }
-  int read_permissions(RGWOp *op) override { return 0; }
+  int init(rgw::sal::RGWRadosStore *store, struct req_state *state, rgw::io::BasicClient *cio) override;
+  int authorize(const DoutPrefixProvider *dpp, optional_yield y) override;
+  int postauth_init(optional_yield) override { return 0; }
+  int read_permissions(RGWOp *op, optional_yield) override { return 0; }
 
   virtual RGWAccessControlPolicy *alloc_policy() { return NULL; }
   virtual void free_policy(RGWAccessControlPolicy *policy) {}
@@ -313,7 +335,8 @@ public:
     return this;
   }
 
-  RGWHandler_REST* get_handler(struct req_state*,
+  RGWHandler_REST* get_handler(rgw::sal::RGWRadosStore *store,
+			       struct req_state*,
                                const rgw::auth::StrategyRegistry&,
                                const std::string&) override {
     return new RGWHandler_SWIFT_Auth;

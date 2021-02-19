@@ -1,24 +1,24 @@
 #ifndef CEPH_MGATHERCAPS_H
 #define CEPH_MGATHERCAPS_H
 
-#include "msg/Message.h"
+#include "messages/MMDSOp.h"
 
 
-class MGatherCaps : public MessageInstance<MGatherCaps> {
+class MGatherCaps final : public MMDSOp {
+  static constexpr int HEAD_VERSION = 1;
+  static constexpr int COMPAT_VERSION = 1;
+
 public:
-  friend factory;
-
-
   inodeno_t ino;
 
 protected:
   MGatherCaps() :
-    MessageInstance(MSG_MDS_GATHERCAPS) {}
-  ~MGatherCaps() override {}
+    MMDSOp{MSG_MDS_GATHERCAPS, HEAD_VERSION, COMPAT_VERSION} {}
+  ~MGatherCaps() final {}
 
 public:
   std::string_view get_type_name() const override { return "gather_caps"; }
-  void print(ostream& o) const override {
+  void print(std::ostream& o) const override {
     o << "gather_caps(" << ino << ")";
   }
 
@@ -31,7 +31,9 @@ public:
     auto p = payload.cbegin();
     decode(ino, p);
   }
-
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

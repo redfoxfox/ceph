@@ -32,10 +32,19 @@ public:
    * GET_SNAP
    *    |
    *    v (skip if unnecessary)
+   * LIST_CHILDREN <-------------\
+   *    |                        |
+   *    v (skip if unnecessary)  | (repeat as needed)
+   * DETACH_STALE_CHILD ---------/
+   *    |
+   *    v (skip if unnecessary)
    * DETACH_CHILD
    *    |
    *    v (skip if disabled/in-use)
    * REMOVE_OBJECT_MAP
+   *    |
+   *    v (skip if not mirror snpashot)
+   * REMOVE_IMAGE_STATE
    *    |
    *    v (skip if in-use)
    * RELEASE_SNAP_ID
@@ -71,6 +80,7 @@ protected:
 
 private:
   cls::rbd::SnapshotNamespace m_snap_namespace;
+  cls::rbd::ChildImageSpecs m_child_images;
   std::string m_snap_name;
   uint64_t m_snap_id;
   bool m_trashed_snapshot = false;
@@ -84,11 +94,20 @@ private:
   void get_snap();
   void handle_get_snap(int r);
 
+  void list_children();
+  void handle_list_children(int r);
+
+  void detach_stale_child();
+  void handle_detach_stale_child(int r);
+
   void detach_child();
   void handle_detach_child(int r);
 
   void remove_object_map();
   void handle_remove_object_map(int r);
+
+  void remove_image_state();
+  void handle_remove_image_state(int r);
 
   void release_snap_id();
   void handle_release_snap_id(int r);

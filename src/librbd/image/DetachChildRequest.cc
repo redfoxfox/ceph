@@ -4,12 +4,15 @@
 #include "librbd/image/DetachChildRequest.h"
 #include "common/dout.h"
 #include "common/errno.h"
-#include "common/WorkQueue.h"
 #include "cls/rbd/cls_rbd_client.h"
+#include "librbd/ExclusiveLock.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageState.h"
 #include "librbd/Operations.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
+#include "librbd/journal/DisabledPolicy.h"
+#include "librbd/trash/RemoveRequest.h"
 #include <string>
 
 #define dout_subsys ceph_subsys_rbd
@@ -31,8 +34,7 @@ DetachChildRequest<I>::~DetachChildRequest() {
 template <typename I>
 void DetachChildRequest<I>::send() {
   {
-    RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
-    RWLock::RLocker parent_locker(m_image_ctx.parent_lock);
+    std::shared_lock image_locker{m_image_ctx.image_lock};
 
     // use oldest snapshot or HEAD for parent spec
     if (!m_image_ctx.snap_info.empty()) {
@@ -71,6 +73,9 @@ void DetachChildRequest<I>::clone_v2_child_detach() {
                              m_parent_spec.pool_id,
                              m_parent_spec.pool_namespace, &m_parent_io_ctx);
   if (r < 0) {
+    if (r == -ENOENT) {
+      r = 0;
+    }
     finish(r);
     return;
   }
@@ -141,7 +146,7 @@ void DetachChildRequest<I>::handle_clone_v2_get_snapshot(int r) {
     }
   }
 
-  if (r < 0) {
+  if (r < 0 && r != -ENOENT) {
     ldout(cct, 5) << "failed to retrieve snapshot: " << cpp_strerror(r)
                   << dendl;
   }
@@ -162,6 +167,9 @@ void DetachChildRequest<I>::clone_v2_open_parent() {
   m_parent_image_ctx = I::create("", m_parent_spec.image_id, nullptr,
                                  m_parent_io_ctx, false);
 
+  // ensure non-primary images can be modified
+  m_parent_image_ctx->read_only_mask &= ~IMAGE_READ_ONLY_FLAG_NON_PRIMARY;
+
   auto ctx = create_context_callback<
     DetachChildRequest<I>,
     &DetachChildRequest<I>::handle_clone_v2_open_parent>(this);
@@ -176,10 +184,24 @@ void DetachChildRequest<I>::handle_clone_v2_open_parent(int r) {
   if (r < 0) {
     ldout(cct, 5) << "failed to open parent for read/write: "
                   << cpp_strerror(r) << dendl;
-    m_parent_image_ctx->destroy();
     m_parent_image_ctx = nullptr;
     finish(0);
     return;
+  }
+
+  // do not attempt to open the parent journal when removing the trash
+  // snapshot, because the parent may be not promoted
+  if (m_parent_image_ctx->test_features(RBD_FEATURE_JOURNALING)) {
+    std::unique_lock image_locker{m_parent_image_ctx->image_lock};
+    m_parent_image_ctx->set_journal_policy(new journal::DisabledPolicy());
+  }
+
+  // disallow any proxied maintenance operations
+  {
+    std::shared_lock owner_locker{m_parent_image_ctx->owner_lock};
+    if (m_parent_image_ctx->exclusive_lock != nullptr) {
+      m_parent_image_ctx->exclusive_lock->block_requests(0);
+    }
   }
 
   clone_v2_remove_snapshot();
@@ -205,9 +227,94 @@ void DetachChildRequest<I>::handle_clone_v2_remove_snapshot(int r) {
   if (r < 0 && r != -ENOENT) {
     ldout(cct, 5) << "failed to remove trashed clone snapshot: "
                   << cpp_strerror(r) << dendl;
+    clone_v2_close_parent();
+    return;
   }
 
-  clone_v2_close_parent();
+  if (m_parent_image_ctx->snaps.empty()) {
+    clone_v2_get_parent_trash_entry();
+  } else {
+    clone_v2_close_parent();
+  }
+}
+
+template<typename I>
+void DetachChildRequest<I>::clone_v2_get_parent_trash_entry() {
+  auto cct = m_image_ctx.cct;
+  ldout(cct, 5) << dendl;
+
+  librados::ObjectReadOperation op;
+  cls_client::trash_get_start(&op, m_parent_image_ctx->id);
+
+  m_out_bl.clear();
+  auto aio_comp = create_rados_callback<
+    DetachChildRequest<I>,
+    &DetachChildRequest<I>::handle_clone_v2_get_parent_trash_entry>(this);
+  int r = m_parent_io_ctx.aio_operate(RBD_TRASH, aio_comp, &op, &m_out_bl);
+  ceph_assert(r == 0);
+  aio_comp->release();
+}
+
+template<typename I>
+void DetachChildRequest<I>::handle_clone_v2_get_parent_trash_entry(int r) {
+  auto cct = m_image_ctx.cct;
+  ldout(cct, 5) << "r=" << r << dendl;
+
+  if (r < 0 && r != -ENOENT) {
+    ldout(cct, 5) << "failed to get parent trash entry: " << cpp_strerror(r)
+                  << dendl;
+    clone_v2_close_parent();
+    return;
+  }
+
+  bool in_trash = false;
+
+  if (r == 0) {
+    cls::rbd::TrashImageSpec trash_spec;
+    auto it = m_out_bl.cbegin();
+    r = cls_client::trash_get_finish(&it, &trash_spec);
+
+    if (r == 0 &&
+        trash_spec.source == cls::rbd::TRASH_IMAGE_SOURCE_USER_PARENT &&
+        trash_spec.state == cls::rbd::TRASH_IMAGE_STATE_NORMAL &&
+        trash_spec.deferment_end_time <= ceph_clock_now()) {
+      in_trash = true;
+    }
+  }
+
+  if (in_trash) {
+    clone_v2_remove_parent_from_trash();
+  } else {
+    clone_v2_close_parent();
+  }
+}
+
+template<typename I>
+void DetachChildRequest<I>::clone_v2_remove_parent_from_trash() {
+  auto cct = m_image_ctx.cct;
+  ldout(cct, 5) << dendl;
+
+  auto ctx = create_context_callback<
+    DetachChildRequest<I>,
+    &DetachChildRequest<I>::handle_clone_v2_remove_parent_from_trash>(this);
+  auto req = librbd::trash::RemoveRequest<I>::create(
+      m_parent_io_ctx, m_parent_image_ctx, m_image_ctx.op_work_queue, false,
+      m_no_op, ctx);
+  req->send();
+}
+
+template<typename I>
+void DetachChildRequest<I>::handle_clone_v2_remove_parent_from_trash(int r) {
+  auto cct = m_image_ctx.cct;
+  ldout(cct, 5) << "r=" << r << dendl;
+
+  if (r < 0) {
+    ldout(cct, 5) << "failed to remove parent image:" << cpp_strerror(r)
+                  << dendl;
+  }
+
+  m_parent_image_ctx = nullptr;
+  finish(0);
 }
 
 template<typename I>
@@ -231,7 +338,6 @@ void DetachChildRequest<I>::handle_clone_v2_close_parent(int r) {
                   << dendl;
   }
 
-  m_parent_image_ctx->destroy();
   m_parent_image_ctx = nullptr;
   finish(0);
 }
@@ -240,6 +346,8 @@ template<typename I>
 void DetachChildRequest<I>::clone_v1_remove_child() {
   auto cct = m_image_ctx.cct;
   ldout(cct, 5) << dendl;
+
+  m_parent_spec.pool_namespace = "";
 
   librados::ObjectWriteOperation op;
   librbd::cls_client::remove_child(&op, m_parent_spec, m_image_ctx.id);

@@ -31,7 +31,7 @@
 #include "common/errno.h"
 #include "common/safe_io.h"
 #include "common/Formatter.h"
-
+#include "common/pretty_binary.h"
 
 #define dout_context cct
 #define dout_subsys ceph_subsys_kstore
@@ -44,6 +44,21 @@
   * refcounted extents (for efficient clone)
 
  */
+
+using std::list;
+using std::make_pair;
+using std::map;
+using std::pair;
+using std::set;
+using std::string;
+using std::stringstream;
+using std::vector;
+
+using ceph::bufferlist;
+using ceph::bufferptr;
+using ceph::decode;
+using ceph::encode;
+using ceph::JSONFormatter;
 
 const string PREFIX_SUPER = "S"; // field -> value
 const string PREFIX_COLL = "C"; // collection name -> (nothing)
@@ -89,10 +104,10 @@ static void append_escaped(const string &in, string *out)
 {
   char hexbyte[8];
   for (string::const_iterator i = in.begin(); i != in.end(); ++i) {
-    if (*i <= '#') {
+    if ((unsigned char)*i <= '#') {
       snprintf(hexbyte, sizeof(hexbyte), "#%02x", (uint8_t)*i);
       out->append(hexbyte);
-    } else if (*i >= '~') {
+    } else if ((unsigned char)*i >= '~') {
       snprintf(hexbyte, sizeof(hexbyte), "~%02x", (uint8_t)*i);
       out->append(hexbyte);
     } else {
@@ -118,57 +133,6 @@ static int decode_escaped(const char *p, string *out)
     }
   }
   return p - orig_p;
-}
-
-// some things we encode in binary (as le32 or le64); print the
-// resulting key strings nicely
-static string pretty_binary_string(const string& in)
-{
-  char buf[10];
-  string out;
-  out.reserve(in.length() * 3);
-  enum { NONE, HEX, STRING } mode = NONE;
-  unsigned from = 0, i;
-  for (i=0; i < in.length(); ++i) {
-    if ((in[i] < 32 || (unsigned char)in[i] > 126) ||
-	(mode == HEX && in.length() - i >= 4 &&
-	 ((in[i] < 32 || (unsigned char)in[i] > 126) ||
-	  (in[i+1] < 32 || (unsigned char)in[i+1] > 126) ||
-	  (in[i+2] < 32 || (unsigned char)in[i+2] > 126) ||
-	  (in[i+3] < 32 || (unsigned char)in[i+3] > 126)))) {
-      if (mode == STRING) {
-	out.append(in.substr(from, i - from));
-	out.push_back('\'');
-      }
-      if (mode != HEX) {
-	out.append("0x");
-	mode = HEX;
-      }
-      if (in.length() - i >= 4) {
-	// print a whole u32 at once
-	snprintf(buf, sizeof(buf), "%08x",
-		 (uint32_t)(((unsigned char)in[i] << 24) |
-			    ((unsigned char)in[i+1] << 16) |
-			    ((unsigned char)in[i+2] << 8) |
-			    ((unsigned char)in[i+3] << 0)));
-	i += 3;
-      } else {
-	snprintf(buf, sizeof(buf), "%02x", (int)(unsigned char)in[i]);
-      }
-      out.append(buf);
-    } else {
-      if (mode != STRING) {
-	out.push_back('\'');
-	mode = STRING;
-	from = i;
-      }
-    }
-  }
-  if (mode == STRING) {
-    out.append(in.substr(from, i - from));
-    out.push_back('\'');
-  }
-  return out;
 }
 
 static void _key_encode_shard(shard_id_t shard, string *key)
@@ -565,9 +529,8 @@ int KStore::OnodeHashLRU::trim(int max)
 #define dout_prefix *_dout << "kstore(" << store->path << ").collection(" << cid << ") "
 
 KStore::Collection::Collection(KStore *ns, coll_t cid)
-  : CollectionImpl(cid),
+  : CollectionImpl(ns->cct, cid),
     store(ns),
-    lock("KStore::Collection::lock", true, false),
     osr(new OpSequencer()),
     onode_map(store->cct)
 {
@@ -588,7 +551,7 @@ KStore::OnodeRef KStore::Collection::get_onode(
   const ghobject_t& oid,
   bool create)
 {
-  ceph_assert(create ? lock.is_wlocked() : lock.is_locked());
+  ceph_assert(create ? ceph_mutex_is_wlocked(lock) : ceph_mutex_is_locked(lock));
 
   spg_t pgid;
   if (cid.is_pg(&pgid)) {
@@ -648,7 +611,6 @@ KStore::KStore(CephContext *cct, const string& path)
     path_fd(-1),
     fsid_fd(-1),
     mounted(false),
-    coll_lock("KStore::coll_lock"),
     nid_last(0),
     nid_max(0),
     throttle_ops(cct, "kstore_max_ops", cct->_conf->kstore_max_ops),
@@ -897,12 +859,12 @@ int KStore::_open_collections(int *errors)
        it->next()) {
     coll_t cid;
     if (cid.parse(it->key())) {
-      CollectionRef c(new Collection(this, cid));
+      auto c = ceph::make_ref<Collection>(this, cid);
       bufferlist bl = it->value();
       auto p = bl.cbegin();
       try {
         decode(c->cnode, p);
-      } catch (buffer::error& e) {
+      } catch (ceph::buffer::error& e) {
         derr << __func__ << " failed to decode cnode, key:"
              << pretty_binary_string(it->key()) << dendl;
         return -EIO;
@@ -1109,13 +1071,14 @@ ObjectStore::CollectionHandle KStore::open_collection(const coll_t& cid)
 
 ObjectStore::CollectionHandle KStore::create_new_collection(const coll_t& cid)
 {
-  auto *c = new Collection(this, cid);
-  RWLock::WLocker l(coll_lock);
+  auto c = ceph::make_ref<Collection>(this, cid);
+  std::unique_lock l{coll_lock};
   new_coll_map[cid] = c;
   return c;
 }
 
-int KStore::pool_statfs(uint64_t pool_id, struct store_statfs_t *buf)
+int KStore::pool_statfs(uint64_t pool_id, struct store_statfs_t *buf,
+			bool *per_pool_omap)
 {
   return -ENOTSUP;
 }
@@ -1125,7 +1088,7 @@ int KStore::pool_statfs(uint64_t pool_id, struct store_statfs_t *buf)
 
 KStore::CollectionRef KStore::_get_collection(coll_t cid)
 {
-  RWLock::RLocker l(coll_lock);
+  std::shared_lock l{coll_lock};
   ceph::unordered_map<coll_t,CollectionRef>::iterator cp = coll_map.find(cid);
   if (cp == coll_map.end())
     return CollectionRef();
@@ -1175,7 +1138,7 @@ bool KStore::exists(CollectionHandle& ch, const ghobject_t& oid)
 {
   dout(10) << __func__ << " " << ch->cid << " " << oid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   OnodeRef o = c->get_onode(oid, false);
   if (!o || !o->exists)
     return false;
@@ -1190,7 +1153,7 @@ int KStore::stat(
 {
   dout(10) << __func__ << " " << ch->cid << " " << oid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   OnodeRef o = c->get_onode(oid, false);
   if (!o || !o->exists)
     return -ENOENT;
@@ -1221,7 +1184,7 @@ int KStore::read(
 	   << dendl;
   bl.clear();
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
 
   int r;
 
@@ -1234,7 +1197,7 @@ int KStore::read(
   if (offset == length && offset == 0)
     length = o->onode.size;
 
-  r = _do_read(o, offset, length, bl, op_flags);
+  r = _do_read(o, offset, length, bl, false, op_flags);
 
  out:
   dout(10) << __func__ << " " << ch->cid << " " << oid
@@ -1248,6 +1211,7 @@ int KStore::_do_read(
     uint64_t offset,
     size_t length,
     bufferlist& bl,
+    bool do_cache,
     uint32_t op_flags)
 {
   int r = 0;
@@ -1275,7 +1239,7 @@ int KStore::_do_read(
   stripe_off = offset % stripe_size;
   while (length > 0) {
     bufferlist stripe;
-    _do_read_stripe(o, offset - stripe_off, &stripe);
+    _do_read_stripe(o, offset - stripe_off, &stripe, do_cache);
     dout(30) << __func__ << " stripe " << offset - stripe_off << " got "
 	     << stripe.length() << dendl;
     unsigned swant = std::min<unsigned>(stripe_size - stripe_off, length);
@@ -1339,7 +1303,7 @@ int KStore::fiemap(
   CollectionRef c = static_cast<Collection*>(ch.get());
   if (!c)
     return -ENOENT;
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
 
   OnodeRef o = c->get_onode(oid, false);
   if (!o || !o->exists) {
@@ -1373,7 +1337,7 @@ int KStore::getattr(
 {
   dout(15) << __func__ << " " << ch->cid << " " << oid << " " << name << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   int r;
   string k(name);
 
@@ -1402,7 +1366,7 @@ int KStore::getattrs(
 {
   dout(15) << __func__ << " " << ch->cid << " " << oid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   int r;
 
   OnodeRef o = c->get_onode(oid, false);
@@ -1420,7 +1384,7 @@ int KStore::getattrs(
 
 int KStore::list_collections(vector<coll_t>& ls)
 {
-  RWLock::RLocker l(coll_lock);
+  std::shared_lock l{coll_lock};
   for (ceph::unordered_map<coll_t, CollectionRef>::iterator p = coll_map.begin();
        p != coll_map.end();
        ++p)
@@ -1430,7 +1394,7 @@ int KStore::list_collections(vector<coll_t>& ls)
 
 bool KStore::collection_exists(const coll_t& c)
 {
-  RWLock::RLocker l(coll_lock);
+  std::shared_lock l{coll_lock};
   return coll_map.count(c);
 }
 
@@ -1455,7 +1419,7 @@ int KStore::collection_bits(CollectionHandle& ch)
 {
   dout(15) << __func__ << " " << ch->cid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   dout(10) << __func__ << " " << ch->cid << " = " << c->cnode.bits << dendl;
   return c->cnode.bits;
 }
@@ -1471,7 +1435,7 @@ int KStore::collection_list(
            << " start " << start << " end " << end << " max " << max << dendl;
   int r;
   {
-    RWLock::RLocker l(c->lock);
+    std::shared_lock l{c->lock};
     r = _collection_list(c, start, end, max, ls, pnext);
   }
 
@@ -1531,14 +1495,16 @@ int KStore::_collection_list(
   if (end.hobj.is_max()) {
     pend = temp ? temp_end_key : end_key;
   } else {
-    get_object_key(cct, end, &end_key);
     if (end.hobj.is_temp()) {
       if (temp)
-	pend = end_key;
+        get_object_key(cct, end, &pend);
       else
 	goto out;
     } else {
-      pend = temp ? temp_end_key : end_key;
+      if (temp)
+        pend = temp_end_key;
+      else
+        get_object_key(cct, end, &pend);
     }
   }
   dout(20) << __func__ << " pend " << pretty_binary_string(pend) << dendl;
@@ -1551,14 +1517,27 @@ int KStore::_collection_list(
 		 << " > " << end << dendl;
       if (temp) {
 	if (end.hobj.is_temp()) {
+          if (it->valid() && it->key() < temp_end_key) {
+            int r = get_key_object(it->key(), pnext);
+            ceph_assert(r == 0);
+            set_next = true;
+          }
 	  break;
 	}
 	dout(30) << __func__ << " switch to non-temp namespace" << dendl;
 	temp = false;
 	it->upper_bound(start_key);
-	pend = end_key;
+        if (end.hobj.is_max())
+          pend = end_key;
+        else
+          get_object_key(cct, end, &pend);
 	dout(30) << __func__ << " pend " << pretty_binary_string(pend) << dendl;
 	continue;
+      }
+      if (it->valid() && it->key() < end_key) {
+        int r = get_key_object(it->key(), pnext);
+        ceph_assert(r == 0);
+        set_next = true;
       }
       break;
     }
@@ -1588,7 +1567,7 @@ KStore::OmapIteratorImpl::OmapIteratorImpl(
   CollectionRef c, OnodeRef o, KeyValueDB::Iterator it)
   : c(c), o(o), it(it)
 {
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   if (o->onode.omap_head) {
     get_omap_key(o->onode.omap_head, string(), &head);
     get_omap_tail(o->onode.omap_head, &tail);
@@ -1598,7 +1577,7 @@ KStore::OmapIteratorImpl::OmapIteratorImpl(
 
 int KStore::OmapIteratorImpl::seek_to_first()
 {
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   if (o->onode.omap_head) {
     it->lower_bound(head);
   } else {
@@ -1609,7 +1588,7 @@ int KStore::OmapIteratorImpl::seek_to_first()
 
 int KStore::OmapIteratorImpl::upper_bound(const string& after)
 {
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   if (o->onode.omap_head) {
     string key;
     get_omap_key(o->onode.omap_head, after, &key);
@@ -1622,7 +1601,7 @@ int KStore::OmapIteratorImpl::upper_bound(const string& after)
 
 int KStore::OmapIteratorImpl::lower_bound(const string& to)
 {
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   if (o->onode.omap_head) {
     string key;
     get_omap_key(o->onode.omap_head, to, &key);
@@ -1635,7 +1614,7 @@ int KStore::OmapIteratorImpl::lower_bound(const string& to)
 
 bool KStore::OmapIteratorImpl::valid()
 {
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   if (o->onode.omap_head && it->valid() && it->raw_key().second <= tail) {
     return true;
   } else {
@@ -1645,7 +1624,7 @@ bool KStore::OmapIteratorImpl::valid()
 
 int KStore::OmapIteratorImpl::next()
 {
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   if (o->onode.omap_head) {
     it->next();
     return 0;
@@ -1656,7 +1635,7 @@ int KStore::OmapIteratorImpl::next()
 
 string KStore::OmapIteratorImpl::key()
 {
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   ceph_assert(it->valid());
   string db_key = it->raw_key().second;
   string user_key;
@@ -1666,7 +1645,7 @@ string KStore::OmapIteratorImpl::key()
 
 bufferlist KStore::OmapIteratorImpl::value()
 {
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   ceph_assert(it->valid());
   return it->value();
 }
@@ -1680,7 +1659,7 @@ int KStore::omap_get(
 {
   dout(15) << __func__ << " " << ch->cid << " oid " << oid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   int r = 0;
   OnodeRef o = c->get_onode(oid, false);
   if (!o || !o->exists) {
@@ -1728,7 +1707,7 @@ int KStore::omap_get_header(
 {
   dout(15) << __func__ << " " << ch->cid << " oid " << oid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   int r = 0;
   OnodeRef o = c->get_onode(oid, false);
   if (!o || !o->exists) {
@@ -1760,7 +1739,7 @@ int KStore::omap_get_keys(
 {
   dout(15) << __func__ << " " << ch->cid << " oid " << oid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   int r = 0;
   OnodeRef o = c->get_onode(oid, false);
   if (!o || !o->exists) {
@@ -1804,7 +1783,7 @@ int KStore::omap_get_values(
 {
   dout(15) << __func__ << " " << ch->cid << " oid " << oid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   int r = 0;
   OnodeRef o = c->get_onode(oid, false);
   if (!o || !o->exists) {
@@ -1838,7 +1817,7 @@ int KStore::omap_check_keys(
 {
   dout(15) << __func__ << " " << ch->cid << " oid " << oid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   int r = 0;
   OnodeRef o = c->get_onode(oid, false);
   if (!o || !o->exists) {
@@ -1874,7 +1853,7 @@ ObjectMap::ObjectMapIterator KStore::get_omap_iterator(
 
   dout(10) << __func__ << " " << ch->cid << " " << oid << dendl;
   Collection *c = static_cast<Collection*>(ch.get());
-  RWLock::RLocker l(c->lock);
+  std::shared_lock l{c->lock};
   OnodeRef o = c->get_onode(oid, false);
   if (!o || !o->exists) {
     dout(10) << __func__ << " " << oid << "doesn't exist" <<dendl;
@@ -1900,7 +1879,7 @@ int KStore::_open_super_meta()
     auto p = bl.cbegin();
     try {
       decode(nid_max, p);
-    } catch (buffer::error& e) {
+    } catch (ceph::buffer::error& e) {
     }
     dout(10) << __func__ << " old nid_max " << nid_max << dendl;
     nid_last = nid_max;
@@ -2262,7 +2241,7 @@ void KStore::_txc_add_transaction(TransContext *txc, Transaction *t)
 
     case Transaction::OP_COLL_HINT:
       {
-        uint32_t type = op->hint_type;
+        uint32_t type = op->hint;
         bufferlist hint;
         i.decode_bl(hint);
         auto hiter = hint.cbegin();
@@ -2309,12 +2288,13 @@ void KStore::_txc_add_transaction(TransContext *txc, Transaction *t)
     }
 
     // object operations
-    RWLock::WLocker l(c->lock);
+    std::unique_lock l{c->lock};
     OnodeRef &o = ovec[op->oid];
     if (!o) {
       // these operations implicity create the object
       bool create = false;
       if (op->op == Transaction::OP_TOUCH ||
+	  op->op == Transaction::OP_CREATE ||
 	  op->op == Transaction::OP_WRITE ||
 	  op->op == Transaction::OP_ZERO) {
 	create = true;
@@ -2333,6 +2313,7 @@ void KStore::_txc_add_transaction(TransContext *txc, Transaction *t)
 
     switch (op->op) {
     case Transaction::OP_TOUCH:
+    case Transaction::OP_CREATE:
 	r = _touch(txc, c, o);
       break;
 
@@ -2499,7 +2480,7 @@ void KStore::_txc_add_transaction(TransContext *txc, Transaction *t)
       {
         uint64_t expected_object_size = op->expected_object_size;
         uint64_t expected_write_size = op->expected_write_size;
-	uint32_t flags = op->alloc_hint_flags;
+	uint32_t flags = op->hint;
 	r = _setallochint(txc, c, o,
 			  expected_object_size,
 			  expected_write_size,
@@ -2592,8 +2573,15 @@ void KStore::_dump_onode(OnodeRef o)
   }
 }
 
-void KStore::_do_read_stripe(OnodeRef o, uint64_t offset, bufferlist *pbl)
+void KStore::_do_read_stripe(OnodeRef o, uint64_t offset, bufferlist *pbl, bool do_cache)
 {
+  if (!do_cache) {
+    string key;
+    get_data_key(o->onode.nid, offset, &key);
+    db->get(PREFIX_DATA, key, pbl);
+    return;
+  }
+ 
   map<uint64_t,bufferlist>::iterator p = o->pending_stripes.find(offset);
   if (p == o->pending_stripes.end()) {
     string key;
@@ -2663,7 +2651,7 @@ int KStore::_do_write(TransContext *txc,
     }
     uint64_t stripe_off = offset - offset_rem;
     bufferlist prev;
-    _do_read_stripe(o, stripe_off, &prev);
+    _do_read_stripe(o, stripe_off, &prev, true);
     dout(20) << __func__ << " read previous stripe " << stripe_off
 	     << ", got " << prev.length() << dendl;
     bufferlist bl;
@@ -2754,7 +2742,7 @@ int KStore::_zero(TransContext *txc,
     while (pos < offset + length) {
       if (stripe_off || end - pos < stripe_size) {
 	bufferlist stripe;
-	_do_read_stripe(o, pos - stripe_off, &stripe);
+	_do_read_stripe(o, pos - stripe_off, &stripe, true);
 	dout(30) << __func__ << " stripe " << pos - stripe_off << " got "
 		 << stripe.length() << dendl;
 	bufferlist bl;
@@ -2811,7 +2799,7 @@ int KStore::_do_truncate(TransContext *txc, OnodeRef o, uint64_t offset)
     while (pos < o->onode.size) {
       if (stripe_off) {
 	bufferlist stripe;
-	_do_read_stripe(o, pos - stripe_off, &stripe);
+	_do_read_stripe(o, pos - stripe_off, &stripe, true);
 	dout(30) << __func__ << " stripe " << pos - stripe_off << " got "
 		 << stripe.length() << dendl;
 	bufferlist t;
@@ -3148,7 +3136,7 @@ int KStore::_clone(TransContext *txc,
   // data
   oldo->flush();
 
-  r = _do_read(oldo, 0, oldo->onode.size, bl, 0);
+  r = _do_read(oldo, 0, oldo->onode.size, bl, true, 0);
   if (r < 0)
     goto out;
 
@@ -3218,7 +3206,7 @@ int KStore::_clone_range(TransContext *txc,
   newo->exists = true;
   _assign_nid(txc, newo);
 
-  r = _do_read(oldo, srcoff, length, bl, 0);
+  r = _do_read(oldo, srcoff, length, bl, true, 0);
   if (r < 0)
     goto out;
 
@@ -3282,7 +3270,7 @@ int KStore::_create_collection(
   bufferlist bl;
 
   {
-    RWLock::WLocker l(coll_lock);
+    std::unique_lock l{coll_lock};
     if (*c) {
       r = -EEXIST;
       goto out;
@@ -3311,7 +3299,7 @@ int KStore::_remove_collection(TransContext *txc, coll_t cid,
   int r;
 
   {
-    RWLock::WLocker l(coll_lock);
+    std::unique_lock l{coll_lock};
     if (!*c) {
       r = -ENOENT;
       goto out;
@@ -3370,8 +3358,8 @@ int KStore::_split_collection(TransContext *txc,
   dout(15) << __func__ << " " << c->cid << " to " << d->cid << " "
 	   << " bits " << bits << dendl;
   int r;
-  RWLock::WLocker l(c->lock);
-  RWLock::WLocker l2(d->lock);
+  std::unique_lock l{c->lock};
+  std::unique_lock l2{d->lock};
   c->onode_map.clear();
   d->onode_map.clear();
   c->cnode.bits = bits;
@@ -3395,8 +3383,7 @@ int KStore::_merge_collection(TransContext *txc,
   dout(15) << __func__ << " " << (*c)->cid << " to " << d->cid << " "
 	   << " bits " << bits << dendl;
   int r;
-  RWLock::WLocker l((*c)->lock);
-  RWLock::WLocker l2(d->lock);
+  std::scoped_lock l{(*c)->lock, d->lock};
   (*c)->onode_map.clear();
   d->onode_map.clear();
   d->cnode.bits = bits;

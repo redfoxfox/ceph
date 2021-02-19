@@ -2,11 +2,14 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "librbd/io/SimpleSchedulerObjectDispatch.h"
+#include "include/neorados/RADOS.hpp"
+#include "common/ceph_time.h"
 #include "common/Timer.h"
-#include "common/WorkQueue.h"
 #include "common/errno.h"
+#include "librbd/AsioEngine.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Utils.h"
+#include "librbd/io/FlushTracker.h"
 #include "librbd/io/ObjectDispatchSpec.h"
 #include "librbd/io/ObjectDispatcher.h"
 #include "librbd/io/Utils.h"
@@ -25,6 +28,8 @@ namespace librbd {
 namespace io {
 
 using namespace boost::accumulators;
+using ceph::operator<<;
+using librbd::util::data_object_name;
 
 static const int LATENCY_STATS_WINDOW_SIZE = 10;
 
@@ -57,16 +62,16 @@ public:
 
 template <typename I>
 bool SimpleSchedulerObjectDispatch<I>::ObjectRequests::try_delay_request(
-    uint64_t object_off, ceph::bufferlist&& data, const ::SnapContext &snapc,
+    uint64_t object_off, ceph::bufferlist&& data, IOContext io_context,
     int op_flags, int object_dispatch_flags, Context* on_dispatched) {
   if (!m_delayed_requests.empty()) {
-    if (snapc.seq != m_snapc.seq || op_flags != m_op_flags ||
-        data.length() == 0 ||
-        m_delayed_request_extents.intersects(object_off, data.length())) {
+    if (!m_io_context || *m_io_context != *io_context ||
+        op_flags != m_op_flags || data.length() == 0 ||
+        intersects(object_off, data.length())) {
       return false;
     }
   } else {
-    m_snapc = snapc;
+    m_io_context = io_context;
     m_op_flags = op_flags;
   }
 
@@ -140,16 +145,16 @@ void SimpleSchedulerObjectDispatch<I>::ObjectRequests::try_merge_delayed_request
 
 template <typename I>
 void SimpleSchedulerObjectDispatch<I>::ObjectRequests::dispatch_delayed_requests(
-    I *image_ctx, LatencyStats *latency_stats, Mutex *latency_stats_lock) {
+    I *image_ctx, LatencyStats *latency_stats, ceph::mutex *latency_stats_lock) {
   for (auto &it : m_delayed_requests) {
     auto offset = it.first;
     auto &merged_requests = it.second;
 
-    auto ctx = new FunctionContext(
-        [this, requests=std::move(merged_requests.requests), latency_stats,
+    auto ctx = new LambdaContext(
+        [requests=std::move(merged_requests.requests), latency_stats,
          latency_stats_lock, start_time=ceph_clock_now()](int r) {
           if (latency_stats) {
-            Mutex::Locker locker(*latency_stats_lock);
+	    std::lock_guard locker{*latency_stats_lock};
             auto latency = ceph_clock_now() - start_time;
             latency_stats->add(latency.to_nsec());
           }
@@ -158,24 +163,25 @@ void SimpleSchedulerObjectDispatch<I>::ObjectRequests::dispatch_delayed_requests
           }
         });
 
-    auto req = io::ObjectDispatchSpec::create_write(
-        image_ctx, io::OBJECT_DISPATCH_LAYER_SCHEDULER,
-        image_ctx->get_object_name(m_object_no), m_object_no, offset,
-        std::move(merged_requests.data), m_snapc, m_op_flags, 0, {}, ctx);
+    auto req = ObjectDispatchSpec::create_write(
+        image_ctx, OBJECT_DISPATCH_LAYER_SCHEDULER,
+        m_object_no, offset, std::move(merged_requests.data), m_io_context,
+        m_op_flags, 0, std::nullopt, 0, {}, ctx);
 
     req->object_dispatch_flags = m_object_dispatch_flags;
     req->send();
   }
 
-  m_dispatch_time = utime_t();
+  m_dispatch_time = {};
 }
 
 template <typename I>
 SimpleSchedulerObjectDispatch<I>::SimpleSchedulerObjectDispatch(
     I* image_ctx)
   : m_image_ctx(image_ctx),
-    m_lock(librbd::util::unique_lock_name(
-      "librbd::io::SimpleSchedulerObjectDispatch::lock", this)),
+    m_flush_tracker(new FlushTracker<I>(image_ctx)),
+    m_lock(ceph::make_mutex(librbd::util::unique_lock_name(
+      "librbd::io::SimpleSchedulerObjectDispatch::lock", this))),
     m_max_delay(image_ctx->config.template get_val<uint64_t>(
       "rbd_io_scheduler_simple_max_delay")) {
   CephContext *cct = m_image_ctx->cct;
@@ -190,6 +196,7 @@ SimpleSchedulerObjectDispatch<I>::SimpleSchedulerObjectDispatch(
 
 template <typename I>
 SimpleSchedulerObjectDispatch<I>::~SimpleSchedulerObjectDispatch() {
+  delete m_flush_tracker;
 }
 
 template <typename I>
@@ -198,7 +205,7 @@ void SimpleSchedulerObjectDispatch<I>::init() {
   ldout(cct, 5) << dendl;
 
   // add ourself to the IO object dispatcher chain
-  m_image_ctx->io_object_dispatcher->register_object_dispatch(this);
+  m_image_ctx->io_object_dispatcher->register_dispatch(this);
 }
 
 template <typename I>
@@ -206,39 +213,44 @@ void SimpleSchedulerObjectDispatch<I>::shut_down(Context* on_finish) {
   auto cct = m_image_ctx->cct;
   ldout(cct, 5) << dendl;
 
+  m_flush_tracker->shut_down();
   on_finish->complete(0);
 }
 
 template <typename I>
 bool SimpleSchedulerObjectDispatch<I>::read(
-    const std::string &oid, uint64_t object_no, uint64_t object_off,
-    uint64_t object_len, librados::snap_t snap_id, int op_flags,
-    const ZTracer::Trace &parent_trace, ceph::bufferlist* read_data,
-    io::ExtentMap* extent_map, int* object_dispatch_flags,
-    io::DispatchResult* dispatch_result, Context** on_finish,
+    uint64_t object_no, ReadExtents* extents, IOContext io_context,
+    int op_flags, int read_flags, const ZTracer::Trace &parent_trace,
+    uint64_t* version, int* object_dispatch_flags,
+    DispatchResult* dispatch_result, Context** on_finish,
     Context* on_dispatched) {
   auto cct = m_image_ctx->cct;
-  ldout(cct, 20) << "object_no=" << object_no << " " << object_off << "~"
-                 << object_len << dendl;
+  ldout(cct, 20) << data_object_name(m_image_ctx, object_no) << " " << extents
+                 << dendl;
 
-  Mutex::Locker locker(m_lock);
-  dispatch_delayed_requests(object_no);
+  std::lock_guard locker{m_lock};
+  for (auto& extent : *extents) {
+    if (intersects(object_no, extent.offset, extent.length)) {
+      dispatch_delayed_requests(object_no);
+      break;
+    }
+  }
 
   return false;
 }
 
 template <typename I>
 bool SimpleSchedulerObjectDispatch<I>::discard(
-    const std::string &oid, uint64_t object_no, uint64_t object_off,
-    uint64_t object_len, const ::SnapContext &snapc, int discard_flags,
+    uint64_t object_no, uint64_t object_off, uint64_t object_len,
+    IOContext io_context, int discard_flags,
     const ZTracer::Trace &parent_trace, int* object_dispatch_flags,
-    uint64_t* journal_tid, io::DispatchResult* dispatch_result,
+    uint64_t* journal_tid, DispatchResult* dispatch_result,
     Context** on_finish, Context* on_dispatched) {
   auto cct = m_image_ctx->cct;
-  ldout(cct, 20) << "object_no=" << object_no << " " << object_off << "~"
-                 << object_len << dendl;
+  ldout(cct, 20) << data_object_name(m_image_ctx, object_no) << " "
+                 << object_off << "~" << object_len << dendl;
 
-  Mutex::Locker locker(m_lock);
+  std::lock_guard locker{m_lock};
   dispatch_delayed_requests(object_no);
   register_in_flight_request(object_no, {}, on_finish);
 
@@ -247,19 +259,37 @@ bool SimpleSchedulerObjectDispatch<I>::discard(
 
 template <typename I>
 bool SimpleSchedulerObjectDispatch<I>::write(
-    const std::string &oid, uint64_t object_no, uint64_t object_off,
-    ceph::bufferlist&& data, const ::SnapContext &snapc, int op_flags,
+    uint64_t object_no, uint64_t object_off, ceph::bufferlist&& data,
+    IOContext io_context, int op_flags, int write_flags,
+    std::optional<uint64_t> assert_version,
     const ZTracer::Trace &parent_trace, int* object_dispatch_flags,
-    uint64_t* journal_tid, io::DispatchResult* dispatch_result,
+    uint64_t* journal_tid, DispatchResult* dispatch_result,
     Context** on_finish, Context* on_dispatched) {
   auto cct = m_image_ctx->cct;
-  ldout(cct, 20) << "object_no=" << object_no << " " << object_off << "~"
-                 << data.length() << dendl;
+  ldout(cct, 20) << data_object_name(m_image_ctx, object_no) << " "
+                 << object_off << "~" << data.length() << dendl;
 
-  Mutex::Locker locker(m_lock);
-  if (try_delay_write(object_no, object_off, std::move(data), snapc, op_flags,
-                      *object_dispatch_flags, on_dispatched)) {
-    *dispatch_result = io::DISPATCH_RESULT_COMPLETE;
+  std::lock_guard locker{m_lock};
+
+  // don't try to batch assert version writes
+  if (assert_version.has_value() ||
+      (write_flags & OBJECT_WRITE_FLAG_CREATE_EXCLUSIVE) != 0) {
+    dispatch_delayed_requests(object_no);
+    return false;
+  }
+
+  if (try_delay_write(object_no, object_off, std::move(data), io_context,
+                      op_flags, *object_dispatch_flags, on_dispatched)) {
+
+    auto dispatch_seq = ++m_dispatch_seq;
+    m_flush_tracker->start_io(dispatch_seq);
+    *on_finish = new LambdaContext(
+      [this, dispatch_seq, ctx=*on_finish](int r) {
+        ctx->complete(r);
+        m_flush_tracker->finish_io(dispatch_seq);
+      });
+
+    *dispatch_result = DISPATCH_RESULT_COMPLETE;
     return true;
   }
 
@@ -271,17 +301,17 @@ bool SimpleSchedulerObjectDispatch<I>::write(
 
 template <typename I>
 bool SimpleSchedulerObjectDispatch<I>::write_same(
-    const std::string &oid, uint64_t object_no, uint64_t object_off,
-    uint64_t object_len, io::Extents&& buffer_extents, ceph::bufferlist&& data,
-    const ::SnapContext &snapc, int op_flags,
+    uint64_t object_no, uint64_t object_off, uint64_t object_len,
+    LightweightBufferExtents&& buffer_extents, ceph::bufferlist&& data,
+    IOContext io_context, int op_flags,
     const ZTracer::Trace &parent_trace, int* object_dispatch_flags,
-    uint64_t* journal_tid, io::DispatchResult* dispatch_result,
+    uint64_t* journal_tid, DispatchResult* dispatch_result,
     Context** on_finish, Context* on_dispatched) {
   auto cct = m_image_ctx->cct;
-  ldout(cct, 20) << "object_no=" << object_no << " " << object_off << "~"
-                 << object_len << dendl;
+  ldout(cct, 20) << data_object_name(m_image_ctx, object_no) << " "
+                 << object_off << "~" << object_len << dendl;
 
-  Mutex::Locker locker(m_lock);
+  std::lock_guard locker{m_lock};
   dispatch_delayed_requests(object_no);
   register_in_flight_request(object_no, {}, on_finish);
 
@@ -290,18 +320,17 @@ bool SimpleSchedulerObjectDispatch<I>::write_same(
 
 template <typename I>
 bool SimpleSchedulerObjectDispatch<I>::compare_and_write(
-    const std::string &oid, uint64_t object_no, uint64_t object_off,
-    ceph::bufferlist&& cmp_data, ceph::bufferlist&& write_data,
-    const ::SnapContext &snapc, int op_flags,
+    uint64_t object_no, uint64_t object_off, ceph::bufferlist&& cmp_data,
+    ceph::bufferlist&& write_data, IOContext io_context, int op_flags,
     const ZTracer::Trace &parent_trace, uint64_t* mismatch_offset,
     int* object_dispatch_flags, uint64_t* journal_tid,
-    io::DispatchResult* dispatch_result, Context** on_finish,
+    DispatchResult* dispatch_result, Context** on_finish,
     Context* on_dispatched) {
   auto cct = m_image_ctx->cct;
-  ldout(cct, 20) << "object_no=" << object_no << " " << object_off << "~"
-                 << cmp_data.length() << dendl;
+  ldout(cct, 20) << data_object_name(m_image_ctx, object_no) << " "
+                 << object_off << "~" << cmp_data.length() << dendl;
 
-  Mutex::Locker locker(m_lock);
+  std::lock_guard locker{m_lock};
   dispatch_delayed_requests(object_no);
   register_in_flight_request(object_no, {}, on_finish);
 
@@ -310,24 +339,44 @@ bool SimpleSchedulerObjectDispatch<I>::compare_and_write(
 
 template <typename I>
 bool SimpleSchedulerObjectDispatch<I>::flush(
-    io::FlushSource flush_source, const ZTracer::Trace &parent_trace,
-    io::DispatchResult* dispatch_result, Context** on_finish,
-    Context* on_dispatched) {
+    FlushSource flush_source, const ZTracer::Trace &parent_trace,
+    uint64_t* journal_tid, DispatchResult* dispatch_result,
+    Context** on_finish, Context* on_dispatched) {
   auto cct = m_image_ctx->cct;
   ldout(cct, 20) << dendl;
 
-  Mutex::Locker locker(m_lock);
-  dispatch_all_delayed_requests();
+  {
+    std::lock_guard locker{m_lock};
+    dispatch_all_delayed_requests();
+  }
 
-  return false;
+  *dispatch_result = DISPATCH_RESULT_CONTINUE;
+  m_flush_tracker->flush(on_dispatched);
+
+  return true;
+}
+
+template <typename I>
+bool SimpleSchedulerObjectDispatch<I>::intersects(
+    uint64_t object_no, uint64_t object_off, uint64_t len) const {
+  ceph_assert(ceph_mutex_is_locked(m_lock));
+  auto cct = m_image_ctx->cct;
+
+  auto it = m_requests.find(object_no);
+  bool intersects = (it != m_requests.end()) &&
+      it->second->intersects(object_off, len);
+
+  ldout(cct, 20) << intersects << dendl;
+
+  return intersects;
 }
 
 template <typename I>
 bool SimpleSchedulerObjectDispatch<I>::try_delay_write(
     uint64_t object_no, uint64_t object_off, ceph::bufferlist&& data,
-    const ::SnapContext &snapc, int op_flags, int object_dispatch_flags,
+    IOContext io_context, int op_flags, int object_dispatch_flags,
     Context* on_dispatched) {
-  ceph_assert(m_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(m_lock));
   auto cct = m_image_ctx->cct;
 
   if (m_latency_stats && !m_latency_stats->is_ready()) {
@@ -343,18 +392,18 @@ bool SimpleSchedulerObjectDispatch<I>::try_delay_write(
 
   auto &object_requests = it->second;
   bool delayed = object_requests->try_delay_request(
-      object_off, std::move(data), snapc, op_flags, object_dispatch_flags,
+      object_off, std::move(data), io_context, op_flags, object_dispatch_flags,
       on_dispatched);
 
   ldout(cct, 20) << "delayed: " << delayed << dendl;
 
   // schedule dispatch on the first request added
   if (delayed && !object_requests->is_scheduled_dispatch()) {
-    auto dispatch_time = ceph_clock_now();
+    auto dispatch_time = ceph::real_clock::now();
     if (m_latency_stats) {
-      dispatch_time += utime_t(0, m_latency_stats->avg() / 2);
+      dispatch_time += std::chrono::nanoseconds(m_latency_stats->avg() / 2);
     } else {
-      dispatch_time += utime_t(0, m_max_delay * 1000000);
+      dispatch_time += std::chrono::milliseconds(m_max_delay);
     }
     object_requests->set_scheduled_dispatch(dispatch_time);
     m_dispatch_queue.push_back(object_requests);
@@ -368,7 +417,7 @@ bool SimpleSchedulerObjectDispatch<I>::try_delay_write(
 
 template <typename I>
 void SimpleSchedulerObjectDispatch<I>::dispatch_all_delayed_requests() {
-  ceph_assert(m_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(m_lock));
   auto cct = m_image_ctx->cct;
   ldout(cct, 20) << dendl;
 
@@ -388,31 +437,37 @@ void SimpleSchedulerObjectDispatch<I>::register_in_flight_request(
   auto it = res.first;
 
   auto dispatch_seq = ++m_dispatch_seq;
+  m_flush_tracker->start_io(dispatch_seq);
+
   it->second->set_dispatch_seq(dispatch_seq);
-  *on_finish = new FunctionContext(
+  *on_finish = new LambdaContext(
     [this, object_no, dispatch_seq, start_time, ctx=*on_finish](int r) {
       ctx->complete(r);
 
-      Mutex::Locker locker(m_lock);
+      std::unique_lock locker{m_lock};
       if (m_latency_stats && start_time != utime_t()) {
         auto latency = ceph_clock_now() - start_time;
         m_latency_stats->add(latency.to_nsec());
       }
+
       auto it = m_requests.find(object_no);
       if (it == m_requests.end() ||
           it->second->get_dispatch_seq() != dispatch_seq) {
         ldout(m_image_ctx->cct, 20) << "already dispatched" << dendl;
-        return;
+      } else {
+        dispatch_delayed_requests(it->second);
+        m_requests.erase(it);
       }
-      dispatch_delayed_requests(it->second);
-      m_requests.erase(it);
+      locker.unlock();
+
+      m_flush_tracker->finish_io(dispatch_seq);
     });
 }
 
 template <typename I>
 void SimpleSchedulerObjectDispatch<I>::dispatch_delayed_requests(
     uint64_t object_no) {
-  ceph_assert(m_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(m_lock));
   auto cct = m_image_ctx->cct;
 
   auto it = m_requests.find(object_no);
@@ -428,7 +483,7 @@ void SimpleSchedulerObjectDispatch<I>::dispatch_delayed_requests(
 template <typename I>
 void SimpleSchedulerObjectDispatch<I>::dispatch_delayed_requests(
     ObjectRequestsRef object_requests) {
-  ceph_assert(m_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(m_lock));
   auto cct = m_image_ctx->cct;
 
   ldout(cct, 20) << "object_no=" << object_requests->get_object_no() << ", "
@@ -452,10 +507,10 @@ void SimpleSchedulerObjectDispatch<I>::dispatch_delayed_requests(
 
 template <typename I>
 void SimpleSchedulerObjectDispatch<I>::schedule_dispatch_delayed_requests() {
-  ceph_assert(m_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(m_lock));
   auto cct = m_image_ctx->cct;
 
-  Mutex::Locker timer_locker(*m_timer_lock);
+  std::lock_guard timer_locker{*m_timer_lock};
 
   if (m_timer_task != nullptr) {
     ldout(cct, 20) << "canceling task " << m_timer_task << dendl;
@@ -483,20 +538,18 @@ void SimpleSchedulerObjectDispatch<I>::schedule_dispatch_delayed_requests() {
     object_requests = m_dispatch_queue.front().get();
   }
 
-  auto ctx = new FunctionContext(
+  m_timer_task = new LambdaContext(
     [this, object_no=object_requests->get_object_no()](int r) {
-      Mutex::Locker locker(m_lock);
-      dispatch_delayed_requests(object_no);
-    });
-
-  m_timer_task = new FunctionContext(
-    [this, ctx](int r) {
-      ceph_assert(m_timer_lock->is_locked());
+      ceph_assert(ceph_mutex_is_locked(*m_timer_lock));
       auto cct = m_image_ctx->cct;
       ldout(cct, 20) << "running timer task " << m_timer_task << dendl;
 
       m_timer_task = nullptr;
-      m_image_ctx->op_work_queue->queue(ctx, 0);
+      m_image_ctx->asio_engine->post(
+        [this, object_no]() {
+          std::lock_guard locker{m_lock};
+          dispatch_delayed_requests(object_no);
+        });
     });
 
   ldout(cct, 20) << "scheduling task " << m_timer_task << " at "

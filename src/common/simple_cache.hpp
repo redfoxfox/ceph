@@ -15,19 +15,33 @@
 #ifndef CEPH_SIMPLECACHE_H
 #define CEPH_SIMPLECACHE_H
 
+#include <list>
+#include <map>
+#include <unordered_map>
+#include <utility>
+
 #include "common/ceph_mutex.h"
-#include "include/unordered_map.h"
 
 template <class K, class V, class C = std::less<K>, class H = std::hash<K> >
 class SimpleLRU {
   ceph::mutex lock = ceph::make_mutex("SimpleLRU::lock");
   size_t max_size;
-  ceph::unordered_map<K, typename list<pair<K, V> >::iterator, H> contents;
-  list<pair<K, V> > lru;
-  map<K, V, C> pinned;
+  size_t max_bytes = 0;
+  size_t total_bytes = 0;
+  std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, H> contents;
+  std::list<std::pair<K, V> > lru;
+  std::map<K, V, C> pinned;
 
   void trim_cache() {
     while (contents.size() > max_size) {
+      contents.erase(lru.back().first);
+      lru.pop_back();
+    }
+  }
+
+  void trim_cache_bytes() {
+    while(total_bytes > max_bytes) {
+      total_bytes -= lru.back().second.length();
       contents.erase(lru.back().first);
       lru.pop_back();
     }
@@ -37,6 +51,12 @@ class SimpleLRU {
     lru.emplace_front(key, std::move(value)); // can't move key because we access it below
     contents[key] = lru.begin();
     trim_cache();
+  }
+
+  void _add_bytes(K key, V&& value) {
+    lru.emplace_front(key, std::move(value)); // can't move key because we access it below
+    contents[key] = lru.begin();
+    trim_cache_bytes();
   }
 
 public:
@@ -51,11 +71,10 @@ public:
 
   void clear_pinned(K e) {
     std::lock_guard l(lock);
-    for (typename map<K, V, C>::iterator i = pinned.begin();
+    for (auto i = pinned.begin();
 	 i != pinned.end() && i->first <= e;
 	 pinned.erase(i++)) {
-      typename ceph::unordered_map<K, typename list<pair<K, V> >::iterator, H>::iterator iter =
-        contents.find(i->first);
+      auto iter = contents.find(i->first);
       if (iter == contents.end())
 	_add(i->first, std::move(i->second));
       else
@@ -65,10 +84,10 @@ public:
 
   void clear(K key) {
     std::lock_guard l(lock);
-    typename ceph::unordered_map<K, typename list<pair<K, V> >::iterator, H>::iterator i =
-      contents.find(key);
+    auto i = contents.find(key);
     if (i == contents.end())
       return;
+    total_bytes -= i->second->second.length();
     lru.erase(i->second);
     contents.erase(i);
   }
@@ -79,16 +98,31 @@ public:
     trim_cache();
   }
 
+  size_t get_size() {
+    std::lock_guard l(lock);
+    return contents.size();
+  }
+
+  void set_bytes(size_t num_bytes) {
+    std::lock_guard l(lock);
+    max_bytes = num_bytes;
+    trim_cache_bytes();
+  }
+
+  size_t get_bytes() {
+    std::lock_guard l(lock);
+    return total_bytes;
+  }
+
   bool lookup(K key, V *out) {
     std::lock_guard l(lock);
-    typename ceph::unordered_map<K, typename list<pair<K, V> >::iterator, H>::iterator i =
-      contents.find(key);
+    auto i = contents.find(key);
     if (i != contents.end()) {
       *out = i->second->second;
       lru.splice(lru.begin(), lru, i->second);
       return true;
     }
-    typename map<K, V, C>::iterator i_pinned = pinned.find(key);
+    auto i_pinned = pinned.find(key);
     if (i_pinned != pinned.end()) {
       *out = i_pinned->second;
       return true;
@@ -99,6 +133,12 @@ public:
   void add(K key, V value) {
     std::lock_guard l(lock);
     _add(std::move(key), std::move(value));
+  }
+
+  void add_bytes(K key, V value) {
+    std::lock_guard l(lock);
+    total_bytes += value.length();
+    _add_bytes(std::move(key), std::move(value));
   }
 };
 

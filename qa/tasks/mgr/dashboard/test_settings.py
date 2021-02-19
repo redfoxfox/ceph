@@ -2,12 +2,12 @@
 
 from __future__ import absolute_import
 
-from .helper import DashboardTestCase, JList, JObj, JAny
-from pprint import pformat
+from .helper import DashboardTestCase, JAny, JList, JObj
 
 
 class SettingsTest(DashboardTestCase):
     def setUp(self):
+        super(SettingsTest, self).setUp()
         self.settings = self._get('/api/settings')
 
     def tearDown(self):

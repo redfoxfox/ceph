@@ -4,10 +4,11 @@ import { Injectable } from '@angular/core';
 import { of as observableOf } from 'rxjs';
 import { mergeMap } from 'rxjs/operators';
 
-import { ApiModule } from './api.module';
+import { cdEncode } from '../decorators/cd-encode';
 
+@cdEncode
 @Injectable({
-  providedIn: ApiModule
+  providedIn: 'root'
 })
 export class PerformanceCounterService {
   private url = 'api/perf_counters';
@@ -19,9 +20,8 @@ export class PerformanceCounterService {
   }
 
   get(service_type: string, service_id: string) {
-    const serviceType = service_type.replace('-', '_');
-    return this.http.get(`${this.url}/${serviceType}/${service_id}`).pipe(
-      mergeMap((resp) => {
+    return this.http.get(`${this.url}/${service_type}/${service_id}`).pipe(
+      mergeMap((resp: any) => {
         return observableOf(resp['counters']);
       })
     );

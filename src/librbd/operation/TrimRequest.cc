@@ -9,13 +9,12 @@
 #include "librbd/ObjectMap.h"
 #include "librbd/Utils.h"
 #include "librbd/io/ObjectDispatchSpec.h"
-#include "librbd/io/ObjectDispatcher.h"
+#include "librbd/io/ObjectDispatcherInterface.h"
 #include "common/ContextCompletion.h"
 #include "common/dout.h"
 #include "common/errno.h"
 #include "osdc/Striper.h"
 
-#include <boost/bind.hpp>
 #include <boost/lambda/bind.hpp>
 #include <boost/lambda/construct.hpp>
 #include <boost/scope_exit.hpp>
@@ -31,15 +30,15 @@ template <typename I>
 class C_CopyupObject : public C_AsyncObjectThrottle<I> {
 public:
   C_CopyupObject(AsyncObjectThrottle<I> &throttle, I *image_ctx,
-                 ::SnapContext snapc, uint64_t object_no)
-    : C_AsyncObjectThrottle<I>(throttle, *image_ctx), m_snapc(snapc),
+                 IOContext io_context, uint64_t object_no)
+    : C_AsyncObjectThrottle<I>(throttle, *image_ctx), m_io_context(io_context),
       m_object_no(object_no)
   {
   }
 
   int send() override {
     I &image_ctx = this->m_image_ctx;
-    ceph_assert(image_ctx.owner_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
     ceph_assert(image_ctx.exclusive_lock == nullptr ||
                 image_ctx.exclusive_lock->is_lock_owner());
 
@@ -47,14 +46,14 @@ public:
     ldout(image_ctx.cct, 10) << "removing (with copyup) " << oid << dendl;
 
     auto object_dispatch_spec = io::ObjectDispatchSpec::create_discard(
-      &image_ctx, io::OBJECT_DISPATCH_LAYER_NONE, oid, m_object_no, 0,
-      image_ctx.layout.object_size, m_snapc,
+      &image_ctx, io::OBJECT_DISPATCH_LAYER_NONE, m_object_no, 0,
+      image_ctx.layout.object_size, m_io_context,
       io::OBJECT_DISCARD_FLAG_DISABLE_OBJECT_MAP_UPDATE, 0, {}, this);
     object_dispatch_spec->send();
     return 0;
   }
 private:
-  ::SnapContext m_snapc;
+  IOContext m_io_context;
   uint64_t m_object_no;
 };
 
@@ -69,12 +68,12 @@ public:
 
   int send() override {
     I &image_ctx = this->m_image_ctx;
-    ceph_assert(image_ctx.owner_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
     ceph_assert(image_ctx.exclusive_lock == nullptr ||
                 image_ctx.exclusive_lock->is_lock_owner());
 
     {
-      RWLock::RLocker snap_locker(image_ctx.snap_lock);
+      std::shared_lock image_locker{image_ctx.image_lock};
       if (image_ctx.object_map != nullptr &&
           !image_ctx.object_map->object_may_exist(m_object_no)) {
         return 1;
@@ -133,7 +132,7 @@ bool TrimRequest<I>::should_complete(int r)
     return true;
   }
 
-  RWLock::RLocker owner_lock(image_ctx.owner_lock);
+  std::shared_lock owner_lock{image_ctx.owner_lock};
   switch (m_state) {
   case STATE_PRE_TRIM:
     ldout(cct, 5) << " PRE_TRIM" << dendl;
@@ -174,13 +173,22 @@ bool TrimRequest<I>::should_complete(int r)
 
 template <typename I>
 void TrimRequest<I>::send() {
+  I &image_ctx = this->m_image_ctx;
+  CephContext *cct = image_ctx.cct;
+
+  if (!image_ctx.data_ctx.is_valid()) {
+    lderr(cct) << "missing data pool" << dendl;
+    send_finish(-ENODEV);
+    return;
+  }
+
   send_pre_trim();
 }
 
 template<typename I>
 void TrimRequest<I>::send_pre_trim() {
   I &image_ctx = this->m_image_ctx;
-  ceph_assert(image_ctx.owner_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
 
   if (m_delete_start >= m_num_objects) {
     send_clean_boundary();
@@ -188,7 +196,7 @@ void TrimRequest<I>::send_pre_trim() {
   }
 
   {
-    RWLock::RLocker snap_locker(image_ctx.snap_lock);
+    std::shared_lock image_locker{image_ctx.image_lock};
     if (image_ctx.object_map != nullptr) {
       ldout(image_ctx.cct, 5) << this << " send_pre_trim: "
                               << " delete_start_min=" << m_delete_start_min
@@ -197,7 +205,6 @@ void TrimRequest<I>::send_pre_trim() {
 
       ceph_assert(image_ctx.exclusive_lock->is_lock_owner());
 
-      RWLock::WLocker object_map_locker(image_ctx.object_map_lock);
       if (image_ctx.object_map->template aio_update<AsyncRequest<I> >(
             CEPH_NOSNAP, m_delete_start_min, m_num_objects, OBJECT_PENDING,
             OBJECT_EXISTS, {}, false, this)) {
@@ -212,16 +219,15 @@ void TrimRequest<I>::send_pre_trim() {
 template<typename I>
 void TrimRequest<I>::send_copyup_objects() {
   I &image_ctx = this->m_image_ctx;
-  ceph_assert(image_ctx.owner_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
 
-  ::SnapContext snapc;
+  IOContext io_context;
   bool has_snapshots;
   uint64_t parent_overlap;
   {
-    RWLock::RLocker snap_locker(image_ctx.snap_lock);
-    RWLock::RLocker parent_locker(image_ctx.parent_lock);
+    std::shared_lock image_locker{image_ctx.image_lock};
 
-    snapc = image_ctx.snapc;
+    io_context = image_ctx.get_data_io_context();
     has_snapshots = !image_ctx.snaps.empty();
     int r = image_ctx.get_parent_overlap(CEPH_NOSNAP, &parent_overlap);
     ceph_assert(r == 0);
@@ -249,7 +255,7 @@ void TrimRequest<I>::send_copyup_objects() {
   Context *ctx = this->create_callback_context();
   typename AsyncObjectThrottle<I>::ContextFactory context_factory(
     boost::lambda::bind(boost::lambda::new_ptr<C_CopyupObject<I> >(),
-      boost::lambda::_1, &image_ctx, snapc, boost::lambda::_2));
+      boost::lambda::_1, &image_ctx, io_context, boost::lambda::_2));
   AsyncObjectThrottle<I> *throttle = new AsyncObjectThrottle<I>(
     this, image_ctx, context_factory, ctx, &m_prog_ctx, copyup_start,
     copyup_end);
@@ -260,7 +266,7 @@ void TrimRequest<I>::send_copyup_objects() {
 template <typename I>
 void TrimRequest<I>::send_remove_objects() {
   I &image_ctx = this->m_image_ctx;
-  ceph_assert(image_ctx.owner_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
 
   ldout(image_ctx.cct, 5) << this << " send_remove_objects: "
 			    << " delete_start=" << m_delete_start
@@ -281,10 +287,10 @@ void TrimRequest<I>::send_remove_objects() {
 template<typename I>
 void TrimRequest<I>::send_post_trim() {
   I &image_ctx = this->m_image_ctx;
-  ceph_assert(image_ctx.owner_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
 
   {
-    RWLock::RLocker snap_locker(image_ctx.snap_lock);
+    std::shared_lock image_locker{image_ctx.image_lock};
     if (image_ctx.object_map != nullptr) {
       ldout(image_ctx.cct, 5) << this << " send_post_trim:"
                               << " delete_start_min=" << m_delete_start_min
@@ -293,7 +299,6 @@ void TrimRequest<I>::send_post_trim() {
 
       ceph_assert(image_ctx.exclusive_lock->is_lock_owner());
 
-      RWLock::WLocker object_map_locker(image_ctx.object_map_lock);
       if (image_ctx.object_map->template aio_update<AsyncRequest<I> >(
             CEPH_NOSNAP, m_delete_start_min, m_num_objects, OBJECT_NONEXISTENT,
             OBJECT_PENDING, {}, false, this)) {
@@ -308,7 +313,7 @@ void TrimRequest<I>::send_post_trim() {
 template <typename I>
 void TrimRequest<I>::send_clean_boundary() {
   I &image_ctx = this->m_image_ctx;
-  ceph_assert(image_ctx.owner_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
   CephContext *cct = image_ctx.cct;
   if (m_delete_off <= m_new_size) {
     send_finish(0);
@@ -324,10 +329,10 @@ void TrimRequest<I>::send_clean_boundary() {
 			    << " length=" << delete_len << dendl;
   m_state = STATE_CLEAN_BOUNDARY;
 
-  ::SnapContext snapc;
+  IOContext io_context;
   {
-    RWLock::RLocker snap_locker(image_ctx.snap_lock);
-    snapc = image_ctx.snapc;
+    std::shared_lock image_locker{image_ctx.image_lock};
+    io_context = image_ctx.get_data_io_context();
   }
 
   // discard the weird boundary
@@ -349,8 +354,8 @@ void TrimRequest<I>::send_clean_boundary() {
     }
 
     auto object_dispatch_spec = io::ObjectDispatchSpec::create_discard(
-      &image_ctx, io::OBJECT_DISPATCH_LAYER_NONE, p->oid.name, p->objectno,
-      p->offset, p->length, snapc, 0, 0, {}, req_comp);
+      &image_ctx, io::OBJECT_DISPATCH_LAYER_NONE, p->objectno, p->offset,
+      p->length, io_context, 0, 0, {}, req_comp);
     object_dispatch_spec->send();
   }
   completion->finish_adding_requests();

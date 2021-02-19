@@ -18,32 +18,31 @@
 #include "osd/osd_types.h"
 #include "messages/PaxosServiceMessage.h"
 
-class MPGStats : public MessageInstance<MPGStats, PaxosServiceMessage> {
+class MPGStats final : public PaxosServiceMessage {
   static constexpr int HEAD_VERSION = 2;
   static constexpr int COMPAT_VERSION = 1;
-public:
-  friend factory;
 
+public:
   uuid_d fsid;
   std::map<pg_t, pg_stat_t> pg_stat;
   osd_stat_t osd_stat;
   std::map<int64_t, store_statfs_t> pool_stat;
   epoch_t epoch = 0;
 
-  MPGStats() : MessageInstance(MSG_PGSTATS, 0, HEAD_VERSION, COMPAT_VERSION) {}
+  MPGStats() : PaxosServiceMessage{MSG_PGSTATS, 0, HEAD_VERSION, COMPAT_VERSION} {}
   MPGStats(const uuid_d& f, epoch_t e)
-    : MessageInstance(MSG_PGSTATS, 0, HEAD_VERSION, COMPAT_VERSION),
+    : PaxosServiceMessage{MSG_PGSTATS, 0, HEAD_VERSION, COMPAT_VERSION},
       fsid(f),
       epoch(e)
   {}
 
 private:
-  ~MPGStats() override {}
+  ~MPGStats() final {}
 
 public:
   std::string_view get_type_name() const override { return "pg_stats"; }
   void print(std::ostream& out) const override {
-    out << "pg_stats(" << pg_stat.size() << " pgs tid " << get_tid() << " v " << version << ")";
+    out << "pg_stats(" << pg_stat.size() << " pgs seq " << osd_stat.seq << " v " << version << ")";
   }
 
   void encode_payload(uint64_t features) override {
@@ -62,6 +61,10 @@ public:
     paxos_decode(p);
     decode(fsid, p);
     decode(osd_stat, p);
+    if (osd_stat.num_osds == 0) {
+      // for the benefit of legacy OSDs who don't set this field
+      osd_stat.num_osds = 1;
+    }
     decode(pg_stat, p);
     decode(epoch, p);
     utime_t dummy;

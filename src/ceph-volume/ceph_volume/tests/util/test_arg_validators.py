@@ -1,5 +1,6 @@
 import argparse
 import pytest
+import os
 from ceph_volume import exceptions
 from ceph_volume.util import arg_validators
 
@@ -9,7 +10,8 @@ class TestOSDPath(object):
     def setup(self):
         self.validator = arg_validators.OSDPath()
 
-    def test_is_not_root(self):
+    def test_is_not_root(self, monkeypatch):
+        monkeypatch.setattr(os, 'getuid', lambda: 100)
         with pytest.raises(exceptions.SuperUserError):
             self.validator('')
 
@@ -25,7 +27,7 @@ class TestOSDPath(object):
         validator = arg_validators.OSDPath()
         with pytest.raises(argparse.ArgumentError) as error:
             validator(tmppath)
-        assert 'Required file (ceph_fsid) was not found in OSD' in str(error)
+        assert 'Required file (ceph_fsid) was not found in OSD' in str(error.value)
 
 
 class TestExcludeGroupOptions(object):
@@ -70,7 +72,7 @@ class TestExcludeGroupOptions(object):
             self.parser, ['filestore', 'bluestore'], argv=argv
         )
         stdout, stderr = capsys.readouterr()
-        assert 'Cannot use --filestore (filestore) with --bluestore (bluestore)' in stdout
+        assert 'Cannot use --filestore (filestore) with --bluestore (bluestore)' in stderr
 
 
 class TestValidDevice(object):

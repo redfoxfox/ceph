@@ -1,12 +1,18 @@
-import { fakeAsync, tick } from '@angular/core/testing';
+import { NgZone } from '@angular/core';
+import { fakeAsync, TestBed, tick } from '@angular/core/testing';
 
+import { configureTestBed } from '~/testing/unit-test-helper';
 import { RefreshIntervalService } from './refresh-interval.service';
 
 describe('RefreshIntervalService', () => {
   let service: RefreshIntervalService;
 
+  configureTestBed({
+    providers: [RefreshIntervalService]
+  });
+
   beforeEach(() => {
-    service = new RefreshIntervalService();
+    service = TestBed.inject(RefreshIntervalService);
   });
 
   it('should be created', () => {
@@ -15,7 +21,8 @@ describe('RefreshIntervalService', () => {
 
   it('should initial private interval time right', () => {
     sessionStorage.setItem('dashboard_interval', '10000');
-    service = new RefreshIntervalService();
+    const ngZone = TestBed.inject(NgZone);
+    service = new RefreshIntervalService(ngZone);
     expect(service.getRefreshInterval()).toBe(10000);
   });
 

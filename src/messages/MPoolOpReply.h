@@ -17,19 +17,17 @@
 
 #include "common/errno.h"
 
-class MPoolOpReply : public MessageInstance<MPoolOpReply, PaxosServiceMessage> {
+class MPoolOpReply : public PaxosServiceMessage {
 public:
-  friend factory;
-
   uuid_d fsid;
   __u32 replyCode = 0;
   epoch_t epoch = 0;
   ceph::buffer::list response_data;
 
-  MPoolOpReply() : MessageInstance(CEPH_MSG_POOLOP_REPLY, 0)
+  MPoolOpReply() : PaxosServiceMessage{CEPH_MSG_POOLOP_REPLY, 0}
   {}
   MPoolOpReply( uuid_d& f, ceph_tid_t t, int rc, int e, version_t v) :
-    MessageInstance(CEPH_MSG_POOLOP_REPLY, v),
+    PaxosServiceMessage{CEPH_MSG_POOLOP_REPLY, v},
     fsid(f),
     replyCode(rc),
     epoch(e) {
@@ -37,13 +35,13 @@ public:
   }
   MPoolOpReply(uuid_d& f, ceph_tid_t t, int rc, int e, version_t v,
 	       ceph::buffer::list *blp) :
-    MessageInstance(CEPH_MSG_POOLOP_REPLY, v),
+    PaxosServiceMessage{CEPH_MSG_POOLOP_REPLY, v},
     fsid(f),
     replyCode(rc),
     epoch(e) {
     set_tid(t);
     if (blp)
-      response_data.claim(*blp);
+      response_data = std::move(*blp);
   }
 
   std::string_view get_type_name() const override { return "poolopreply"; }
@@ -79,6 +77,9 @@ public:
       decode(response_data, p);
     }
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

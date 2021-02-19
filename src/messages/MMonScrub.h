@@ -16,9 +16,7 @@
 #include "msg/Message.h"
 #include "mon/mon_types.h"
 
-class MMonScrub : public MessageInstance<MMonScrub> {
-public:
-  friend factory;
+class MMonScrub : public Message {
 private:
   static constexpr int HEAD_VERSION = 2;
   static constexpr int COMPAT_VERSION = 2;
@@ -41,21 +39,21 @@ public:
   version_t version = 0;
   ScrubResult result;
   int32_t num_keys;
-  pair<string,string> key;
+  std::pair<std::string,std::string> key;
 
   MMonScrub()
-    : MessageInstance(MSG_MON_SCRUB, HEAD_VERSION, COMPAT_VERSION),
+    : Message{MSG_MON_SCRUB, HEAD_VERSION, COMPAT_VERSION},
       num_keys(-1)
   { }
 
   MMonScrub(op_type_t op, version_t v, int32_t num_keys)
-    : MessageInstance(MSG_MON_SCRUB, HEAD_VERSION, COMPAT_VERSION),
+    : Message{MSG_MON_SCRUB, HEAD_VERSION, COMPAT_VERSION},
       op(op), version(v), num_keys(num_keys)
   { }
 
   std::string_view get_type_name() const override { return "mon_scrub"; }
 
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "mon_scrub(" << get_opname((op_type_t)op);
     out << " v " << version;
     if (op == OP_RESULT)
@@ -76,6 +74,7 @@ public:
   }
 
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     uint8_t o;
     decode(o, p);
@@ -85,6 +84,9 @@ public:
     decode(num_keys, p);
     decode(key, p);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif /* CEPH_MMONSCRUB_H */

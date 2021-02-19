@@ -25,12 +25,15 @@
 
 #include "common/perf_histogram.h"
 #include "include/utime.h"
+#include "include/common_fwd.h"
 #include "common/ceph_mutex.h"
 #include "common/ceph_time.h"
 
-class CephContext;
-class PerfCountersBuilder;
-class PerfCounters;
+namespace TOPNSPC::common {
+  class CephContext;
+  class PerfCountersBuilder;
+  class PerfCounters;
+}
 
 enum perfcounter_type_d : uint8_t
 {
@@ -56,6 +59,7 @@ enum unit_t : uint8_t
  * In the future, we will probably get rid of the first/last arguments, since
  * PerfCountersBuilder can deduce them itself.
  */
+namespace TOPNSPC::common {
 class PerfCountersBuilder
 {
 public:
@@ -243,11 +247,11 @@ public:
 
   void reset();
   void dump_formatted(ceph::Formatter *f, bool schema,
-                      const std::string &counter = "") {
+                      const std::string &counter = "") const {
     dump_formatted_generic(f, schema, false, counter);
   }
   void dump_formatted_histograms(ceph::Formatter *f, bool schema,
-                                 const std::string &counter = "") {
+                                 const std::string &counter = "") const {
     dump_formatted_generic(f, schema, true, counter);
   }
   std::pair<uint64_t, uint64_t> get_tavg_ns(int idx) const;
@@ -274,7 +278,7 @@ private:
   PerfCounters(const PerfCounters &rhs);
   PerfCounters& operator=(const PerfCounters &rhs);
   void dump_formatted_generic(ceph::Formatter *f, bool schema, bool histograms,
-                              const std::string &counter = "");
+                              const std::string &counter = "") const;
 
   typedef std::vector<perf_counter_data_any_d> perf_counter_data_vec_t;
 
@@ -285,7 +289,7 @@ private:
 
   int prio_adjust = 0;
 
-#ifndef WITH_SEASTAR
+#if !defined(WITH_SEASTAR) || defined(WITH_ALIEN)
   const std::string m_lock_name;
   /** Protects m_data */
   ceph::mutex m_lock;
@@ -321,13 +325,13 @@ public:
 
   void dump_formatted(ceph::Formatter *f, bool schema,
                       const std::string &logger = "",
-                      const std::string &counter = "") {
+                      const std::string &counter = "") const {
     dump_formatted_generic(f, schema, false, logger, counter);
   }
 
   void dump_formatted_histograms(ceph::Formatter *f, bool schema,
                                  const std::string &logger = "",
-                                 const std::string &counter = "") {
+                                 const std::string &counter = "") const {
     dump_formatted_generic(f, schema, true, logger, counter);
   }
 
@@ -348,7 +352,7 @@ public:
 private:
   void dump_formatted_generic(ceph::Formatter *f, bool schema, bool histograms,
                               const std::string &logger = "",
-                              const std::string &counter = "");
+                              const std::string &counter = "") const;
 
   perf_counters_set_t m_loggers;
 
@@ -374,5 +378,5 @@ public:
   }
 };
 
-
+}
 #endif

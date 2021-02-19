@@ -1,22 +1,18 @@
 import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { ComponentFixture, fakeAsync, TestBed, tick } from '@angular/core/testing';
-import { By } from '@angular/platform-browser';
+import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { ToastModule } from 'ng2-toastr';
-import { TabsModule } from 'ngx-bootstrap/tabs';
+import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
+import { ToastrModule } from 'ngx-toastr';
 import { of as observableOf, throwError as observableThrowError } from 'rxjs';
 
-import {
-  configureTestBed,
-  i18nProviders,
-  PermissionHelper
-} from '../../../../../testing/unit-test-helper';
-import { MgrModuleService } from '../../../../shared/api/mgr-module.service';
-import { TableActionsComponent } from '../../../../shared/datatable/table-actions/table-actions.component';
-import { CdTableSelection } from '../../../../shared/models/cd-table-selection';
-import { NotificationService } from '../../../../shared/services/notification.service';
-import { SharedModule } from '../../../../shared/shared.module';
+import { MgrModuleService } from '~/app/shared/api/mgr-module.service';
+import { TableActionsComponent } from '~/app/shared/datatable/table-actions/table-actions.component';
+import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
+import { NotificationService } from '~/app/shared/services/notification.service';
+import { SharedModule } from '~/app/shared/shared.module';
+import { configureTestBed, PermissionHelper } from '~/testing/unit-test-helper';
 import { MgrModuleDetailsComponent } from '../mgr-module-details/mgr-module-details.component';
 import { MgrModuleListComponent } from './mgr-module-list.component';
 
@@ -29,20 +25,21 @@ describe('MgrModuleListComponent', () => {
   configureTestBed({
     declarations: [MgrModuleListComponent, MgrModuleDetailsComponent],
     imports: [
+      BrowserAnimationsModule,
       RouterTestingModule,
       SharedModule,
       HttpClientTestingModule,
-      TabsModule.forRoot(),
-      ToastModule.forRoot()
+      NgbNavModule,
+      ToastrModule.forRoot()
     ],
-    providers: [MgrModuleService, NotificationService, i18nProviders]
+    providers: [MgrModuleService, NotificationService]
   });
 
   beforeEach(() => {
     fixture = TestBed.createComponent(MgrModuleListComponent);
     component = fixture.componentInstance;
-    mgrModuleService = TestBed.get(MgrModuleService);
-    notificationService = TestBed.get(NotificationService);
+    mgrModuleService = TestBed.inject(MgrModuleService);
+    notificationService = TestBed.inject(NotificationService);
   });
 
   it('should create', () => {
@@ -50,57 +47,39 @@ describe('MgrModuleListComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  describe('show action buttons and drop down actions depending on permissions', () => {
-    let tableActions: TableActionsComponent;
-    let scenario: { fn; empty; single };
-    let permissionHelper: PermissionHelper;
+  it('should test all TableActions combinations', () => {
+    const permissionHelper: PermissionHelper = new PermissionHelper(component.permission);
+    const tableActions: TableActionsComponent = permissionHelper.setPermissionsAndGetActions(
+      component.tableActions
+    );
 
-    const getTableActionComponent = (): TableActionsComponent => {
-      fixture.detectChanges();
-      return fixture.debugElement.query(By.directive(TableActionsComponent)).componentInstance;
-    };
-
-    beforeEach(() => {
-      permissionHelper = new PermissionHelper(component.permission, () =>
-        getTableActionComponent()
-      );
-      scenario = {
-        fn: () => tableActions.getCurrentButton().name,
-        single: 'Edit',
-        empty: 'Edit'
-      };
-    });
-
-    describe('with read and update', () => {
-      beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(0, 1, 0);
-      });
-
-      it('shows action button', () => permissionHelper.testScenarios(scenario));
-
-      it('shows all actions', () => {
-        expect(tableActions.tableActions.length).toBe(3);
-        expect(tableActions.tableActions).toEqual(component.tableActions);
-      });
-    });
-
-    describe('with only read', () => {
-      beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(0, 0, 0);
-      });
-
-      it('shows no main action', () => {
-        permissionHelper.testScenarios({
-          fn: () => tableActions.getCurrentButton(),
-          single: undefined,
-          empty: undefined
-        });
-      });
-
-      it('shows no actions', () => {
-        expect(tableActions.tableActions.length).toBe(0);
-        expect(tableActions.tableActions).toEqual([]);
-      });
+    expect(tableActions).toEqual({
+      'create,update,delete': {
+        actions: ['Edit', 'Enable', 'Disable'],
+        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+      },
+      'create,update': {
+        actions: ['Edit', 'Enable', 'Disable'],
+        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+      },
+      'create,delete': {
+        actions: [],
+        primary: { multiple: '', executing: '', single: '', no: '' }
+      },
+      create: { actions: [], primary: { multiple: '', executing: '', single: '', no: '' } },
+      'update,delete': {
+        actions: ['Edit', 'Enable', 'Disable'],
+        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+      },
+      update: {
+        actions: ['Edit', 'Enable', 'Disable'],
+        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+      },
+      delete: { actions: [], primary: { multiple: '', executing: '', single: '', no: '' } },
+      'no-permissions': {
+        actions: [],
+        primary: { multiple: '', executing: '', single: '', no: '' }
+      }
     });
   });
 
@@ -116,11 +95,11 @@ describe('MgrModuleListComponent', () => {
     it('should enable module', fakeAsync(() => {
       spyOn(mgrModuleService, 'enable').and.returnValue(observableThrowError('y'));
       spyOn(mgrModuleService, 'list').and.returnValues(observableThrowError('z'), observableOf([]));
-      component.selection.selected.push({
+      component.selection.add({
         name: 'foo',
-        enabled: false
+        enabled: false,
+        always_on: false
       });
-      component.selection.update();
       component.updateModuleState();
       tick(2000);
       tick(2000);
@@ -135,11 +114,11 @@ describe('MgrModuleListComponent', () => {
     it('should disable module', fakeAsync(() => {
       spyOn(mgrModuleService, 'disable').and.returnValue(observableThrowError('x'));
       spyOn(mgrModuleService, 'list').and.returnValue(observableOf([]));
-      component.selection.selected.push({
+      component.selection.add({
         name: 'bar',
-        enabled: true
+        enabled: true,
+        always_on: false
       });
-      component.selection.update();
       component.updateModuleState();
       tick(2000);
       expect(mgrModuleService.disable).toHaveBeenCalledWith('bar');
@@ -149,5 +128,28 @@ describe('MgrModuleListComponent', () => {
       expect(component.blockUI.stop).toHaveBeenCalled();
       expect(component.table.refreshBtn).toHaveBeenCalled();
     }));
+
+    it.only('should not disable module without selecting one', () => {
+      expect(component.getTableActionDisabledDesc()).toBeTruthy();
+    });
+
+    it('should not disable dashboard module', () => {
+      component.selection.selected = [
+        {
+          name: 'dashboard'
+        }
+      ];
+      expect(component.getTableActionDisabledDesc()).toBeTruthy();
+    });
+
+    it('should not disable an always-on module', () => {
+      component.selection.selected = [
+        {
+          name: 'bar',
+          always_on: true
+        }
+      ];
+      expect(component.getTableActionDisabledDesc()).toBe('This Manager module is always on.');
+    });
   });
 });

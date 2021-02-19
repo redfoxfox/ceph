@@ -11,7 +11,6 @@
 #include <list>
 
 class Context;
-class ContextWQ;
 class SafeTimer;
 
 namespace librbd {
@@ -63,7 +62,7 @@ private:
    *                              PRE REMOVE IMAGE * * *        |
    *                                     |             *        |
    *                                     v             *        |
-   *                                TRIM IMAGE * * * * *        |
+   *    (skip if invalid data pool) TRIM IMAGE * * * * *        |
    *                                     |             *        |
    *                                     v             *        |
    *                                DETACH CHILD       *        |

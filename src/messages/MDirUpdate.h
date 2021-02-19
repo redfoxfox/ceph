@@ -16,12 +16,10 @@
 #ifndef CEPH_MDIRUPDATE_H
 #define CEPH_MDIRUPDATE_H
 
-#include "msg/Message.h"
+#include "messages/MMDSOp.h"
 
-class MDirUpdate : public MessageInstance<MDirUpdate> {
+class MDirUpdate final : public MMDSOp {
 public:
-  friend factory;
-
   mds_rank_t get_source_mds() const { return from_mds; }
   dirfrag_t get_dirfrag() const { return dirfrag; }
   int get_dir_rep() const { return dir_rep; }
@@ -33,11 +31,12 @@ public:
   void inc_tried_discover() const { ++tried_discover; }
 
   std::string_view get_type_name() const override { return "dir_update"; }
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "dir_update(" << get_dirfrag() << ")";
   }
 
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(from_mds, p);
     decode(dirfrag, p);
@@ -58,20 +57,20 @@ public:
   }
 
 protected:
-  ~MDirUpdate() {}
-  MDirUpdate() : MessageInstance(MSG_MDS_DIRUPDATE) {}
+  ~MDirUpdate() final {}
+  MDirUpdate() : MMDSOp(MSG_MDS_DIRUPDATE, HEAD_VERSION, COMPAT_VERSION) {}
   MDirUpdate(mds_rank_t f,
 	     dirfrag_t dirfrag,
              int dir_rep,
              const std::set<int32_t>& dir_rep_by,
              filepath& path,
              bool discover = false) :
-    MessageInstance(MSG_MDS_DIRUPDATE), from_mds(f), dirfrag(dirfrag),
+    MMDSOp(MSG_MDS_DIRUPDATE, HEAD_VERSION, COMPAT_VERSION), from_mds(f), dirfrag(dirfrag),
     dir_rep(dir_rep), dir_rep_by(dir_rep_by), path(path) {
     this->discover = discover ? 5 : 0;
   }
   MDirUpdate(const MDirUpdate& m)
-  : MessageInstance(MSG_MDS_DIRUPDATE),
+  : MMDSOp{MSG_MDS_DIRUPDATE},
     from_mds(m.from_mds),
     dirfrag(m.dirfrag),
     dir_rep(m.dir_rep),
@@ -88,6 +87,12 @@ protected:
   std::set<int32_t> dir_rep_by;
   filepath path;
   mutable int tried_discover = 0; // XXX HACK
+
+private:
+  static constexpr int HEAD_VERSION = 1;
+  static constexpr int COMPAT_VERSION = 1;
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

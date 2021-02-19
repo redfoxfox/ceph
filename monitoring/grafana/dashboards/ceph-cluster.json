@@ -35,7 +35,7 @@
     "list": []
   },
   "description": "Ceph cluster overview",
-  "editable": true,
+  "editable": false,
   "gnetId": null,
   "graphTooltip": 0,
   "id": null,
@@ -52,7 +52,7 @@
         "rgb(255, 0, 0)"
       ],
       "datasource": "$datasource",
-      "editable": true,
+      "editable": false,
       "error": false,
       "format": "none",
       "gauge": {
@@ -116,7 +116,7 @@
         }
       ],
       "thresholds": "1,2",
-      "timeFrom": "1m",
+      "timeFrom": null,
       "title": "Health Status",
       "transparent": false,
       "type": "singlestat",
@@ -260,6 +260,7 @@
         "#d44a3a"
       ],
       "datasource": "$datasource",
+      "decimals": 2,
       "format": "percentunit",
       "gauge": {
         "maxValue": 100,
@@ -402,49 +403,49 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "ceph_pg_total",
+          "expr": "sum(ceph_pg_total)",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Total",
           "refId": "A"
         },
         {
-          "expr": "ceph_pg_active",
+          "expr": "sum(ceph_pg_active)",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Active",
           "refId": "B"
         },
         {
-          "expr": "ceph_pg_total - ceph_pg_active",
+          "expr": "sum(ceph_pg_total - ceph_pg_active)",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Inactive",
           "refId": "G"
         },
         {
-          "expr": "ceph_pg_undersized",
+          "expr": "sum(ceph_pg_undersized)",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Undersized",
           "refId": "F"
         },
         {
-          "expr": "ceph_pg_degraded",
+          "expr": "sum(ceph_pg_degraded)",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Degraded",
           "refId": "C"
         },
         {
-          "expr": "ceph_pg_inconsistent",
+          "expr": "sum(ceph_pg_inconsistent)",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Inconsistent",
           "refId": "D"
         },
         {
-          "expr": "ceph_pg_down",
+          "expr": "sum(ceph_pg_down)",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Down",
@@ -850,7 +851,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(deriv(ceph_pool_bytes_used{instance=~\"$instance\"}[1m]))",
+          "expr": "sum(deriv(ceph_pool_stored{instance=~\"$instance\"}[1m]))",
           "format": "time_series",
           "intervalFactor": 1,
           "refId": "A"

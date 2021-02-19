@@ -61,6 +61,9 @@ private:
    *            V2_GET_DATA_POOL --------------> REFRESH
    *                                                |
    *                                                v
+   *                                             INIT_PLUGIN_REGISTRY
+   *                                                |
+   *                                                v
    *                                             INIT_CACHE
    *                                                |
    *                                                v
@@ -119,6 +122,9 @@ private:
 
   void send_refresh();
   Context *handle_refresh(int *result);
+
+  void send_init_plugin_registry();
+  Context* handle_init_plugin_registry(int *result);
 
   Context *send_init_cache(int *result);
 

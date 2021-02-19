@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #ifndef CEPH_RGW_CLIENT_IO_DECOIMPL_H
 #define CEPH_RGW_CLIENT_IO_DECOIMPL_H
@@ -55,8 +55,8 @@ public:
     return sent;
   }
 
-  size_t send_header(const boost::string_ref& name,
-                     const boost::string_ref& value) override {
+  size_t send_header(const std::string_view& name,
+                     const std::string_view& value) override {
     const auto sent = DecoratedRestfulClient<T>::send_header(name, value);
     lsubdout(cct, rgw, 30) << "AccountingFilter::send_header: e="
         << (enabled ? "1" : "0") << ", sent=" << sent << ", total="
@@ -291,7 +291,7 @@ public:
       // extensions/trailing headers.
       char chunk_size[32];
       const auto chunk_size_len = snprintf(chunk_size, sizeof(chunk_size),
-                                           "%" PRIx64 "\r\n", len);
+                                           "%zx\r\n", len);
       size_t sent = 0;
 
       sent += DecoratedRestfulClient<T>::send_body(chunk_size, chunk_size_len);
@@ -386,8 +386,8 @@ protected:
 
   std::vector<std::pair<std::string, std::string>> headers;
 
-  size_t send_header(const boost::string_ref& name,
-                     const boost::string_ref& value) override {
+  size_t send_header(const std::string_view& name,
+                     const std::string_view& value) override {
     switch (phase) {
     case ReorderState::RGW_EARLY_HEADERS:
     case ReorderState::RGW_STATUS_SEEN:

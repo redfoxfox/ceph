@@ -30,7 +30,6 @@ enum {
   AUTH_MODE_MON_MAX = 19,
 };
 
-class Cond;
 
 struct EntityAuth {
   CryptoKey key;
@@ -193,6 +192,9 @@ struct AuthConnectionMeta {
 
   std::unique_ptr<AuthAuthorizer> authorizer;
   std::unique_ptr<AuthAuthorizerChallenge> authorizer_challenge;
+
+  ///< set if msgr1 peer doesn't support CEPHX_V2
+  bool skip_authorizer_challenge = false;
 };
 
 /*
@@ -257,7 +259,7 @@ struct RotatingSecrets {
   bool need_new_secrets() const {
     return secrets.size() < KEY_ROTATE_NUM;
   }
-  bool need_new_secrets(utime_t now) const {
+  bool need_new_secrets(const utime_t& now) const {
     return secrets.size() < KEY_ROTATE_NUM || current().expiration <= now;
   }
 

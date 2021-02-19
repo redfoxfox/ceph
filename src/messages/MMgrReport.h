@@ -18,9 +18,11 @@
 #include <boost/optional.hpp>
 
 #include "msg/Message.h"
+#include "mgr/MetricTypes.h"
 #include "mgr/OSDPerfMetricTypes.h"
 
 #include "common/perf_counters.h"
+#include "include/common_fwd.h"
 #include "mgr/DaemonHealthMetric.h"
 
 class PerfCounterType
@@ -59,24 +61,25 @@ public:
     decode(path, p);
     decode(description, p);
     decode(nick, p);
-    decode((uint8_t&)type, p);
+    uint8_t raw_type;
+    decode(raw_type, p);
+    type = (enum perfcounter_type_d)raw_type;
     if (struct_v >= 2) {
       decode(priority, p);
     }
     if (struct_v >= 3) {
-      decode((uint8_t&)unit, p);
+      uint8_t raw_unit;
+      decode(raw_unit, p);
+      unit = (enum unit_t)raw_unit;
     }
     DECODE_FINISH(p);
   }
 };
 WRITE_CLASS_ENCODER(PerfCounterType)
 
-class MMgrReport : public MessageInstance<MMgrReport> {
-public:
-  friend factory;
+class MMgrReport : public Message {
 private:
-
-  static constexpr int HEAD_VERSION = 7;
+  static constexpr int HEAD_VERSION = 9;
   static constexpr int COMPAT_VERSION = 1;
 
 public:
@@ -101,6 +104,7 @@ public:
 
   // for service registration
   boost::optional<std::map<std::string,std::string>> daemon_status;
+  boost::optional<std::map<std::string,std::string>> task_status;
 
   std::vector<DaemonHealthMetric> daemon_health_metrics;
 
@@ -108,6 +112,8 @@ public:
   ceph::buffer::list config_bl;
 
   std::map<OSDPerfMetricQuery, OSDPerfMetricReport>  osd_perf_metric_reports;
+
+  boost::optional<MetricReportMessage> metric_report_message;
 
   void decode_payload() override
   {
@@ -131,6 +137,12 @@ public:
     if (header.version >= 7) {
       decode(osd_perf_metric_reports, p);
     }
+    if (header.version >= 8) {
+      decode(task_status, p);
+    }
+    if (header.version >= 9) {
+      decode(metric_report_message, p);
+    }
   }
 
   void encode_payload(uint64_t features) override {
@@ -144,6 +156,13 @@ public:
     encode(daemon_health_metrics, payload);
     encode(config_bl, payload);
     encode(osd_perf_metric_reports, payload);
+    encode(task_status, payload);
+    if (metric_report_message && metric_report_message->should_encode(features)) {
+      encode(metric_report_message, payload);
+    } else {
+      boost::optional<MetricReportMessage> empty;
+      encode(empty, payload);
+    }
   }
 
   std::string_view get_type_name() const override { return "mgrreport"; }
@@ -164,12 +183,20 @@ public:
     if (!daemon_health_metrics.empty()) {
       out << " daemon_metrics=" << daemon_health_metrics.size();
     }
+    if (task_status) {
+      out << " task_status=" << task_status->size();
+    }
     out << ")";
   }
 
+private:
   MMgrReport()
-    : MessageInstance(MSG_MGR_REPORT, HEAD_VERSION, COMPAT_VERSION)
+    : Message{MSG_MGR_REPORT, HEAD_VERSION, COMPAT_VERSION}
   {}
+  using RefCountedObject::put;
+  using RefCountedObject::get;
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

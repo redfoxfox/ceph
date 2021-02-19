@@ -5,12 +5,12 @@ import time
 
 import rados
 
-from . import ControllerTestCase
+from ..controllers import Controller, Endpoint, RESTController, Task
 from ..services.ceph_service import SendCommandError
-from ..controllers import RESTController, Controller, Task, Endpoint
-from ..services.exception import handle_rados_error, handle_send_command_error, \
-    serialize_dashboard_exception
-from ..tools import ViewCache, TaskManager, NotificationQueue
+from ..services.exception import handle_rados_error, \
+    handle_send_command_error, serialize_dashboard_exception
+from ..tools import NotificationQueue, TaskManager, ViewCache
+from . import ControllerTestCase  # pylint: disable=no-name-in-module
 
 
 # pylint: disable=W0613
@@ -88,6 +88,10 @@ class RESTControllerTest(ControllerTestCase):
         TaskManager.init()
         cls.setup_controllers([FooResource])
 
+    @classmethod
+    def tearDownClass(cls):
+        NotificationQueue.stop()
+
     def test_no_exception(self):
         self._get('/foo/no_exception/a/b')
         self.assertStatus(200)
@@ -142,16 +146,16 @@ class RESTControllerTest(ControllerTestCase):
         )
 
         self._get('/foo/wait_task_exception')
-        while self.jsonBody():
+        while self.json_body():
             time.sleep(0.5)
             self._get('/foo/wait_task_exception')
 
     def test_internal_server_error(self):
         self._get('/foo/internal_server_error')
         self.assertStatus(500)
-        self.assertIn('unexpected condition', self.jsonBody()['detail'])
+        self.assertIn('unexpected condition', self.json_body()['detail'])
 
     def test_404(self):
         self._get('/foonot_found')
         self.assertStatus(404)
-        self.assertIn('detail', self.jsonBody())
+        self.assertIn('detail', self.json_body())

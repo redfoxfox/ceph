@@ -4,7 +4,6 @@
 #include "common/dout.h"
 #include "common/errno.h"
 #include "common/Timer.h"
-#include "common/WorkQueue.h"
 #include "journal/Settings.h"
 #include "include/ceph_assert.h"
 #include "librbd/Utils.h"
@@ -42,8 +41,8 @@ void RemoveRequest<I>::stat_journal() {
   ldout(m_cct, 20) << this << " " << __func__ << dendl;
 
   ImageCtx::get_timer_instance(m_cct, &m_timer, &m_timer_lock);
-  m_journaler = new Journaler(m_op_work_queue, m_timer, m_timer_lock,
-                              m_ioctx, m_image_id, m_image_client_id, {});
+  m_journaler = new Journaler(m_op_work_queue, m_timer, m_timer_lock, m_ioctx,
+                              m_image_id, m_image_client_id, {}, nullptr);
 
   using klass = RemoveRequest<I>;
   Context *ctx = create_context_callback<klass, &klass::handle_stat_journal>(this);

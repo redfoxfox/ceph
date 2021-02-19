@@ -224,6 +224,7 @@ public:
   static void generate_test_instances(std::list<BitVector *> &o);
 private:
   struct NoInitAllocator : public std::allocator<__u32> {
+    NoInitAllocator() {}
     NoInitAllocator(const std::allocator<__u32>& alloc)
       : std::allocator<__u32>(alloc) {
     }
@@ -274,7 +275,7 @@ void BitVector<_b>::resize(uint64_t size, bool zero) {
     if (zero) {
       m_data.append_zero(buffer_size - m_data.length());
     } else {
-      m_data.append(std::move(buffer::ptr(buffer_size - m_data.length())));
+      m_data.append(buffer::ptr(buffer_size - m_data.length()));
     }
   } else if (buffer_size < m_data.length()) {
     bufferlist bl;

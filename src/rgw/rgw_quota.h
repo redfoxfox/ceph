@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -22,13 +22,18 @@
 
 #include <atomic>
 
+#include "rgw/rgw_basic_types.h"
+#include "common/async/yield_context.h"
+
 static inline int64_t rgw_rounded_kb(int64_t bytes)
 {
   return (bytes + 1023) / 1024;
 }
 
-class RGWRados;
 class JSONObj;
+namespace rgw { namespace sal {
+  class RGWRadosStore;
+} }
 
 struct RGWQuotaInfo {
   template<class T> friend class RGWQuotaCache;
@@ -103,16 +108,14 @@ public:
   }
   virtual int check_quota(const rgw_user& bucket_owner, rgw_bucket& bucket,
                           RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_quota,
-			  uint64_t num_objs, uint64_t size) = 0;
+			  uint64_t num_objs, uint64_t size, optional_yield y) = 0;
 
-  virtual int check_bucket_shards(uint64_t max_objs_per_shard, uint64_t num_shards,
-				  const rgw_user& bucket_owner, const rgw_bucket& bucket,
-				  RGWQuotaInfo& bucket_quota, uint64_t num_objs, bool& need_resharding,
-                                  uint32_t *suggested_num_shards) = 0;
+  virtual void check_bucket_shards(uint64_t max_objs_per_shard, uint64_t num_shards,
+				   uint64_t num_objs, bool& need_resharding, uint32_t *suggested_num_shards) = 0;
 
   virtual void update_stats(const rgw_user& bucket_owner, rgw_bucket& bucket, int obj_delta, uint64_t added_bytes, uint64_t removed_bytes) = 0;
 
-  static RGWQuotaHandler *generate_handler(RGWRados *store, bool quota_threads);
+  static RGWQuotaHandler *generate_handler(rgw::sal::RGWRadosStore *store, bool quota_threads);
   static void free_handler(RGWQuotaHandler *handler);
 };
 

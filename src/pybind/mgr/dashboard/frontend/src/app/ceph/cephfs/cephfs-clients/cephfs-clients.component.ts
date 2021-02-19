@@ -1,9 +1,20 @@
-import { Component, Input, OnInit } from '@angular/core';
+import { Component, EventEmitter, Input, OnInit, Output } from '@angular/core';
 
-import { I18n } from '@ngx-translate/i18n-polyfill';
+import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
 
-import { CephfsService } from '../../../shared/api/cephfs.service';
-import { ViewCacheStatus } from '../../../shared/enum/view-cache-status.enum';
+import { CephfsService } from '~/app/shared/api/cephfs.service';
+import { TableStatusViewCache } from '~/app/shared/classes/table-status-view-cache';
+import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { ActionLabelsI18n } from '~/app/shared/constants/app.constants';
+import { Icons } from '~/app/shared/enum/icons.enum';
+import { NotificationType } from '~/app/shared/enum/notification-type.enum';
+import { CdTableAction } from '~/app/shared/models/cd-table-action';
+import { CdTableColumn } from '~/app/shared/models/cd-table-column';
+import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
+import { Permission } from '~/app/shared/models/permissions';
+import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
+import { ModalService } from '~/app/shared/services/modal.service';
+import { NotificationService } from '~/app/shared/services/notification.service';
 
 @Component({
   selector: 'cd-cephfs-clients',
@@ -14,32 +25,78 @@ export class CephfsClientsComponent implements OnInit {
   @Input()
   id: number;
 
-  clients: any;
-  viewCacheStatus: ViewCacheStatus;
+  @Input()
+  clients: {
+    data: any[];
+    status: TableStatusViewCache;
+  };
 
-  constructor(private cephfsService: CephfsService, private i18n: I18n) {}
+  @Output()
+  triggerApiUpdate = new EventEmitter();
 
-  ngOnInit() {
-    this.clients = {
-      columns: [
-        { prop: 'id', name: this.i18n('id') },
-        { prop: 'type', name: this.i18n('type') },
-        { prop: 'state', name: this.i18n('state') },
-        { prop: 'version', name: this.i18n('version') },
-        { prop: 'hostname', name: this.i18n('Host') },
-        { prop: 'root', name: this.i18n('root') }
-      ],
-      data: []
+  columns: CdTableColumn[];
+
+  permission: Permission;
+  tableActions: CdTableAction[];
+  modalRef: NgbModalRef;
+
+  selection = new CdTableSelection();
+
+  constructor(
+    private cephfsService: CephfsService,
+    private modalService: ModalService,
+    private notificationService: NotificationService,
+    private authStorageService: AuthStorageService,
+    private actionLabels: ActionLabelsI18n
+  ) {
+    this.permission = this.authStorageService.getPermissions().cephfs;
+    const evictAction: CdTableAction = {
+      permission: 'update',
+      icon: Icons.signOut,
+      click: () => this.evictClientModal(),
+      name: this.actionLabels.EVICT
     };
-
-    this.clients.data = [];
-    this.viewCacheStatus = ViewCacheStatus.ValueNone;
+    this.tableActions = [evictAction];
   }
 
-  refresh() {
-    this.cephfsService.getClients(this.id).subscribe((data: any) => {
-      this.viewCacheStatus = data.status;
-      this.clients.data = data.data;
+  ngOnInit() {
+    this.columns = [
+      { prop: 'id', name: $localize`id` },
+      { prop: 'type', name: $localize`type` },
+      { prop: 'state', name: $localize`state` },
+      { prop: 'version', name: $localize`version` },
+      { prop: 'hostname', name: $localize`Host` },
+      { prop: 'root', name: $localize`root` }
+    ];
+  }
+
+  updateSelection(selection: CdTableSelection) {
+    this.selection = selection;
+  }
+
+  evictClient(clientId: number) {
+    this.cephfsService.evictClient(this.id, clientId).subscribe(
+      () => {
+        this.triggerApiUpdate.emit();
+        this.modalRef.close();
+        this.notificationService.show(
+          NotificationType.success,
+          $localize`Evicted client '${clientId}'`
+        );
+      },
+      () => {
+        this.modalRef.componentInstance.stopLoadingSpinner();
+      }
+    );
+  }
+
+  evictClientModal() {
+    const clientId = this.selection.first().id;
+    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+      itemDescription: 'client',
+      itemNames: [clientId],
+      actionDescription: 'evict',
+      submitAction: () => this.evictClient(clientId)
     });
   }
 }

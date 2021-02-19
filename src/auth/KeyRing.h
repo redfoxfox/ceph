@@ -16,8 +16,7 @@
 #define CEPH_KEYRING_H
 
 #include "auth/Auth.h"
-
-class CephContext;
+#include "include/common_fwd.h"
 
 class KeyRing : public KeyStore {
   std::map<EntityName, EntityAuth> keys;
@@ -28,9 +27,6 @@ public:
   /* Create a KeyRing from a Ceph context.
    * We will use the configuration stored inside the context. */
   int from_ceph_context(CephContext *cct);
-
-  /* Create an empty KeyRing */
-  static KeyRing *create_empty();
 
   std::map<EntityName, EntityAuth>& get_keys() { return keys; }  // yuck
 

@@ -1,12 +1,15 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
-import { I18n } from '@ngx-translate/i18n-polyfill';
+import _ from 'lodash';
+import { map } from 'rxjs/operators';
 
-import { ApiModule } from './api.module';
+import { CdDevice } from '../models/devices';
+import { SmartDataResponseV1 } from '../models/smart';
+import { DeviceService } from '../services/device.service';
 
 @Injectable({
-  providedIn: ApiModule
+  providedIn: 'root'
 })
 export class OsdService {
   private path = 'api/osd';
@@ -15,7 +18,7 @@ export class OsdService {
     KNOWN_PRIORITIES: [
       {
         name: null,
-        text: this.i18n('-- Select the priority --'),
+        text: $localize`-- Select the priority --`,
         values: {
           osd_max_backfills: null,
           osd_recovery_max_active: null,
@@ -25,7 +28,7 @@ export class OsdService {
       },
       {
         name: 'low',
-        text: this.i18n('Low'),
+        text: $localize`Low`,
         values: {
           osd_max_backfills: 1,
           osd_recovery_max_active: 1,
@@ -35,7 +38,7 @@ export class OsdService {
       },
       {
         name: 'default',
-        text: this.i18n('Default'),
+        text: $localize`Default`,
         values: {
           osd_max_backfills: 1,
           osd_recovery_max_active: 3,
@@ -45,7 +48,7 @@ export class OsdService {
       },
       {
         name: 'high',
-        text: this.i18n('High'),
+        text: $localize`High`,
         values: {
           osd_max_backfills: 4,
           osd_recovery_max_active: 4,
@@ -56,17 +59,38 @@ export class OsdService {
     ]
   };
 
-  constructor(private http: HttpClient, private i18n: I18n) {}
+  constructor(private http: HttpClient, private deviceService: DeviceService) {}
+
+  create(driveGroups: Object[]) {
+    const request = {
+      method: 'drive_groups',
+      data: driveGroups,
+      tracking_id: _.join(_.map(driveGroups, 'service_id'), ', ')
+    };
+    return this.http.post(this.path, request, { observe: 'response' });
+  }
 
   getList() {
     return this.http.get(`${this.path}`);
   }
 
   getDetails(id: number) {
-    return this.http.get(`${this.path}/${id}`);
+    interface OsdData {
+      osd_map: { [key: string]: any };
+      osd_metadata: { [key: string]: any };
+      smart: { [device_identifier: string]: any };
+    }
+    return this.http.get<OsdData>(`${this.path}/${id}`);
   }
 
-  scrub(id, deep) {
+  /**
+   * @param id OSD ID
+   */
+  getSmartData(id: number) {
+    return this.http.get<SmartDataResponseV1>(`${this.path}/${id}/smart`);
+  }
+
+  scrub(id: string, deep: boolean) {
     return this.http.post(`${this.path}/${id}/scrub?deep=${deep}`, null);
   }
 
@@ -78,24 +102,32 @@ export class OsdService {
     return this.http.put(`${this.path}/flags`, { flags: flags });
   }
 
+  updateIndividualFlags(flags: { [flag: string]: boolean }, ids: number[]) {
+    return this.http.put(`${this.path}/flags/individual`, { flags: flags, ids: ids });
+  }
+
   markOut(id: number) {
-    return this.http.post(`${this.path}/${id}/mark_out`, null);
+    return this.http.put(`${this.path}/${id}/mark`, { action: 'out' });
   }
 
   markIn(id: number) {
-    return this.http.post(`${this.path}/${id}/mark_in`, null);
+    return this.http.put(`${this.path}/${id}/mark`, { action: 'in' });
   }
 
   markDown(id: number) {
-    return this.http.post(`${this.path}/${id}/mark_down`, null);
+    return this.http.put(`${this.path}/${id}/mark`, { action: 'down' });
   }
 
   reweight(id: number, weight: number) {
     return this.http.post(`${this.path}/${id}/reweight`, { weight: weight });
   }
 
+  update(id: number, deviceClass: string) {
+    return this.http.put(`${this.path}/${id}`, { device_class: deviceClass });
+  }
+
   markLost(id: number) {
-    return this.http.post(`${this.path}/${id}/mark_lost`, null);
+    return this.http.put(`${this.path}/${id}/mark`, { action: 'lost' });
   }
 
   purge(id: number) {
@@ -106,11 +138,33 @@ export class OsdService {
     return this.http.post(`${this.path}/${id}/destroy`, null);
   }
 
-  safeToDestroy(id: number) {
+  delete(id: number, preserveId?: boolean, force?: boolean) {
+    const params = {
+      preserve_id: preserveId ? 'true' : 'false',
+      force: force ? 'true' : 'false'
+    };
+    return this.http.delete(`${this.path}/${id}`, { observe: 'response', params: params });
+  }
+
+  safeToDestroy(ids: string) {
     interface SafeToDestroyResponse {
-      'safe-to-destroy': boolean;
+      is_safe_to_destroy: boolean;
       message?: string;
     }
-    return this.http.get<SafeToDestroyResponse>(`${this.path}/${id}/safe_to_destroy`);
+    return this.http.get<SafeToDestroyResponse>(`${this.path}/safe_to_destroy?ids=${ids}`);
+  }
+
+  safeToDelete(ids: string) {
+    interface SafeToDeleteResponse {
+      is_safe_to_delete: boolean;
+      message?: string;
+    }
+    return this.http.get<SafeToDeleteResponse>(`${this.path}/safe_to_delete?svc_ids=${ids}`);
+  }
+
+  getDevices(osdId: number) {
+    return this.http
+      .get<CdDevice[]>(`${this.path}/${osdId}/devices`)
+      .pipe(map((devices) => devices.map((device) => this.deviceService.prepareDevice(device))));
   }
 }

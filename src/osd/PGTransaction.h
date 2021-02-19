@@ -16,7 +16,7 @@
 
 #include <map>
 #include <memory>
-#include <boost/optional.hpp>
+#include <optional>
 
 #include "common/hobject.h"
 #include "osd/osd_types.h"
@@ -37,7 +37,7 @@
  */
 class PGTransaction {
 public:
-  map<hobject_t, ObjectContextRef> obc_map;
+  std::map<hobject_t, ObjectContextRef> obc_map;
 
   class ObjectOperation {
   public:
@@ -127,28 +127,28 @@ public:
      * remember the lowest truncate and the final object size
      * (the last truncate).  We also adjust the buffers map
      * to account for truncates overriding previous writes */
-    boost::optional<pair<uint64_t, uint64_t> > truncate = boost::none;
+    std::optional<std::pair<uint64_t, uint64_t> > truncate = std::nullopt;
 
-    std::map<string, boost::optional<bufferlist> > attr_updates;
+    std::map<std::string, std::optional<ceph::buffer::list> > attr_updates;
 
-    enum class OmapUpdateType {Remove, Insert};
-    std::vector<std::pair<OmapUpdateType, bufferlist> > omap_updates;
+    enum class OmapUpdateType {Remove, Insert, RemoveRange};
+    std::vector<std::pair<OmapUpdateType, ceph::buffer::list> > omap_updates;
 
-    boost::optional<bufferlist> omap_header;
+    std::optional<ceph::buffer::list> omap_header;
 
     /// (old, new) -- only valid with no truncate or buffer updates
-    boost::optional<pair<set<snapid_t>, set<snapid_t> > > updated_snaps;
+    std::optional<std::pair<std::set<snapid_t>, std::set<snapid_t>>> updated_snaps;
 
     struct alloc_hint_t {
       uint64_t expected_object_size;
       uint64_t expected_write_size;
       uint32_t flags;
     };
-    boost::optional<alloc_hint_t> alloc_hint;
+    std::optional<alloc_hint_t> alloc_hint;
 
     struct BufferUpdate {
       struct Write {
-	bufferlist buffer;
+	ceph::buffer::list buffer;
 	uint32_t fadvise_flags;
       };
       struct Zero {
@@ -174,7 +174,7 @@ public:
 	return match(
 	  bu,
 	  [&](const BufferUpdate::Write &w) -> BufferUpdateType {
-	    bufferlist bl;
+	    ceph::buffer::list bl;
 	    bl.substr_of(w.buffer, offset, len);
 	    return BufferUpdate::Write{bl, w.fadvise_flags};
 	  },
@@ -224,7 +224,7 @@ public:
 	  [&](const BufferUpdate::Write &w) -> BufferUpdateType {
 	    auto r = boost::get<BufferUpdate::Write>(&right);
 	    ceph_assert(r && w.fadvise_flags == r->fadvise_flags);
-	    bufferlist bl = w.buffer;
+	    ceph::buffer::list bl = w.buffer;
 	    bl.append(r->buffer);
 	    return BufferUpdate::Write{bl, w.fadvise_flags};
 	  },
@@ -246,7 +246,7 @@ public:
 
     friend class PGTransaction;
   };
-  map<hobject_t, ObjectOperation> op_map;
+  std::map<hobject_t, ObjectOperation> op_map;
 private:
   ObjectOperation &get_object_op_for_modify(const hobject_t &hoid) {
     auto &op = op_map[hoid];
@@ -319,8 +319,8 @@ public:
 
   void update_snaps(
     const hobject_t &hoid,         ///< [in] object for snaps
-    const set<snapid_t> &old_snaps,///< [in] old snaps value
-    const set<snapid_t> &new_snaps ///< [in] new snaps value
+    const std::set<snapid_t> &old_snaps,///< [in] old snaps value
+    const std::set<snapid_t> &new_snaps ///< [in] new snaps value
     ) {
     auto &op = get_object_op(hoid);
     ceph_assert(!op.updated_snaps);
@@ -338,7 +338,7 @@ public:
     auto &op = get_object_op_for_modify(hoid);
     op.clear_omap = true;
     op.omap_updates.clear();
-    op.omap_header = boost::none;
+    op.omap_header = std::nullopt;
   }
   void truncate(
     const hobject_t &hoid,         ///< [in] object
@@ -359,7 +359,7 @@ public:
   /// Attr ops
   void setattrs(
     const hobject_t &hoid,         ///< [in] object to write
-    map<string, bufferlist> &attrs ///< [in] attrs, may be cleared
+    std::map<std::string, ceph::buffer::list> &attrs ///< [in] attrs, may be cleared
     ) {
     auto &op = get_object_op_for_modify(hoid);
     for (auto &&i: attrs) {
@@ -370,8 +370,8 @@ public:
   }
   void setattr(
     const hobject_t &hoid,         ///< [in] object to write
-    const string &attrname,        ///< [in] attr to write
-    bufferlist &bl                 ///< [in] val to write, may be claimed
+    const std::string &attrname,        ///< [in] attr to write
+    ceph::buffer::list &bl                 ///< [in] val to write, may be claimed
     ) {
     auto &op = get_object_op_for_modify(hoid);
     auto& d = op.attr_updates[attrname];
@@ -380,10 +380,10 @@ public:
   }
   void rmattr(
     const hobject_t &hoid,         ///< [in] object to write
-    const string &attrname         ///< [in] attr to remove
+    const std::string &attrname         ///< [in] attr to remove
     ) {
     auto &op = get_object_op_for_modify(hoid);
-    op.attr_updates[attrname] = boost::none;
+    op.attr_updates[attrname] = std::nullopt;
   }
 
   /// set alloc hint
@@ -403,7 +403,7 @@ public:
     const hobject_t &hoid,         ///< [in] object to write
     uint64_t off,                  ///< [in] off at which to write
     uint64_t len,                  ///< [in] len to write from bl
-    bufferlist &bl,                ///< [in] bl to write will be claimed to len
+    ceph::buffer::list &bl,                ///< [in] bl to write will be claimed to len
     uint32_t fadvise_flags = 0     ///< [in] fadvise hint
     ) {
     auto &op = get_object_op_for_modify(hoid);
@@ -445,43 +445,65 @@ public:
   /// Omap updates
   void omap_setkeys(
     const hobject_t &hoid,         ///< [in] object to write
-    bufferlist &keys_bl            ///< [in] encoded map<string, bufferlist>
+    ceph::buffer::list &keys_bl            ///< [in] encoded map<string, ceph::buffer::list>
     ) {
     auto &op = get_object_op_for_modify(hoid);
     op.omap_updates.emplace_back(
-      make_pair(
+      std::make_pair(
 	ObjectOperation::OmapUpdateType::Insert,
 	keys_bl));
   }
   void omap_setkeys(
     const hobject_t &hoid,         ///< [in] object to write
-    map<string, bufferlist> &keys  ///< [in] omap keys, may be cleared
+    std::map<std::string, ceph::buffer::list> &keys  ///< [in] omap keys, may be cleared
     ) {
-    bufferlist bl;
+    using ceph::encode;
+    ceph::buffer::list bl;
     encode(keys, bl);
     omap_setkeys(hoid, bl);
   }
   void omap_rmkeys(
     const hobject_t &hoid,         ///< [in] object to write
-    bufferlist &keys_bl            ///< [in] encode set<string>
+    ceph::buffer::list &keys_bl            ///< [in] encode set<string>
     ) {
     auto &op = get_object_op_for_modify(hoid);
     op.omap_updates.emplace_back(
-      make_pair(
+      std::make_pair(
 	ObjectOperation::OmapUpdateType::Remove,
 	keys_bl));
   }
   void omap_rmkeys(
     const hobject_t &hoid,         ///< [in] object to write
-    set<string> &keys              ///< [in] omap keys, may be cleared
+    std::set<std::string> &keys              ///< [in] omap keys, may be cleared
     ) {
-    bufferlist bl;
+    using ceph::encode;
+    ceph::buffer::list bl;
     encode(keys, bl);
     omap_rmkeys(hoid, bl);
   }
+  void omap_rmkeyrange(
+    const hobject_t &hoid,         ///< [in] object to write
+    ceph::buffer::list &range_bl           ///< [in] encode string[2]
+    ) {
+    auto &op = get_object_op_for_modify(hoid);
+    op.omap_updates.emplace_back(
+      std::make_pair(
+	ObjectOperation::OmapUpdateType::RemoveRange,
+	range_bl));
+  }
+  void omap_rmkeyrange(
+    const hobject_t &hoid,         ///< [in] object to write
+    std::string& key_begin,        ///< [in] first key in range
+    std::string& key_end           ///< [in] first key past range, range is [first,last)
+    ) {
+    ceph::buffer::list bl;
+    ::encode(key_begin, bl);
+    ::encode(key_end, bl);
+    omap_rmkeyrange(hoid, bl);
+  }
   void omap_setheader(
     const hobject_t &hoid,         ///< [in] object to write
-    bufferlist &header             ///< [in] header
+    ceph::buffer::list &header             ///< [in] header
     ) {
     auto &op = get_object_op_for_modify(hoid);
     op.omap_header = header;
@@ -528,8 +550,8 @@ public:
    */
   template <typename T>
   void safe_create_traverse(T &&t) {
-    map<hobject_t, list<hobject_t>> dgraph;
-    list<hobject_t> stack;
+    std::map<hobject_t, std::list<hobject_t>> dgraph;
+    std::list<hobject_t> stack;
 
     // Populate stack with roots, dgraph with edges
     for (auto &&opair: op_map) {

@@ -11,7 +11,9 @@
 #include "common/Formatter.h"
 #include "common/TextTable.h"
 #include "global/global_context.h"
+#ifdef HAVE_CURSES
 #include <ncurses.h>
+#endif
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/time.h>
@@ -22,6 +24,7 @@
 #include <boost/assign.hpp>
 #include <boost/bimap.hpp>
 #include <boost/program_options.hpp>
+#include "json_spirit/json_spirit.h"
 
 namespace rbd {
 namespace action {
@@ -337,6 +340,7 @@ void format(const ImageStats& image_stats, Formatter* f, bool global_search) {
 
 } // namespace iostat
 
+#ifdef HAVE_CURSES
 namespace iotop {
 
 class MainWindow {
@@ -559,6 +563,7 @@ private:
 };
 
 } // namespace iotop
+#endif // HAVE_CURSES
 
 
 void get_arguments_iostat(po::options_description *positional,
@@ -616,6 +621,7 @@ int execute_iostat(const po::variables_map &vm,
     return r;
   }
 
+  utils::normalize_pool_name(&pool);
   std::string pool_spec = format_pool_spec(pool, pool_namespace);
 
   // no point to refreshing faster than the stats period
@@ -650,6 +656,7 @@ int execute_iostat(const po::variables_map &vm,
   return 0;
 }
 
+#ifdef HAVE_CURSES
 void get_arguments_iotop(po::options_description *positional,
                          po::options_description *options) {
   at::add_pool_options(positional, options, true);
@@ -678,6 +685,7 @@ int execute_iotop(const po::variables_map &vm,
     return r;
   }
 
+  utils::normalize_pool_name(&pool);
   iotop::MainWindow mainWindow(rados, format_pool_spec(pool, pool_namespace));
   r = mainWindow.run();
   if (r < 0) {
@@ -687,13 +695,15 @@ int execute_iotop(const po::variables_map &vm,
   return 0;
 }
 
-Shell::Action stat_action(
-  {"perf", "image", "iostat"}, {}, "Display image IO statistics.", "",
-  &get_arguments_iostat, &execute_iostat);
 Shell::Action top_action(
   {"perf", "image", "iotop"}, {}, "Display a top-like IO monitor.", "",
   &get_arguments_iotop, &execute_iotop);
 
+#endif // HAVE_CURSES
+
+Shell::Action stat_action(
+  {"perf", "image", "iostat"}, {}, "Display image IO statistics.", "",
+  &get_arguments_iostat, &execute_iostat);
 } // namespace perf
 } // namespace action
 } // namespace rbd

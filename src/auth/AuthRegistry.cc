@@ -16,6 +16,8 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "AuthRegistry(" << this << ") "
 
+using std::string;
+
 AuthRegistry::AuthRegistry(CephContext *cct)
   : cct(cct)
 {
@@ -178,7 +180,7 @@ void AuthRegistry::_refresh_config()
 void AuthRegistry::get_supported_methods(
   int peer_type,
   std::vector<uint32_t> *methods,
-  std::vector<uint32_t> *modes)
+  std::vector<uint32_t> *modes) const
 {
   if (methods) {
     methods->clear();
@@ -196,6 +198,7 @@ void AuthRegistry::get_supported_methods(
     if (modes) {
       switch (peer_type) {
       case CEPH_ENTITY_TYPE_MON:
+      case CEPH_ENTITY_TYPE_MGR:
 	*modes = mon_client_modes;
 	break;
       default:
@@ -204,10 +207,12 @@ void AuthRegistry::get_supported_methods(
     }
     return;
   case CEPH_ENTITY_TYPE_MON:
-    // i am mon
+  case CEPH_ENTITY_TYPE_MGR:
+    // i am mon/mgr
     switch (peer_type) {
     case CEPH_ENTITY_TYPE_MON:
-      // they are mon
+    case CEPH_ENTITY_TYPE_MGR:
+      // they are mon/mgr
       if (methods) {
 	*methods = cluster_methods;
       }
@@ -230,6 +235,14 @@ void AuthRegistry::get_supported_methods(
     switch (peer_type) {
     case CEPH_ENTITY_TYPE_MON:
     case CEPH_ENTITY_TYPE_MGR:
+      // they are a mon daemon
+      if (methods) {
+	*methods = cluster_methods;
+      }
+      if (modes) {
+	*modes = mon_cluster_modes;
+      }
+      break;
     case CEPH_ENTITY_TYPE_MDS:
     case CEPH_ENTITY_TYPE_OSD:
       // they are another daemon
@@ -253,14 +266,14 @@ void AuthRegistry::get_supported_methods(
   }
 }
 
-bool AuthRegistry::is_supported_method(int peer_type, int method)
+bool AuthRegistry::is_supported_method(int peer_type, int method) const
 {
   std::vector<uint32_t> s;
   get_supported_methods(peer_type, &s);
   return std::find(s.begin(), s.end(), method) != s.end();
 }
 
-bool AuthRegistry::any_supported_methods(int peer_type)
+bool AuthRegistry::any_supported_methods(int peer_type) const
 {
   std::vector<uint32_t> s;
   get_supported_methods(peer_type, &s);
@@ -270,7 +283,7 @@ bool AuthRegistry::any_supported_methods(int peer_type)
 void AuthRegistry::get_supported_modes(
   int peer_type,
   uint32_t auth_method,
-  std::vector<uint32_t> *modes)
+  std::vector<uint32_t> *modes) const
 {
   std::vector<uint32_t> s;
   get_supported_methods(peer_type, nullptr, &s);

@@ -1,24 +1,21 @@
 import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { By } from '@angular/platform-browser';
+import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { ToastModule } from 'ng2-toastr';
-import { TreeModule } from 'ng2-tree';
-import { TabsModule } from 'ngx-bootstrap/tabs';
+import { TreeModule } from '@circlon/angular-tree-component';
+import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
+import { ToastrModule } from 'ngx-toastr';
 import { BehaviorSubject, of } from 'rxjs';
 
-import {
-  configureTestBed,
-  i18nProviders,
-  PermissionHelper
-} from '../../../../testing/unit-test-helper';
-import { IscsiService } from '../../../shared/api/iscsi.service';
-import { TableActionsComponent } from '../../../shared/datatable/table-actions/table-actions.component';
-import { ExecutingTask } from '../../../shared/models/executing-task';
-import { SummaryService } from '../../../shared/services/summary.service';
-import { TaskListService } from '../../../shared/services/task-list.service';
-import { SharedModule } from '../../../shared/shared.module';
+import { IscsiService } from '~/app/shared/api/iscsi.service';
+import { TableActionsComponent } from '~/app/shared/datatable/table-actions/table-actions.component';
+import { CdTableAction } from '~/app/shared/models/cd-table-action';
+import { ExecutingTask } from '~/app/shared/models/executing-task';
+import { SummaryService } from '~/app/shared/services/summary.service';
+import { TaskListService } from '~/app/shared/services/task-list.service';
+import { SharedModule } from '~/app/shared/shared.module';
+import { configureTestBed, expectItemTasks, PermissionHelper } from '~/testing/unit-test-helper';
 import { IscsiTabsComponent } from '../iscsi-tabs/iscsi-tabs.component';
 import { IscsiTargetDetailsComponent } from '../iscsi-target-details/iscsi-target-details.component';
 import { IscsiTargetListComponent } from './iscsi-target-list.component';
@@ -29,34 +26,36 @@ describe('IscsiTargetListComponent', () => {
   let summaryService: SummaryService;
   let iscsiService: IscsiService;
 
-  const refresh = (data) => {
+  const refresh = (data: any) => {
     summaryService['summaryDataSource'].next(data);
   };
 
   configureTestBed({
     imports: [
+      BrowserAnimationsModule,
       HttpClientTestingModule,
       RouterTestingModule,
       SharedModule,
-      TabsModule.forRoot(),
       TreeModule,
-      ToastModule.forRoot()
+      ToastrModule.forRoot(),
+      NgbNavModule
     ],
     declarations: [IscsiTargetListComponent, IscsiTabsComponent, IscsiTargetDetailsComponent],
-    providers: [TaskListService, i18nProviders]
+    providers: [TaskListService]
   });
 
   beforeEach(() => {
     fixture = TestBed.createComponent(IscsiTargetListComponent);
     component = fixture.componentInstance;
-    summaryService = TestBed.get(SummaryService);
-    iscsiService = TestBed.get(IscsiService);
+    summaryService = TestBed.inject(SummaryService);
+    iscsiService = TestBed.inject(IscsiService);
 
     // this is needed because summaryService isn't being reset after each test.
     summaryService['summaryDataSource'] = new BehaviorSubject(null);
     summaryService['summaryData$'] = summaryService['summaryDataSource'].asObservable();
 
     spyOn(iscsiService, 'status').and.returnValue(of({ available: true }));
+    spyOn(iscsiService, 'version').and.returnValue(of({ ceph_iscsi_config_version: 11 }));
   });
 
   it('should create', () => {
@@ -90,7 +89,7 @@ describe('IscsiTargetListComponent', () => {
   describe('handling of executing tasks', () => {
     let targets: any[];
 
-    const addTarget = (name) => {
+    const addTarget = (name: string) => {
       const model: any = {
         target_iqn: name,
         portals: [{ host: 'node1', ip: '192.168.100.201' }],
@@ -136,10 +135,6 @@ describe('IscsiTargetListComponent', () => {
       summaryService.addRunningTask(task);
     };
 
-    const expectTargetTasks = (target: any, executing: string) => {
-      expect(target.cdExecuting).toEqual(executing);
-    };
-
     beforeEach(() => {
       targets = [];
       addTarget('iqn.a');
@@ -160,171 +155,148 @@ describe('IscsiTargetListComponent', () => {
     it('should add a new target from a task', () => {
       addTask('iscsi/target/create', 'iqn.d');
       expect(component.targets.length).toBe(4);
-      expectTargetTasks(component.targets[0], undefined);
-      expectTargetTasks(component.targets[1], undefined);
-      expectTargetTasks(component.targets[2], undefined);
-      expectTargetTasks(component.targets[3], 'Creating');
+      expectItemTasks(component.targets[0], undefined);
+      expectItemTasks(component.targets[1], undefined);
+      expectItemTasks(component.targets[2], undefined);
+      expectItemTasks(component.targets[3], 'Creating');
     });
 
     it('should show when an existing target is being modified', () => {
       addTask('iscsi/target/delete', 'iqn.b');
       expect(component.targets.length).toBe(3);
-      expectTargetTasks(component.targets[1], 'Deleting');
+      expectItemTasks(component.targets[1], 'Deleting');
     });
   });
 
-  describe('show action buttons and drop down actions depending on permissions', () => {
-    let tableActions: TableActionsComponent;
-    let scenario: { fn; empty; single };
-    let permissionHelper: PermissionHelper;
-
-    const getTableActionComponent = (): TableActionsComponent => {
+  describe('handling of actions', () => {
+    beforeEach(() => {
       fixture.detectChanges();
-      return fixture.debugElement.query(By.directive(TableActionsComponent)).componentInstance;
+    });
+
+    let action: CdTableAction;
+
+    const getAction = (name: string): CdTableAction => {
+      return component.tableActions.find((tableAction) => tableAction.name === name);
     };
 
-    beforeEach(() => {
-      permissionHelper = new PermissionHelper(component.permissions.iscsi, () =>
-        getTableActionComponent()
-      );
-      scenario = {
-        fn: () => tableActions.getCurrentButton().name,
-        single: 'Edit',
-        empty: 'Add'
-      };
-    });
-
-    describe('with all', () => {
+    describe('edit', () => {
       beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(1, 1, 1);
+        action = getAction('Edit');
       });
 
-      it(`shows 'Edit' for single selection else 'Add' as main action`, () => {
-        permissionHelper.testScenarios(scenario);
+      it('should be disabled if no gateways', () => {
+        component.selection.selected = [
+          {
+            id: '-1'
+          }
+        ];
+        expect(action.disable(undefined)).toBe('Unavailable gateway(s)');
       });
 
-      it('shows all actions', () => {
-        expect(tableActions.tableActions.length).toBe(3);
-        expect(tableActions.tableActions).toEqual(component.tableActions);
-      });
-    });
-
-    describe('with read, create and update', () => {
-      beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(1, 1, 0);
-        scenario.single = 'Edit';
-      });
-
-      it(`should always show 'Edit'`, () => {
-        permissionHelper.testScenarios(scenario);
+      it('should be enabled if active sessions', () => {
+        component.selection.selected = [
+          {
+            id: '-1',
+            info: {
+              num_sessions: 1
+            }
+          }
+        ];
+        expect(action.disable(undefined)).toBeFalsy();
       });
 
-      it(`shows all actions except for 'Delete'`, () => {
-        expect(tableActions.tableActions.length).toBe(2);
-        component.tableActions.pop();
-        expect(tableActions.tableActions).toEqual(component.tableActions);
+      it('should be enabled if no active sessions', () => {
+        component.selection.selected = [
+          {
+            id: '-1',
+            info: {
+              num_sessions: 0
+            }
+          }
+        ];
+        expect(action.disable(undefined)).toBeFalsy();
       });
     });
 
-    describe('with read, create and delete', () => {
+    describe('delete', () => {
       beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(1, 0, 1);
+        action = getAction('Delete');
       });
 
-      it(`shows 'Delete' for single selection else 'Add' as main action`, () => {
-        scenario.single = 'Delete';
-        permissionHelper.testScenarios(scenario);
+      it('should be disabled if no gateways', () => {
+        component.selection.selected = [
+          {
+            id: '-1'
+          }
+        ];
+        expect(action.disable(undefined)).toBe('Unavailable gateway(s)');
       });
 
-      it(`shows 'Add' and 'Delete' actions`, () => {
-        expect(tableActions.tableActions.length).toBe(2);
-        expect(tableActions.tableActions).toEqual([
-          component.tableActions[0],
-          component.tableActions[2]
-        ]);
+      it('should be disabled if active sessions', () => {
+        component.selection.selected = [
+          {
+            id: '-1',
+            info: {
+              num_sessions: 1
+            }
+          }
+        ];
+        expect(action.disable(undefined)).toBe('Target has active sessions');
+      });
+
+      it('should be enabled if no active sessions', () => {
+        component.selection.selected = [
+          {
+            id: '-1',
+            info: {
+              num_sessions: 0
+            }
+          }
+        ];
+        expect(action.disable(undefined)).toBeFalsy();
       });
     });
+  });
 
-    describe('with read, edit and delete', () => {
-      beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(0, 1, 1);
-      });
+  it('should test all TableActions combinations', () => {
+    const permissionHelper: PermissionHelper = new PermissionHelper(component.permission);
+    const tableActions: TableActionsComponent = permissionHelper.setPermissionsAndGetActions(
+      component.tableActions
+    );
 
-      it(`shows always 'Edit' as main action`, () => {
-        scenario.empty = 'Edit';
-        permissionHelper.testScenarios(scenario);
-      });
-
-      it(`shows 'Edit' and 'Delete' actions`, () => {
-        expect(tableActions.tableActions.length).toBe(2);
-        expect(tableActions.tableActions).toEqual([
-          component.tableActions[1],
-          component.tableActions[2]
-        ]);
-      });
-    });
-
-    describe('with read and create', () => {
-      beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(1, 0, 0);
-      });
-
-      it(`shows 'Add' for single selection and 'Add' as main action`, () => {
-        scenario.single = 'Add';
-        permissionHelper.testScenarios(scenario);
-      });
-
-      it(`shows 'Add' actions`, () => {
-        expect(tableActions.tableActions.length).toBe(1);
-        expect(tableActions.tableActions).toEqual([component.tableActions[0]]);
-      });
-    });
-
-    describe('with read and edit', () => {
-      beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(0, 1, 0);
-      });
-
-      it(`shows no actions`, () => {
-        expect(tableActions.tableActions.length).toBe(1);
-        expect(tableActions.tableActions).toEqual([component.tableActions[1]]);
-      });
-    });
-
-    describe('with read and delete', () => {
-      beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(0, 0, 1);
-      });
-
-      it(`shows always 'Delete' as main action`, () => {
-        scenario.single = 'Delete';
-        scenario.empty = 'Delete';
-        permissionHelper.testScenarios(scenario);
-      });
-
-      it(`shows 'Delete' actions`, () => {
-        expect(tableActions.tableActions.length).toBe(1);
-        expect(tableActions.tableActions).toEqual([component.tableActions[2]]);
-      });
-    });
-
-    describe('with only read', () => {
-      beforeEach(() => {
-        tableActions = permissionHelper.setPermissionsAndGetActions(0, 0, 0);
-      });
-
-      it('shows no main action', () => {
-        permissionHelper.testScenarios({
-          fn: () => tableActions.getCurrentButton(),
-          single: undefined,
-          empty: undefined
-        });
-      });
-
-      it('shows no actions', () => {
-        expect(tableActions.tableActions.length).toBe(0);
-        expect(tableActions.tableActions).toEqual([]);
-      });
+    expect(tableActions).toEqual({
+      'create,update,delete': {
+        actions: ['Create', 'Edit', 'Delete'],
+        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+      },
+      'create,update': {
+        actions: ['Create', 'Edit'],
+        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+      },
+      'create,delete': {
+        actions: ['Create', 'Delete'],
+        primary: { multiple: 'Create', executing: 'Delete', single: 'Delete', no: 'Create' }
+      },
+      create: {
+        actions: ['Create'],
+        primary: { multiple: 'Create', executing: 'Create', single: 'Create', no: 'Create' }
+      },
+      'update,delete': {
+        actions: ['Edit', 'Delete'],
+        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+      },
+      update: {
+        actions: ['Edit'],
+        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+      },
+      delete: {
+        actions: ['Delete'],
+        primary: { multiple: 'Delete', executing: 'Delete', single: 'Delete', no: 'Delete' }
+      },
+      'no-permissions': {
+        actions: [],
+        primary: { multiple: '', executing: '', single: '', no: '' }
+      }
     });
   });
 });

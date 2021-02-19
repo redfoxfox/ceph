@@ -22,7 +22,8 @@ There are two user types:
 - **Subuser:** The term 'subuser' reflects a user of the Swift interface. A subuser
   is associated to a user .
   
-.. ditaa:: +---------+
+.. ditaa::
+           +---------+
            |   User  |
            +----+----+  
                 |     
@@ -148,9 +149,9 @@ email addresses, display names and access levels. For example::
 
 	radosgw-admin user modify --uid=johndoe --display-name="John E. Doe"
 
-To modify subuser values, specify ``subuser modify`` and the subuser ID. For example::
+To modify subuser values, specify ``subuser modify``, user ID and the subuser ID. For example::
 
-	radosgw-admin subuser modify --subuser=johndoe:swift --access=full
+	radosgw-admin subuser modify --uid=johndoe --subuser=johndoe:swift --access=full
 
 
 User Enable/Suspend
@@ -291,7 +292,7 @@ To remove a S3 key pair, specify the access key. ::
 
 To remove the swift secret key. ::
 
-	radosgw-admin key rm -subuser=foo:bar --key-type=swift
+	radosgw-admin key rm --subuser=foo:bar --key-type=swift
 
 
 Add / Remove Admin Capabilities
@@ -415,6 +416,7 @@ the latest quota stats. ::
 
 	radosgw-admin user stats --uid=<uid> --sync-stats
 
+.. _rgw_user_usage_stats:
 
 Get User Usage Stats
 --------------------

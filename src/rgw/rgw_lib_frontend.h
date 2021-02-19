@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #ifndef RGW_LIB_FRONTEND_H
 #define RGW_LIB_FRONTEND_H
@@ -14,6 +14,7 @@ namespace rgw {
   class RGWLibProcess : public RGWProcess {
     RGWAccessKey access_key;
     std::mutex mtx;
+    std::condition_variable cv;
     int gen;
     bool shutdown;
 
@@ -36,6 +37,7 @@ namespace rgw {
       for (const auto& fs: mounted_fs) {
 	fs.second->stop();
       }
+      cv.notify_all();
     }
 
     void register_fs(RGWLibFS* fs) {

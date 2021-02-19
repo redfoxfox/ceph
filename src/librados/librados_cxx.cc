@@ -21,6 +21,7 @@
 #include "common/common_init.h"
 #include "common/TracepointProvider.h"
 #include "common/hobject.h"
+#include "common/async/waiter.h"
 #include "include/rados/librados.h"
 #include "include/rados/librados.hpp"
 #include "include/types.h"
@@ -100,7 +101,10 @@ struct ObjectOperationImpl {
 size_t librados::ObjectOperation::size()
 {
   ::ObjectOperation *o = &impl->o;
-  return o->size();
+  if (o)
+    return o->size();
+  else
+    return 0;
 }
 
 //deprcated
@@ -111,6 +115,7 @@ void librados::ObjectOperation::set_op_flags(ObjectOperationFlags flags)
 
 void librados::ObjectOperation::set_op_flags2(int flags)
 {
+  ceph_assert(impl);
   impl->o.set_last_op_flags(get_op_flags(flags));
 }
 
@@ -118,6 +123,7 @@ void librados::ObjectOperation::cmpext(uint64_t off,
                                        const bufferlist &cmp_bl,
                                        int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   bufferlist c = cmp_bl;
   o->cmpext(off, c, prval);
@@ -125,12 +131,14 @@ void librados::ObjectOperation::cmpext(uint64_t off,
 
 void librados::ObjectOperation::cmpxattr(const char *name, uint8_t op, const bufferlist& v)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->cmpxattr(name, op, CEPH_OSD_CMPXATTR_MODE_STRING, v);
 }
 
 void librados::ObjectOperation::cmpxattr(const char *name, uint8_t op, uint64_t v)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   bufferlist bl;
   encode(v, bl);
@@ -139,24 +147,29 @@ void librados::ObjectOperation::cmpxattr(const char *name, uint8_t op, uint64_t 
 
 void librados::ObjectOperation::assert_version(uint64_t ver)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->assert_version(ver);
 }
 
 void librados::ObjectOperation::assert_exists()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
-  o->stat(NULL, (ceph::real_time*) NULL, NULL);
+  o->stat(nullptr, nullptr, nullptr);
 }
 
-void librados::ObjectOperation::exec(const char *cls, const char *method, bufferlist& inbl)
+void librados::ObjectOperation::exec(const char *cls, const char *method,
+				     bufferlist& inbl)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->call(cls, method, inbl);
 }
 
 void librados::ObjectOperation::exec(const char *cls, const char *method, bufferlist& inbl, bufferlist *outbl, int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->call(cls, method, inbl, outbl, NULL, prval);
 }
@@ -178,6 +191,7 @@ public:
 
 void librados::ObjectOperation::exec(const char *cls, const char *method, bufferlist& inbl, librados::ObjectOperationCompletion *completion)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
 
   ObjectOpCompletionCtx *ctx = new ObjectOpCompletionCtx(completion);
@@ -187,18 +201,21 @@ void librados::ObjectOperation::exec(const char *cls, const char *method, buffer
 
 void librados::ObjectReadOperation::stat(uint64_t *psize, time_t *pmtime, int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->stat(psize, pmtime, prval);
 }
 
 void librados::ObjectReadOperation::stat2(uint64_t *psize, struct timespec *pts, int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->stat(psize, pts, prval);
 }
 
 void librados::ObjectReadOperation::read(size_t off, uint64_t len, bufferlist *pbl, int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->read(off, len, pbl, prval, NULL);
 }
@@ -207,6 +224,7 @@ void librados::ObjectReadOperation::sparse_read(uint64_t off, uint64_t len,
 						std::map<uint64_t,uint64_t> *m,
 						bufferlist *data_bl, int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->sparse_read(off, len, m, data_bl, prval);
 }
@@ -217,6 +235,7 @@ void librados::ObjectReadOperation::checksum(rados_checksum_type_t type,
 					     size_t chunk_size, bufferlist *pbl,
 					     int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->checksum(get_checksum_op_type(type), init_value_bl, off, len, chunk_size,
 	      pbl, prval, nullptr);
@@ -224,6 +243,7 @@ void librados::ObjectReadOperation::checksum(rados_checksum_type_t type,
 
 void librados::ObjectReadOperation::getxattr(const char *name, bufferlist *pbl, int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->getxattr(name, pbl, prval);
 }
@@ -235,6 +255,7 @@ void librados::ObjectReadOperation::omap_get_vals(
   std::map<std::string, bufferlist> *out_vals,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_get_vals(start_after, filter_prefix, max_return, out_vals, nullptr,
 		   prval);
@@ -248,6 +269,7 @@ void librados::ObjectReadOperation::omap_get_vals2(
   bool *pmore,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_get_vals(start_after, filter_prefix, max_return, out_vals, pmore,
 		   prval);
@@ -259,6 +281,7 @@ void librados::ObjectReadOperation::omap_get_vals(
   std::map<std::string, bufferlist> *out_vals,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_get_vals(start_after, "", max_return, out_vals, nullptr, prval);
 }
@@ -270,6 +293,7 @@ void librados::ObjectReadOperation::omap_get_vals2(
   bool *pmore,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_get_vals(start_after, "", max_return, out_vals, pmore, prval);
 }
@@ -280,6 +304,7 @@ void librados::ObjectReadOperation::omap_get_keys(
   std::set<std::string> *out_keys,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_get_keys(start_after, max_return, out_keys, nullptr, prval);
 }
@@ -291,12 +316,14 @@ void librados::ObjectReadOperation::omap_get_keys2(
   bool *pmore,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_get_keys(start_after, max_return, out_keys, pmore, prval);
 }
 
 void librados::ObjectReadOperation::omap_get_header(bufferlist *bl, int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_get_header(bl, prval);
 }
@@ -306,6 +333,7 @@ void librados::ObjectReadOperation::omap_get_vals_by_keys(
   std::map<std::string, bufferlist> *map,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_get_vals_by_keys(keys, map, prval);
 }
@@ -314,6 +342,7 @@ void librados::ObjectOperation::omap_cmp(
   const std::map<std::string, pair<bufferlist, int> > &assertions,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_cmp(assertions, prval);
 }
@@ -322,6 +351,7 @@ void librados::ObjectReadOperation::list_watchers(
   list<obj_watch_t> *out_watchers,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->list_watchers(out_watchers, prval);
 }
@@ -330,12 +360,14 @@ void librados::ObjectReadOperation::list_snaps(
   snap_set_t *out_snaps,
   int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->list_snaps(out_snaps, prval);
 }
 
 void librados::ObjectReadOperation::is_dirty(bool *is_dirty, int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->is_dirty(is_dirty, prval);
 }
@@ -401,12 +433,14 @@ int librados::IoCtx::omap_get_vals2(
 
 void librados::ObjectReadOperation::getxattrs(map<string, bufferlist> *pattrs, int *prval)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->getxattrs(pattrs, prval);
 }
 
 void librados::ObjectWriteOperation::mtime(time_t *pt)
 {
+  ceph_assert(impl);
   if (pt) {
     impl->rt = ceph::real_clock::from_time_t(*pt);
     impl->prt = &impl->rt;
@@ -415,6 +449,7 @@ void librados::ObjectWriteOperation::mtime(time_t *pt)
 
 void librados::ObjectWriteOperation::mtime2(struct timespec *pts)
 {
+  ceph_assert(impl);
   if (pts) {
     impl->rt = ceph::real_clock::from_timespec(*pts);
     impl->prt = &impl->rt;
@@ -423,6 +458,7 @@ void librados::ObjectWriteOperation::mtime2(struct timespec *pts)
 
 void librados::ObjectWriteOperation::create(bool exclusive)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->create(exclusive);
 }
@@ -430,12 +466,14 @@ void librados::ObjectWriteOperation::create(bool exclusive)
 void librados::ObjectWriteOperation::create(bool exclusive,
 					    const std::string& category) // unused
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->create(exclusive);
 }
 
 void librados::ObjectWriteOperation::write(uint64_t off, const bufferlist& bl)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   bufferlist c = bl;
   o->write(off, c);
@@ -443,6 +481,7 @@ void librados::ObjectWriteOperation::write(uint64_t off, const bufferlist& bl)
 
 void librados::ObjectWriteOperation::write_full(const bufferlist& bl)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   bufferlist c = bl;
   o->write_full(c);
@@ -451,6 +490,7 @@ void librados::ObjectWriteOperation::write_full(const bufferlist& bl)
 void librados::ObjectWriteOperation::writesame(uint64_t off, uint64_t write_len,
 					       const bufferlist& bl)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   bufferlist c = bl;
   o->writesame(off, write_len, c);
@@ -458,6 +498,7 @@ void librados::ObjectWriteOperation::writesame(uint64_t off, uint64_t write_len,
 
 void librados::ObjectWriteOperation::append(const bufferlist& bl)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   bufferlist c = bl;
   o->append(c);
@@ -465,30 +506,35 @@ void librados::ObjectWriteOperation::append(const bufferlist& bl)
 
 void librados::ObjectWriteOperation::remove()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->remove();
 }
 
 void librados::ObjectWriteOperation::truncate(uint64_t off)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->truncate(off);
 }
 
 void librados::ObjectWriteOperation::zero(uint64_t off, uint64_t len)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->zero(off, len);
 }
 
 void librados::ObjectWriteOperation::rmxattr(const char *name)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->rmxattr(name);
 }
 
 void librados::ObjectWriteOperation::setxattr(const char *name, const bufferlist& v)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->setxattr(name, v);
 }
@@ -496,19 +542,22 @@ void librados::ObjectWriteOperation::setxattr(const char *name, const bufferlist
 void librados::ObjectWriteOperation::setxattr(const char *name,
 					      const buffer::list&& v)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->setxattr(name, std::move(v));
-}		
+}
 
 void librados::ObjectWriteOperation::omap_set(
   const map<string, bufferlist> &map)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_set(map);
 }
 
 void librados::ObjectWriteOperation::omap_set_header(const bufferlist &bl)
 {
+  ceph_assert(impl);
   bufferlist c = bl;
   ::ObjectOperation *o = &impl->o;
   o->omap_set_header(c);
@@ -516,6 +565,7 @@ void librados::ObjectWriteOperation::omap_set_header(const bufferlist &bl)
 
 void librados::ObjectWriteOperation::omap_clear()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_clear();
 }
@@ -523,6 +573,7 @@ void librados::ObjectWriteOperation::omap_clear()
 void librados::ObjectWriteOperation::omap_rm_keys(
   const std::set<std::string> &to_rm)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->omap_rm_keys(to_rm);
 }
@@ -532,33 +583,66 @@ void librados::ObjectWriteOperation::copy_from(const std::string& src,
 					       uint64_t src_version,
 					       uint32_t src_fadvise_flags)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->copy_from(object_t(src), src_ioctx.io_ctx_impl->snap_seq,
 	       src_ioctx.io_ctx_impl->oloc, src_version, 0, src_fadvise_flags);
 }
 
+void librados::ObjectWriteOperation::copy_from2(const std::string& src,
+					        const IoCtx& src_ioctx,
+					        uint64_t src_version,
+						uint32_t truncate_seq,
+						uint64_t truncate_size,
+					        uint32_t src_fadvise_flags)
+{
+  ceph_assert(impl);
+  ::ObjectOperation *o = &impl->o;
+  o->copy_from2(object_t(src), src_ioctx.io_ctx_impl->snap_seq,
+	        src_ioctx.io_ctx_impl->oloc, src_version, 0,
+	        truncate_seq, truncate_size, src_fadvise_flags);
+}
+
 void librados::ObjectWriteOperation::undirty()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->undirty();
 }
 
 void librados::ObjectReadOperation::cache_flush()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->cache_flush();
 }
 
 void librados::ObjectReadOperation::cache_try_flush()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->cache_try_flush();
 }
 
 void librados::ObjectReadOperation::cache_evict()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->cache_evict();
+}
+
+void librados::ObjectReadOperation::tier_flush()
+{
+  ceph_assert(impl);
+  ::ObjectOperation *o = &impl->o;
+  o->tier_flush();
+}
+
+void librados::ObjectReadOperation::tier_evict()
+{
+  ceph_assert(impl);
+  ::ObjectOperation *o = &impl->o;
+  o->tier_evict();
 }
 
 void librados::ObjectWriteOperation::set_redirect(const std::string& tgt_obj, 
@@ -566,37 +650,42 @@ void librados::ObjectWriteOperation::set_redirect(const std::string& tgt_obj,
 						  uint64_t tgt_version,
 						  int flag)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->set_redirect(object_t(tgt_obj), tgt_ioctx.io_ctx_impl->snap_seq,
 			  tgt_ioctx.io_ctx_impl->oloc, tgt_version, flag);
 }
 
-void librados::ObjectWriteOperation::set_chunk(uint64_t src_offset,
+void librados::ObjectReadOperation::set_chunk(uint64_t src_offset,
 					       uint64_t src_length,
 					       const IoCtx& tgt_ioctx,
 					       string tgt_oid,
 					       uint64_t tgt_offset,
 					       int flag)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
-  o->set_chunk(src_offset, src_length, 
+  o->set_chunk(src_offset, src_length,
 	       tgt_ioctx.io_ctx_impl->oloc, object_t(tgt_oid), tgt_offset, flag);
 }
 
 void librados::ObjectWriteOperation::tier_promote()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->tier_promote();
 }
 
 void librados::ObjectWriteOperation::unset_manifest()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->unset_manifest();
 }
 
 void librados::ObjectWriteOperation::tmap_update(const bufferlist& cmdbl)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   bufferlist c = cmdbl;
   o->tmap_update(c);
@@ -604,6 +693,7 @@ void librados::ObjectWriteOperation::tmap_update(const bufferlist& cmdbl)
 
 void librados::ObjectWriteOperation::selfmanaged_snap_rollback(snap_t snapid)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->rollback(snapid);
 }
@@ -611,6 +701,7 @@ void librados::ObjectWriteOperation::selfmanaged_snap_rollback(snap_t snapid)
 // You must specify the snapid not the name normally used with pool snapshots
 void librados::ObjectWriteOperation::snap_rollback(snap_t snapid)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->rollback(snapid);
 }
@@ -619,6 +710,7 @@ void librados::ObjectWriteOperation::set_alloc_hint(
                                             uint64_t expected_object_size,
                                             uint64_t expected_write_size)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->set_alloc_hint(expected_object_size, expected_write_size, 0);
 }
@@ -627,18 +719,21 @@ void librados::ObjectWriteOperation::set_alloc_hint2(
                                             uint64_t expected_write_size,
 					    uint32_t flags)
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->set_alloc_hint(expected_object_size, expected_write_size, flags);
 }
 
 void librados::ObjectWriteOperation::cache_pin()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->cache_pin();
 }
 
 void librados::ObjectWriteOperation::cache_unpin()
 {
+  ceph_assert(impl);
   ::ObjectOperation *o = &impl->o;
   o->cache_unpin();
 }
@@ -888,6 +983,12 @@ uint32_t librados::NObjectIterator::get_pg_hash_position() const
 const librados::NObjectIterator librados::NObjectIterator::__EndObjectIterator(NULL);
 
 ///////////////////////////// PoolAsyncCompletion //////////////////////////////
+librados::PoolAsyncCompletion::PoolAsyncCompletion::~PoolAsyncCompletion()
+{
+  auto c = reinterpret_cast<PoolAsyncCompletionImpl *>(pc);
+  c->release();
+}
+
 int librados::PoolAsyncCompletion::PoolAsyncCompletion::set_callback(void *cb_arg,
 								     rados_callback_t cb)
 {
@@ -915,12 +1016,16 @@ int librados::PoolAsyncCompletion::PoolAsyncCompletion::get_return_value()
 
 void librados::PoolAsyncCompletion::PoolAsyncCompletion::release()
 {
-  PoolAsyncCompletionImpl *c = (PoolAsyncCompletionImpl *)pc;
-  c->release();
   delete this;
 }
 
 ///////////////////////////// AioCompletion //////////////////////////////
+librados::AioCompletion::AioCompletion::~AioCompletion()
+{
+  auto c = reinterpret_cast<AioCompletionImpl *>(pc);
+  c->release();
+}
+
 int librados::AioCompletion::AioCompletion::set_complete_callback(void *cb_arg, rados_callback_t cb)
 {
   AioCompletionImpl *c = (AioCompletionImpl *)pc;
@@ -942,7 +1047,7 @@ int librados::AioCompletion::AioCompletion::wait_for_complete()
 int librados::AioCompletion::AioCompletion::wait_for_safe()
 {
   AioCompletionImpl *c = (AioCompletionImpl *)pc;
-  return c->wait_for_safe();
+  return c->wait_for_complete();
 }
 
 bool librados::AioCompletion::AioCompletion::is_complete()
@@ -1001,8 +1106,6 @@ uint64_t librados::AioCompletion::AioCompletion::get_version64()
 
 void librados::AioCompletion::AioCompletion::release()
 {
-  AioCompletionImpl *c = (AioCompletionImpl *)pc;
-  c->release();
   delete this;
 }
 
@@ -1054,6 +1157,10 @@ librados::IoCtx& librados::IoCtx::operator=(IoCtx&& rhs) noexcept
 librados::IoCtx::~IoCtx()
 {
   close();
+}
+
+bool librados::IoCtx::is_valid() const {
+  return io_ctx_impl != nullptr;
 }
 
 void librados::IoCtx::close()
@@ -1410,19 +1517,41 @@ int librados::IoCtx::omap_rm_keys(const std::string& oid,
 int librados::IoCtx::operate(const std::string& oid, librados::ObjectWriteOperation *o)
 {
   object_t obj(oid);
+  if (unlikely(!o->impl))
+    return -EINVAL;
   return io_ctx_impl->operate(obj, &o->impl->o, (ceph::real_time *)o->impl->prt);
+}
+
+int librados::IoCtx::operate(const std::string& oid, librados::ObjectWriteOperation *o, int flags)
+{
+  object_t obj(oid);
+  if (unlikely(!o->impl))
+    return -EINVAL;
+  return io_ctx_impl->operate(obj, &o->impl->o, (ceph::real_time *)o->impl->prt, translate_flags(flags));
 }
 
 int librados::IoCtx::operate(const std::string& oid, librados::ObjectReadOperation *o, bufferlist *pbl)
 {
   object_t obj(oid);
+  if (unlikely(!o->impl))
+    return -EINVAL;
   return io_ctx_impl->operate_read(obj, &o->impl->o, pbl);
+}
+
+int librados::IoCtx::operate(const std::string& oid, librados::ObjectReadOperation *o, bufferlist *pbl, int flags)
+{
+  object_t obj(oid);
+  if (unlikely(!o->impl))
+    return -EINVAL;
+  return io_ctx_impl->operate_read(obj, &o->impl->o, pbl, translate_flags(flags));
 }
 
 int librados::IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
 				 librados::ObjectWriteOperation *o)
 {
   object_t obj(oid);
+  if (unlikely(!o->impl))
+    return -EINVAL;
   return io_ctx_impl->aio_operate(obj, &o->impl->o, c->pc,
 				  io_ctx_impl->snapc, 0);
 }
@@ -1430,6 +1559,8 @@ int librados::IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
 				 ObjectWriteOperation *o, int flags)
 {
   object_t obj(oid);
+  if (unlikely(!o->impl))
+    return -EINVAL;
   return io_ctx_impl->aio_operate(obj, &o->impl->o, c->pc,
 				  io_ctx_impl->snapc,
 				  translate_flags(flags));
@@ -1439,6 +1570,8 @@ int librados::IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
 				 librados::ObjectWriteOperation *o,
 				 snap_t snap_seq, std::vector<snap_t>& snaps)
 {
+  if (unlikely(!o->impl))
+    return -EINVAL;
   object_t obj(oid);
   vector<snapid_t> snv;
   snv.resize(snaps.size());
@@ -1454,6 +1587,8 @@ int librados::IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
          snap_t snap_seq, std::vector<snap_t>& snaps,
          const blkin_trace_info *trace_info)
 {
+  if (unlikely(!o->impl))
+    return -EINVAL;
   object_t obj(oid);
   vector<snapid_t> snv;
   snv.resize(snaps.size());
@@ -1469,6 +1604,8 @@ int librados::IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
          snap_t snap_seq, std::vector<snap_t>& snaps, int flags,
          const blkin_trace_info *trace_info)
 {
+  if (unlikely(!o->impl))
+    return -EINVAL;
   object_t obj(oid);
   vector<snapid_t> snv;
   snv.resize(snaps.size());
@@ -1483,6 +1620,8 @@ int librados::IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
 				 librados::ObjectReadOperation *o,
 				 bufferlist *pbl)
 {
+  if (unlikely(!o->impl))
+    return -EINVAL;
   object_t obj(oid);
   return io_ctx_impl->aio_operate_read(obj, &o->impl->o, c->pc,
 				       0, pbl);
@@ -1494,6 +1633,8 @@ int librados::IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
 				 snap_t snapid_unused_deprecated,
 				 int flags, bufferlist *pbl)
 {
+  if (unlikely(!o->impl))
+    return -EINVAL;
   object_t obj(oid);
   int op_flags = 0;
   if (flags & OPERATION_BALANCE_READS)
@@ -1511,6 +1652,8 @@ int librados::IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
 				 librados::ObjectReadOperation *o,
 				 int flags, bufferlist *pbl)
 {
+  if (unlikely(!o->impl))
+    return -EINVAL;
   object_t obj(oid);
   return io_ctx_impl->aio_operate_read(obj, &o->impl->o, c->pc,
 				       translate_flags(flags), pbl);
@@ -1520,6 +1663,8 @@ int librados::IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
          librados::ObjectReadOperation *o,
          int flags, bufferlist *pbl, const blkin_trace_info *trace_info)
 {
+  if (unlikely(!o->impl))
+    return -EINVAL;
   object_t obj(oid);
   return io_ctx_impl->aio_operate_read(obj, &o->impl->o, c->pc,
                translate_flags(flags), pbl, trace_info);
@@ -1618,7 +1763,7 @@ int librados::IoCtx::lock_exclusive(const std::string &oid, const std::string &n
   if (duration)
     dur.set_from_timeval(duration);
 
-  return rados::cls::lock::lock(this, oid, name, LOCK_EXCLUSIVE, cookie, "",
+  return rados::cls::lock::lock(this, oid, name, ClsLockType::EXCLUSIVE, cookie, "",
 		  		description, dur, flags);
 }
 
@@ -1631,7 +1776,7 @@ int librados::IoCtx::lock_shared(const std::string &oid, const std::string &name
   if (duration)
     dur.set_from_timeval(duration);
 
-  return rados::cls::lock::lock(this, oid, name, LOCK_SHARED, cookie, tag,
+  return rados::cls::lock::lock(this, oid, name, ClsLockType::SHARED, cookie, tag,
 		  		description, dur, flags);
 }
 
@@ -1650,9 +1795,9 @@ struct AioUnlockCompletion : public librados::ObjectOperationCompletion {
     rados_callback_t cb = completion->callback_complete;
     void *cb_arg = completion->callback_complete_arg;
     cb(completion, cb_arg);
-    completion->lock.Lock();
+    completion->lock.lock();
     completion->callback_complete = NULL;
-    completion->cond.Signal();
+    completion->cond.notify_all();
     completion->put_unlock();
   }
 };
@@ -1699,7 +1844,7 @@ int librados::IoCtx::list_lockers(const std::string &oid, const std::string &nam
   if (tag)
     *tag = tmp_tag;
   if (exclusive) {
-    if (tmp_type == LOCK_EXCLUSIVE)
+    if (tmp_type == ClsLockType::EXCLUSIVE)
       *exclusive = 1;
     else
       *exclusive = 0;
@@ -1872,7 +2017,7 @@ struct AioGetxattrDataPP {
   AioGetxattrDataPP(librados::AioCompletionImpl *c, bufferlist *_bl) :
     bl(_bl), completion(c) {}
   bufferlist *bl;
-  struct librados::C_AioCompleteAndSafe completion;
+  struct librados::CB_AioCompleteAndSafe completion;
 };
 
 static void rados_aio_getxattr_completepp(rados_completion_t c, void *arg) {
@@ -1881,7 +2026,7 @@ static void rados_aio_getxattr_completepp(rados_completion_t c, void *arg) {
   if (rc >= 0) {
     rc = cdata->bl->length();
   }
-  cdata->completion.finish(rc);
+  cdata->completion(rc);
   delete cdata;
 }
 
@@ -2014,6 +2159,25 @@ int librados::IoCtx::aio_notify(const string& oid, AioCompletion *c,
                                  NULL);
 }
 
+void librados::IoCtx::decode_notify_response(bufferlist &bl,
+                                             std::vector<librados::notify_ack_t> *acks,
+                                             std::vector<librados::notify_timeout_t> *timeouts)
+{
+  map<pair<uint64_t,uint64_t>,bufferlist> acked;
+  set<pair<uint64_t,uint64_t>> missed;
+
+  auto iter = bl.cbegin();
+  decode(acked, iter);
+  decode(missed, iter);
+
+  for (auto &[who, payload] : acked) {
+    acks->emplace_back(librados::notify_ack_t{who.first, who.second, payload});
+  }
+  for (auto &[notifier_id, cookie] : missed) {
+    timeouts->emplace_back(librados::notify_timeout_t{notifier_id, cookie});
+  }
+}
+
 void librados::IoCtx::notify_ack(const std::string& o,
 				 uint64_t notify_id, uint64_t handle,
 				 bufferlist& bl)
@@ -2142,12 +2306,22 @@ librados::IoCtx::IoCtx(IoCtxImpl *io_ctx_impl_)
 
 void librados::IoCtx::set_osdmap_full_try()
 {
-  io_ctx_impl->objecter->set_osdmap_full_try();
+  io_ctx_impl->extra_op_flags |= CEPH_OSD_FLAG_FULL_TRY;
 }
 
 void librados::IoCtx::unset_osdmap_full_try()
 {
-  io_ctx_impl->objecter->unset_osdmap_full_try();
+  io_ctx_impl->extra_op_flags &= ~CEPH_OSD_FLAG_FULL_TRY;
+}
+
+void librados::IoCtx::set_pool_full_try()
+{
+  io_ctx_impl->extra_op_flags |= CEPH_OSD_FLAG_FULL_TRY;
+}
+
+void librados::IoCtx::unset_pool_full_try()
+{
+  io_ctx_impl->extra_op_flags &= ~CEPH_OSD_FLAG_FULL_TRY;
 }
 
 ///////////////////////////// Rados //////////////////////////////
@@ -2170,6 +2344,16 @@ librados::Rados::Rados(IoCtx &ioctx)
 librados::Rados::~Rados()
 {
   shutdown();
+}
+
+void librados::Rados::from_rados_t(rados_t cluster, Rados &rados) {
+  if (rados.client) {
+    rados.client->put();
+  }
+  rados.client = static_cast<RadosClient*>(cluster);
+  if (rados.client) {
+    rados.client->get();
+  }
 }
 
 int librados::Rados::init(const char * const id)
@@ -2467,27 +2651,30 @@ int librados::Rados::ioctx_create2(int64_t pool_id, IoCtx &io)
   return 0;
 }
 
-void librados::Rados::test_blacklist_self(bool set)
+void librados::Rados::test_blocklist_self(bool set)
 {
-  client->blacklist_self(set);
+  client->blocklist_self(set);
 }
 
 int librados::Rados::get_pool_stats(std::list<string>& v,
 				    stats_map& result)
 {
   map<string,::pool_stat_t> rawresult;
-  int r = client->get_pool_stats(v, rawresult);
+  bool per_pool = false;
+  int r = client->get_pool_stats(v, &rawresult, &per_pool);
   for (map<string,::pool_stat_t>::iterator p = rawresult.begin();
        p != rawresult.end();
        ++p) {
     pool_stat_t& pv = result[p->first];
     auto& pstat = p->second;
     store_statfs_t &statfs = pstat.store_stats;
-    uint64_t allocated_bytes = pstat.get_allocated_bytes();
+    uint64_t allocated_bytes = pstat.get_allocated_data_bytes(per_pool) +
+      pstat.get_allocated_omap_bytes(per_pool);
     // FIXME: raw_used_rate is unknown hence use 1.0 here
     // meaning we keep net amount aggregated over all replicas
     // Not a big deal so far since this field isn't exposed
-    uint64_t user_bytes = pstat.get_user_bytes(1.0);
+    uint64_t user_bytes = pstat.get_user_data_bytes(1.0, per_pool) +
+      pstat.get_user_omap_bytes(1.0, per_pool);
 
     object_stat_sum_t *sum = &p->second.stats.sum;
     pv.num_kb = shift_round_up(allocated_bytes, 10);
@@ -2649,10 +2836,14 @@ int librados::Rados::wait_for_latest_osdmap()
   return client->wait_for_latest_osdmap();
 }
 
-int librados::Rados::blacklist_add(const std::string& client_address,
+int librados::Rados::blocklist_add(const std::string& client_address,
 				   uint32_t expire_seconds)
 {
-  return client->blacklist_add(client_address, expire_seconds);
+  return client->blocklist_add(client_address, expire_seconds);
+}
+
+std::string librados::Rados::get_addrs() const {
+  return client->get_addrs();
 }
 
 librados::PoolAsyncCompletion *librados::Rados::pool_async_create_completion()
@@ -2677,13 +2868,31 @@ librados::AioCompletion *librados::Rados::aio_create_completion(void *cb_arg,
   return new AioCompletion(c);
 }
 
-librados::ObjectOperation::ObjectOperation()
+librados::AioCompletion *librados::Rados::aio_create_completion(void *cb_arg,
+								callback_t cb_complete)
 {
-  impl = new ObjectOperationImpl;
+  AioCompletionImpl *c;
+  int r = rados_aio_create_completion2(cb_arg, cb_complete, (void**)&c);
+  ceph_assert(r == 0);
+  return new AioCompletion(c);
 }
 
-librados::ObjectOperation::~ObjectOperation()
-{
+librados::ObjectOperation::ObjectOperation() : impl(new ObjectOperationImpl) {}
+
+librados::ObjectOperation::ObjectOperation(ObjectOperation&& rhs)
+  : impl(rhs.impl) {
+  rhs.impl = nullptr;
+}
+
+librados::ObjectOperation&
+librados::ObjectOperation::operator =(ObjectOperation&& rhs) {
+  delete impl;
+  impl = rhs.impl;
+  rhs.impl = nullptr;
+  return *this;
+}
+
+librados::ObjectOperation::~ObjectOperation() {
   delete impl;
 }
 
@@ -2863,29 +3072,27 @@ int librados::IoCtx::object_list(const ObjectCursor &start,
   ceph_assert(next != nullptr);
   result->clear();
 
-  C_SaferCond cond;
-  hobject_t next_hash;
-  std::list<librados::ListObjectImpl> obj_result;
-  io_ctx_impl->objecter->enumerate_objects(
+  ceph::async::waiter<boost::system::error_code,
+		      std::vector<librados::ListObjectImpl>,
+		      hobject_t>  w;
+  io_ctx_impl->objecter->enumerate_objects<librados::ListObjectImpl>(
       io_ctx_impl->poolid,
       io_ctx_impl->oloc.nspace,
       *((hobject_t*)start.c_cursor),
       *((hobject_t*)finish.c_cursor),
       result_item_count,
       filter,
-      &obj_result,
-      &next_hash,
-      &cond);
+      w);
 
-  int r = cond.wait();
-  if (r < 0) {
+  auto [ec, obj_result, next_hash] = w.wait();
+  if (ec) {
     next->set((rados_object_list_cursor)(new hobject_t(hobject_t::get_max())));
-    return r;
+    return ceph::from_error_code(ec);
   }
 
   next->set((rados_object_list_cursor)(new hobject_t(next_hash)));
 
-  for (std::list<librados::ListObjectImpl>::iterator i = obj_result.begin();
+  for (auto i = obj_result.begin();
        i != obj_result.end(); ++i) {
     ObjectItem oi;
     oi.oid = i->oid;

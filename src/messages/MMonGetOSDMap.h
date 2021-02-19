@@ -23,23 +23,20 @@
 
 #include "include/types.h"
 
-class MMonGetOSDMap : public MessageInstance<MMonGetOSDMap, PaxosServiceMessage> {
-public:
-  friend factory;
+class MMonGetOSDMap final : public PaxosServiceMessage {
 private:
-
   epoch_t full_first, full_last;
   epoch_t inc_first, inc_last;
 
 public:
   MMonGetOSDMap()
-    : MessageInstance(CEPH_MSG_MON_GET_OSDMAP, 0),
+    : PaxosServiceMessage{CEPH_MSG_MON_GET_OSDMAP, 0},
       full_first(0),
       full_last(0),
       inc_first(0),
       inc_last(0) { }
 private:
-  ~MMonGetOSDMap() override {}
+  ~MMonGetOSDMap() final {}
 
 public:
   void request_full(epoch_t first, epoch_t last) {
@@ -92,6 +89,9 @@ public:
     decode(inc_first, p);
     decode(inc_last, p);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

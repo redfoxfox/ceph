@@ -15,13 +15,13 @@ whether authentication is required, etc. Most of these values are set by
 default, so it's useful to know about them when setting up your cluster for
 production.
 
-Following the same configuration as `Installation (Quick)`_, we will set up a
-cluster with ``node1`` as  the monitor node, and ``node2`` and ``node3`` for
-OSD nodes.
+We will set up a cluster with ``node1`` as  the monitor node, and ``node2`` and
+``node3`` for OSD nodes.
 
 
 
 .. ditaa::
+
            /------------------\         /----------------\
            |    Admin Node    |         |     node1      |
            |                  +-------->+                |
@@ -58,7 +58,7 @@ Current implementation works on ZFS pools
 
 * Some cache and log (ZIL) can be attached.
   Please note that this is different from the Ceph journals. Cache and log are
-  totally transparent for Ceph, and help the filesystem to keep the system
+  totally transparent for Ceph, and help the file system to keep the system
   consistent and help performance.
   Assuming that ada2 is an SSD::
 
@@ -94,7 +94,7 @@ a number of things:
 
 - **Unique Identifier:** The ``fsid`` is a unique identifier for the cluster,
   and stands for File System ID from the days when the Ceph Storage Cluster was
-  principally for the Ceph Filesystem. Ceph now supports native interfaces,
+  principally for the Ceph File System. Ceph now supports native interfaces,
   block devices, and object storage gateway interfaces too, so ``fsid`` is a
   bit of a misnomer.
 
@@ -156,10 +156,6 @@ The procedure is as follows:
    create the ``/etc/ceph`` directory automatically. ::
 
 	ls /etc/ceph
-
-   **Note:** Deployment tools may remove this directory when purging a
-   cluster (e.g., ``ceph-deploy purgedata {node-name}``, ``ceph-deploy purge
-   {node-name}``).
 
 #. Create a Ceph configuration file. By default, Ceph uses
    ``ceph.conf``, where ``ceph`` reflects the cluster name. ::
@@ -523,7 +519,7 @@ In the below instructions, ``{id}`` is an arbitrary name, such as the hostname o
 
 #. Import the keyring and set caps.::
 
-	ceph auth add mds.{id} osd "allow rwx" mds "allow" mon "allow profile mds" -i /var/lib/ceph/mds/{cluster}-{id}/keyring
+	ceph auth add mds.{id} osd "allow rwx" mds "allow *" mon "allow profile mds" -i /var/lib/ceph/mds/{cluster}-{id}/keyring
 
 #. Add to ceph.conf.::
 
@@ -544,7 +540,7 @@ In the below instructions, ``{id}`` is an arbitrary name, such as the hostname o
 
    Then make sure you do not have a keyring set in ceph.conf in the global section; move it to the client section; or add a keyring setting specific to this mds daemon. And verify that you see the same key in the mds data directory and ``ceph auth get mds.{id}`` output.
 
-#. Now you are ready to `create a Ceph filesystem`_.
+#. Now you are ready to `create a Ceph file system`_.
 
 
 Summary
@@ -572,9 +568,8 @@ To add (or remove) additional monitors, see `Add/Remove Monitors`_.
 To add (or remove) additional Ceph OSD Daemons, see `Add/Remove OSDs`_.
 
 
-.. _Installation (Quick): ../../start
 .. _Add/Remove Monitors: ../../rados/operations/add-or-rm-mons
 .. _Add/Remove OSDs: ../../rados/operations/add-or-rm-osds
 .. _Network Configuration Reference: ../../rados/configuration/network-config-ref
 .. _Monitor Config Reference - Data: ../../rados/configuration/mon-config-ref#data
-.. _create a Ceph filesystem: ../../cephfs/createfs
+.. _create a Ceph file system: ../../cephfs/createfs

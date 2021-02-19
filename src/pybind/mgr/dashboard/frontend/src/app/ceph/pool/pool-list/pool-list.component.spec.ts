@@ -1,21 +1,27 @@
 import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { ToastModule } from 'ng2-toastr';
-import { BsModalService } from 'ngx-bootstrap/modal';
-import { TabsModule } from 'ngx-bootstrap/tabs';
+import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
+import _ from 'lodash';
+import { ToastrModule } from 'ngx-toastr';
 import { of } from 'rxjs';
 
-import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
-import { PoolService } from '../../../shared/api/pool.service';
-import { CriticalConfirmationModalComponent } from '../../../shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
-import { ExecutingTask } from '../../../shared/models/executing-task';
-import { SummaryService } from '../../../shared/services/summary.service';
-import { TaskWrapperService } from '../../../shared/services/task-wrapper.service';
-import { SharedModule } from '../../../shared/shared.module';
-import { RbdConfigurationListComponent } from '../../block/rbd-configuration-list/rbd-configuration-list.component';
-import { PgCategoryService } from '../../shared/pg-category.service';
+import { RbdConfigurationListComponent } from '~/app/ceph/block/rbd-configuration-list/rbd-configuration-list.component';
+import { PgCategoryService } from '~/app/ceph/shared/pg-category.service';
+import { ConfigurationService } from '~/app/shared/api/configuration.service';
+import { ErasureCodeProfileService } from '~/app/shared/api/erasure-code-profile.service';
+import { PoolService } from '~/app/shared/api/pool.service';
+import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { ErasureCodeProfile } from '~/app/shared/models/erasure-code-profile';
+import { ExecutingTask } from '~/app/shared/models/executing-task';
+import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
+import { ModalService } from '~/app/shared/services/modal.service';
+import { SummaryService } from '~/app/shared/services/summary.service';
+import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
+import { SharedModule } from '~/app/shared/shared.module';
+import { configureTestBed, expectItemTasks, Mocks } from '~/testing/unit-test-helper';
 import { Pool } from '../pool';
 import { PoolDetailsComponent } from '../pool-details/pool-details.component';
 import { PoolListComponent } from './pool-list.component';
@@ -24,38 +30,41 @@ describe('PoolListComponent', () => {
   let component: PoolListComponent;
   let fixture: ComponentFixture<PoolListComponent>;
   let poolService: PoolService;
+  let getECPList: jasmine.Spy;
 
-  const addPool = (pools, name, id) => {
-    const pool = new Pool(name);
-    pool.pool = id;
-    pool.pg_num = 256;
-    pools.push(pool);
+  const getPoolList = (): Pool[] => {
+    return [Mocks.getPool('a', 0), Mocks.getPool('b', 1), Mocks.getPool('c', 2)];
   };
+  const getECPProfiles = (): ErasureCodeProfile[] => {
+    const ecpProfile = new ErasureCodeProfile();
+    ecpProfile.name = 'default';
+    ecpProfile.k = 2;
+    ecpProfile.m = 1;
 
-  const setUpPools = (pools) => {
-    addPool(pools, 'a', 0);
-    addPool(pools, 'b', 1);
-    addPool(pools, 'c', 2);
-    component.pools = pools;
+    return [ecpProfile];
   };
 
   configureTestBed({
     declarations: [PoolListComponent, PoolDetailsComponent, RbdConfigurationListComponent],
     imports: [
+      BrowserAnimationsModule,
       SharedModule,
-      ToastModule.forRoot(),
+      ToastrModule.forRoot(),
       RouterTestingModule,
-      TabsModule.forRoot(),
+      NgbNavModule,
       HttpClientTestingModule
     ],
-    providers: [i18nProviders, PgCategoryService]
+    providers: [PgCategoryService]
   });
 
   beforeEach(() => {
     fixture = TestBed.createComponent(PoolListComponent);
     component = fixture.componentInstance;
     component.permissions.pool.read = true;
-    poolService = TestBed.get(PoolService);
+    poolService = TestBed.inject(PoolService);
+    spyOn(poolService, 'getList').and.callFake(() => of(getPoolList()));
+    getECPList = spyOn(TestBed.inject(ErasureCodeProfileService), 'list');
+    getECPList.and.returnValue(of(getECPProfiles()));
     fixture.detectChanges();
   });
 
@@ -63,21 +72,91 @@ describe('PoolListComponent', () => {
     expect(component).toBeTruthy();
   });
 
+  it('should have columns that are sortable', () => {
+    expect(
+      component.columns
+        .filter((column) => !(column.prop === undefined))
+        .every((column) => Boolean(column.prop))
+    ).toBeTruthy();
+  });
+
+  describe('monAllowPoolDelete', () => {
+    let configOptRead: boolean;
+    let configurationService: ConfigurationService;
+
+    beforeEach(() => {
+      configOptRead = true;
+      spyOn(TestBed.inject(AuthStorageService), 'getPermissions').and.callFake(() => ({
+        configOpt: { read: configOptRead }
+      }));
+      configurationService = TestBed.inject(ConfigurationService);
+    });
+
+    it('should set value correctly if mon_allow_pool_delete flag is set to true', () => {
+      const configOption = {
+        name: 'mon_allow_pool_delete',
+        value: [
+          {
+            section: 'mon',
+            value: 'true'
+          }
+        ]
+      };
+      spyOn(configurationService, 'get').and.returnValue(of(configOption));
+      fixture = TestBed.createComponent(PoolListComponent);
+      component = fixture.componentInstance;
+      expect(component.monAllowPoolDelete).toBe(true);
+    });
+
+    it('should set value correctly if mon_allow_pool_delete flag is set to false', () => {
+      const configOption = {
+        name: 'mon_allow_pool_delete',
+        value: [
+          {
+            section: 'mon',
+            value: 'false'
+          }
+        ]
+      };
+      spyOn(configurationService, 'get').and.returnValue(of(configOption));
+      fixture = TestBed.createComponent(PoolListComponent);
+      component = fixture.componentInstance;
+      expect(component.monAllowPoolDelete).toBe(false);
+    });
+
+    it('should set value correctly if mon_allow_pool_delete flag is not set', () => {
+      const configOption = {
+        name: 'mon_allow_pool_delete'
+      };
+      spyOn(configurationService, 'get').and.returnValue(of(configOption));
+      fixture = TestBed.createComponent(PoolListComponent);
+      component = fixture.componentInstance;
+      expect(component.monAllowPoolDelete).toBe(false);
+    });
+
+    it('should set value correctly w/o config-opt read privileges', () => {
+      configOptRead = false;
+      fixture = TestBed.createComponent(PoolListComponent);
+      component = fixture.componentInstance;
+      expect(component.monAllowPoolDelete).toBe(false);
+    });
+  });
+
   describe('pool deletion', () => {
     let taskWrapper: TaskWrapperService;
+    let modalRef: any;
 
-    const setSelectedPool = (poolName: string) => {
-      component.selection.selected = [{ pool_name: poolName }];
-      component.selection.update();
-    };
+    const setSelectedPool = (poolName: string) =>
+      (component.selection.selected = [{ pool_name: poolName }]);
 
     const callDeletion = () => {
       component.deletePoolModal();
-      const deletion: CriticalConfirmationModalComponent = component.modalRef.content;
+      expect(modalRef).toBeTruthy();
+      const deletion: CriticalConfirmationModalComponent = modalRef && modalRef.componentInstance;
       deletion.submitActionObservable();
     };
 
-    const testPoolDeletion = (poolName) => {
+    const testPoolDeletion = (poolName: string) => {
       setSelectedPool(poolName);
       callDeletion();
       expect(poolService.delete).toHaveBeenCalledWith(poolName);
@@ -93,13 +172,14 @@ describe('PoolListComponent', () => {
     };
 
     beforeEach(() => {
-      spyOn(TestBed.get(BsModalService), 'show').and.callFake((deletionClass, config) => {
-        return {
-          content: Object.assign(new deletionClass(), config.initialState)
+      spyOn(TestBed.inject(ModalService), 'show').and.callFake((deletionClass, initialState) => {
+        modalRef = {
+          componentInstance: Object.assign(new deletionClass(), initialState)
         };
+        return modalRef;
       });
       spyOn(poolService, 'delete').and.stub();
-      taskWrapper = TestBed.get(TaskWrapperService);
+      taskWrapper = TestBed.inject(TaskWrapperService);
       spyOn(taskWrapper, 'wrapTaskAroundCall').and.callThrough();
     });
 
@@ -110,7 +190,6 @@ describe('PoolListComponent', () => {
   });
 
   describe('handling of executing tasks', () => {
-    let pools: Pool[];
     let summaryService: SummaryService;
 
     const addTask = (name: string, pool: string) => {
@@ -121,12 +200,11 @@ describe('PoolListComponent', () => {
     };
 
     beforeEach(() => {
-      summaryService = TestBed.get(SummaryService);
-      summaryService['summaryDataSource'].next({ executing_tasks: [], finished_tasks: [] });
-      pools = [];
-      setUpPools(pools);
-      spyOn(poolService, 'getList').and.callFake(() => of(pools));
-      fixture.detectChanges();
+      summaryService = TestBed.inject(SummaryService);
+      summaryService['summaryDataSource'].next({
+        executing_tasks: [],
+        finished_tasks: []
+      });
     });
 
     it('gets all pools without executing pools', () => {
@@ -137,13 +215,13 @@ describe('PoolListComponent', () => {
     it('gets a pool from a task during creation', () => {
       addTask('pool/create', 'd');
       expect(component.pools.length).toBe(4);
-      expect(component.pools[3].cdExecuting).toBe('Creating');
+      expectItemTasks(component.pools[3], 'Creating');
     });
 
     it('gets all pools with one executing pools', () => {
       addTask('pool/create', 'a');
       expect(component.pools.length).toBe(3);
-      expect(component.pools[0].cdExecuting).toBe('Creating');
+      expectItemTasks(component.pools[0], 'Creating');
       expect(component.pools[1].cdExecuting).toBeFalsy();
       expect(component.pools[2].cdExecuting).toBeFalsy();
     });
@@ -156,9 +234,9 @@ describe('PoolListComponent', () => {
       addTask('pool/delete', 'b');
       addTask('pool/delete', 'c');
       expect(component.pools.length).toBe(3);
-      expect(component.pools[0].cdExecuting).toBe('Creating, Updating, Deleting');
-      expect(component.pools[1].cdExecuting).toBe('Updating, Deleting');
-      expect(component.pools[2].cdExecuting).toBe('Deleting');
+      expectItemTasks(component.pools[0], 'Creating..., Updating..., Deleting');
+      expectItemTasks(component.pools[1], 'Updating..., Deleting');
+      expectItemTasks(component.pools[2], 'Deleting');
     });
 
     it('gets all pools with multiple executing tasks (not only pool tasks)', () => {
@@ -169,14 +247,14 @@ describe('PoolListComponent', () => {
       addTask('rbd/delete', 'b');
       addTask('rbd/delete', 'c');
       expect(component.pools.length).toBe(3);
-      expect(component.pools[0].cdExecuting).toBe('Deleting');
-      expect(component.pools[1].cdExecuting).toBe('Updating');
+      expectItemTasks(component.pools[0], 'Deleting');
+      expectItemTasks(component.pools[1], 'Updating');
       expect(component.pools[2].cdExecuting).toBeFalsy();
     });
   });
 
   describe('getPgStatusCellClass', () => {
-    const testMethod = (value, expected) =>
+    const testMethod = (value: string, expected: string) =>
       expect(component.getPgStatusCellClass('', '', value)).toEqual({
         'text-right': true,
         [expected]: true
@@ -202,37 +280,151 @@ describe('PoolListComponent', () => {
     });
   });
 
+  describe('custom row comparators', () => {
+    const expectCorrectComparator = (statsAttribute: string) => {
+      const mockPool = (v: number) => ({ stats: { [statsAttribute]: { latest: v } } });
+      const columnDefinition = _.find(
+        component.columns,
+        (column) => column.prop === `stats.${statsAttribute}.rates`
+      );
+      expect(columnDefinition.comparator(undefined, undefined, mockPool(2), mockPool(1))).toBe(1);
+      expect(columnDefinition.comparator(undefined, undefined, mockPool(1), mockPool(2))).toBe(-1);
+    };
+
+    it('compares read bytes correctly', () => {
+      expectCorrectComparator('rd_bytes');
+    });
+
+    it('compares write bytes correctly', () => {
+      expectCorrectComparator('wr_bytes');
+    });
+  });
+
   describe('transformPoolsData', () => {
-    it('transforms pools data correctly', () => {
-      const pools = [
-        {
-          stats: { rd_bytes: { latest: 6, rate: 4, series: [[0, 2], [1, 6]] } },
-          pg_status: { 'active+clean': 8, down: 2 }
-        }
-      ];
-      const expected = [
-        {
+    let pool: Pool;
+
+    const getPoolData = (o: object) => [
+      _.merge(
+        _.merge(Mocks.getPool('a', 0), {
           cdIsBinary: true,
+          pg_status: '',
+          stats: {
+            bytes_used: { latest: 0, rate: 0, rates: [] },
+            max_avail: { latest: 0, rate: 0, rates: [] },
+            avail_raw: { latest: 0, rate: 0, rates: [] },
+            percent_used: { latest: 0, rate: 0, rates: [] },
+            rd: { latest: 0, rate: 0, rates: [] },
+            rd_bytes: { latest: 0, rate: 0, rates: [] },
+            wr: { latest: 0, rate: 0, rates: [] },
+            wr_bytes: { latest: 0, rate: 0, rates: [] }
+          },
+          usage: 0,
+          data_protection: 'replica: ×3'
+        }),
+        o
+      )
+    ];
+
+    beforeEach(() => {
+      pool = Mocks.getPool('a', 0);
+    });
+
+    it('transforms replicated pools data correctly', () => {
+      pool = _.merge(pool, {
+        stats: {
+          bytes_used: { latest: 5, rate: 0, rates: [] },
+          avail_raw: { latest: 15, rate: 0, rates: [] },
+          percent_used: { latest: 0.25, rate: 0, rates: [] },
+          rd_bytes: {
+            latest: 6,
+            rate: 4,
+            rates: [
+              [0, 2],
+              [1, 6]
+            ]
+          }
+        },
+        pg_status: { 'active+clean': 8, down: 2 }
+      });
+      expect(component.transformPoolsData([pool])).toEqual(
+        getPoolData({
           pg_status: '8 active+clean, 2 down',
           stats: {
-            bytes_used: { latest: 0, rate: 0, series: [] },
-            max_avail: { latest: 0, rate: 0, series: [] },
-            rd: { latest: 0, rate: 0, series: [] },
-            rd_bytes: { latest: 6, rate: 4, series: [2, 6] },
-            wr: { latest: 0, rate: 0, series: [] },
-            wr_bytes: { latest: 0, rate: 0, series: [] }
-          }
-        }
-      ];
+            bytes_used: { latest: 5, rate: 0, rates: [] },
+            avail_raw: { latest: 15, rate: 0, rates: [] },
+            percent_used: { latest: 0.25, rate: 0, rates: [] },
+            rd_bytes: { latest: 6, rate: 4, rates: [2, 6] }
+          },
+          usage: 0.25,
+          data_protection: 'replica: ×3'
+        })
+      );
+    });
 
-      expect(component.transformPoolsData(pools)).toEqual(expected);
+    it('transforms erasure pools data correctly', () => {
+      pool.type = 'erasure';
+      pool.erasure_code_profile = 'default';
+      component.ecProfileList = getECPProfiles();
+
+      expect(component.transformPoolsData([pool])).toEqual(
+        getPoolData({
+          type: 'erasure',
+          erasure_code_profile: 'default',
+          data_protection: 'EC: 2+1'
+        })
+      );
+    });
+
+    it('transforms pools data correctly if stats are missing', () => {
+      expect(component.transformPoolsData([pool])).toEqual(getPoolData({}));
     });
 
     it('transforms empty pools data correctly', () => {
-      const pools = undefined;
-      const expected = undefined;
+      expect(component.transformPoolsData(undefined)).toEqual(undefined);
+      expect(component.transformPoolsData([])).toEqual([]);
+    });
 
-      expect(component.transformPoolsData(pools)).toEqual(expected);
+    it('shows not marked pools in progress if pg_num does not match pg_num_target', () => {
+      const pools = [
+        _.merge(pool, {
+          pg_num: 32,
+          pg_num_target: 16,
+          pg_placement_num: 32,
+          pg_placement_num_target: 16
+        })
+      ];
+      expect(component.transformPoolsData(pools)).toEqual(
+        getPoolData({
+          cdExecuting: 'Updating',
+          pg_num: 32,
+          pg_num_target: 16,
+          pg_placement_num: 32,
+          pg_placement_num_target: 16,
+          data_protection: 'replica: ×3'
+        })
+      );
+    });
+
+    it('shows marked pools in progress as defined by task', () => {
+      const pools = [
+        _.merge(pool, {
+          pg_num: 32,
+          pg_num_target: 16,
+          pg_placement_num: 32,
+          pg_placement_num_target: 16,
+          cdExecuting: 'Updating... 50%'
+        })
+      ];
+      expect(component.transformPoolsData(pools)).toEqual(
+        getPoolData({
+          cdExecuting: 'Updating... 50%',
+          pg_num: 32,
+          pg_num_target: 16,
+          pg_placement_num: 32,
+          pg_placement_num_target: 16,
+          data_protection: 'replica: ×3'
+        })
+      );
     });
   });
 
@@ -259,66 +451,68 @@ describe('PoolListComponent', () => {
     });
 
     it('returns empty string', () => {
-      const pgStatus = undefined;
+      const pgStatus: any = undefined;
       const expected = '';
 
       expect(component.transformPgStatus(pgStatus)).toEqual(expected);
     });
   });
 
-  describe('getPoolDetails', () => {
-    it('returns pool details corretly', () => {
-      const pool = { prop1: 1, cdIsBinary: true, prop2: 2, cdExecuting: true, prop3: 3 };
-      const expected = { prop1: 1, prop2: 2, prop3: 3 };
-
-      expect(component.getPoolDetails(pool)).toEqual(expected);
-    });
-  });
-
   describe('getSelectionTiers', () => {
-    let pools: Pool[];
     const setSelectionTiers = (tiers: number[]) => {
-      component.selection.selected = [
-        {
-          tiers
-        }
-      ];
-      component.selection.update();
+      component.expandedRow = { tiers };
       component.getSelectionTiers();
     };
 
     beforeEach(() => {
-      pools = [];
-      setUpPools(pools);
+      component.pools = getPoolList();
     });
 
     it('should select multiple existing cache tiers', () => {
       setSelectionTiers([0, 1, 2]);
-      expect(component.selectionCacheTiers).toEqual(pools);
+      expect(component.cacheTiers).toEqual(getPoolList());
     });
 
     it('should select correct existing cache tier', () => {
       setSelectionTiers([0]);
-      expect(component.selectionCacheTiers).toEqual([{ pg_num: 256, pool: 0, pool_name: 'a' }]);
+      expect(component.cacheTiers).toEqual([Mocks.getPool('a', 0)]);
     });
 
     it('should not select cache tier if id is invalid', () => {
       setSelectionTiers([-1]);
-      expect(component.selectionCacheTiers).toEqual([]);
+      expect(component.cacheTiers).toEqual([]);
     });
 
     it('should not select cache tier if empty', () => {
       setSelectionTiers([]);
-      expect(component.selectionCacheTiers).toEqual([]);
+      expect(component.cacheTiers).toEqual([]);
     });
 
     it('should be able to selected one pool with multiple tiers, than with a single tier, than with no tiers', () => {
       setSelectionTiers([0, 1, 2]);
-      expect(component.selectionCacheTiers).toEqual(pools);
+      expect(component.cacheTiers).toEqual(getPoolList());
       setSelectionTiers([0]);
-      expect(component.selectionCacheTiers).toEqual([{ pg_num: 256, pool: 0, pool_name: 'a' }]);
+      expect(component.cacheTiers).toEqual([Mocks.getPool('a', 0)]);
       setSelectionTiers([]);
-      expect(component.selectionCacheTiers).toEqual([]);
+      expect(component.cacheTiers).toEqual([]);
+    });
+  });
+
+  describe('getDisableDesc', () => {
+    beforeEach(() => {
+      component.selection.selected = [{ pool_name: 'foo' }];
+    });
+
+    it('should return message if mon_allow_pool_delete flag is set to false', () => {
+      component.monAllowPoolDelete = false;
+      expect(component.getDisableDesc()).toBe(
+        'Pool deletion is disabled by the mon_allow_pool_delete configuration setting.'
+      );
+    });
+
+    it('should return false if mon_allow_pool_delete flag is set to true', () => {
+      component.monAllowPoolDelete = true;
+      expect(component.getDisableDesc()).toBeFalsy();
     });
   });
 });

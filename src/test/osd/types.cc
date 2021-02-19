@@ -23,7 +23,6 @@
 #include "common/Thread.h"
 #include "include/stringify.h"
 #include "osd/ReplicatedBackend.h"
-
 #include <sstream>
 
 TEST(hobject, prefixes0)
@@ -190,7 +189,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						   osdmap,
 						   lastmap,
 						   pgid,
-                                                   recoverable.get(),
+                                                   *recoverable,
 						   &past_intervals));
     ASSERT_TRUE(past_intervals.empty());
   }
@@ -219,7 +218,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
     old_primary = new_primary;
   }
@@ -248,7 +247,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -275,7 +274,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -309,7 +308,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -343,7 +342,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pg_t(pg_num - 1, pool_id),
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -378,7 +377,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  lastmap,  // reverse order!
 						  osdmap,
 						  pg_t(pg_num - 1, pool_id),
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -411,7 +410,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pg_t(pg_num - 1, pool_id),
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -444,7 +443,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pg_t(pg_num / 2 - 1, pool_id),
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -477,7 +476,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  lastmap,  // reverse order!
 						  osdmap,
 						  pg_t(pg_num / 2 - 1, pool_id),
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -510,7 +509,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pg_t(pg_num / 2 - 1, pool_id),
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -544,7 +543,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
   }
 
@@ -573,7 +572,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
     ASSERT_NE(string::npos, out.str().find("acting set is too small"));
@@ -623,7 +622,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
     ASSERT_NE(string::npos, out.str().find("acting set is too small"));
@@ -656,7 +655,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
     ASSERT_NE(string::npos, out.str().find("includes interval"));
@@ -699,7 +698,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
     ASSERT_NE(string::npos, out.str().find("presumed to have been rw"));
@@ -746,7 +745,7 @@ for (unsigned i = 0; i < 4; ++i) {
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
     ASSERT_NE(string::npos, out.str().find("does not include interval"));
@@ -901,6 +900,75 @@ TEST(pg_t, merge)
   ASSERT_FALSE(parent.is_merge_target(9, 8));
 }
 
+TEST(ObjectCleanRegions, mark_data_region_dirty)
+{
+  ObjectCleanRegions clean_regions;
+  uint64_t offset_1, len_1, offset_2, len_2;
+  offset_1 = 4096;
+  len_1 = 8192;
+  offset_2 = 40960;
+  len_2 = 4096;
+
+  interval_set<uint64_t> expect_dirty_region;
+  EXPECT_EQ(expect_dirty_region, clean_regions.get_dirty_regions());
+  expect_dirty_region.insert(offset_1, len_1);
+  expect_dirty_region.insert(offset_2, len_2);
+
+  clean_regions.mark_data_region_dirty(offset_1, len_1);
+  clean_regions.mark_data_region_dirty(offset_2, len_2);
+  EXPECT_EQ(expect_dirty_region, clean_regions.get_dirty_regions());
+}
+
+TEST(ObjectCleanRegions, mark_omap_dirty)
+{
+  ObjectCleanRegions clean_regions;
+
+  EXPECT_FALSE(clean_regions.omap_is_dirty());
+  clean_regions.mark_omap_dirty();
+  EXPECT_TRUE(clean_regions.omap_is_dirty());
+}
+
+TEST(ObjectCleanRegions, merge)
+{
+  ObjectCleanRegions cr1, cr2;
+  interval_set<uint64_t> cr1_expect;
+  interval_set<uint64_t> cr2_expect;
+  ASSERT_EQ(cr1_expect, cr1.get_dirty_regions());
+  ASSERT_EQ(cr2_expect, cr2.get_dirty_regions());
+
+  cr1.mark_data_region_dirty(4096, 4096);
+  cr1_expect.insert(4096, 4096);
+  ASSERT_EQ(cr1_expect, cr1.get_dirty_regions());
+  cr1.mark_data_region_dirty(12288, 8192);
+  cr1_expect.insert(12288, 8192);
+  ASSERT_TRUE(cr1_expect.subset_of(cr1.get_dirty_regions()));
+  cr1.mark_data_region_dirty(32768, 10240);
+  cr1_expect.insert(32768, 10240);
+  cr1_expect.erase(4096, 4096);
+  ASSERT_TRUE(cr1_expect.subset_of(cr1.get_dirty_regions()));
+
+  cr2.mark_data_region_dirty(20480, 12288);
+  cr2_expect.insert(20480, 12288);
+  ASSERT_EQ(cr2_expect, cr2.get_dirty_regions());
+  cr2.mark_data_region_dirty(102400, 4096);
+  cr2_expect.insert(102400, 4096);
+  cr2.mark_data_region_dirty(204800, 8192);
+  cr2_expect.insert(204800, 8192);
+  cr2.mark_data_region_dirty(409600, 4096);
+  cr2_expect.insert(409600, 4096);
+  ASSERT_TRUE(cr2_expect.subset_of(cr2.get_dirty_regions()));
+
+  ASSERT_FALSE(cr2.omap_is_dirty());
+  cr2.mark_omap_dirty();
+  ASSERT_FALSE(cr1.omap_is_dirty());
+  ASSERT_TRUE(cr2.omap_is_dirty());
+
+  cr1.merge(cr2);
+  cr1_expect.insert(204800, 8192);
+  ASSERT_TRUE(cr1_expect.subset_of(cr1.get_dirty_regions()));
+  ASSERT_TRUE(cr1.omap_is_dirty());
+}
+
 TEST(pg_missing_t, constructor)
 {
   pg_missing_t missing;
@@ -928,7 +996,7 @@ TEST(pg_missing_t, claim)
   pg_missing_t other;
   EXPECT_FALSE(other.have_missing());
 
-  other.claim(missing);
+  other.claim(std::move(missing));
   EXPECT_TRUE(other.have_missing());
 }
 
@@ -1819,6 +1887,310 @@ TEST_F(PITest, past_intervals_ec_lost) {
     /* pg_down    */ false);
 }
 
+void ci_ref_test(
+  object_manifest_t l,
+  object_manifest_t to_remove,
+  object_manifest_t g,
+  object_ref_delta_t expected_delta)
+{
+  {
+    object_ref_delta_t delta;
+    to_remove.calc_refs_to_drop_on_removal(
+      &l,
+      &g,
+      delta);
+    ASSERT_EQ(
+      expected_delta,
+      delta);
+  }
+
+  // calc_refs_to_drop specifically handles nullptr identically to empty
+  // chunk_map
+  if (l.chunk_map.empty() || g.chunk_map.empty()) {
+    object_ref_delta_t delta;
+    to_remove.calc_refs_to_drop_on_removal(
+      l.chunk_map.empty() ? nullptr : &l,
+      g.chunk_map.empty() ? nullptr : &g,
+      delta);
+    ASSERT_EQ(
+      expected_delta,
+      delta);
+  }
+}
+
+void ci_ref_test_on_modify(
+  object_manifest_t l,
+  object_manifest_t to_remove,
+  ObjectCleanRegions clean_regions,
+  object_ref_delta_t expected_delta)
+{
+  {
+    object_ref_delta_t delta;
+    to_remove.calc_refs_to_drop_on_modify(
+      &l,
+      clean_regions,
+      delta);
+    ASSERT_EQ(
+      expected_delta,
+      delta);
+  }
+}
+
+void ci_ref_test_inc_on_set(
+  object_manifest_t l,
+  object_manifest_t added_set,
+  object_manifest_t g,
+  object_ref_delta_t expected_delta)
+{
+  {
+    object_ref_delta_t delta;
+    added_set.calc_refs_to_inc_on_set(
+      &l,
+      &g,
+      delta);
+    ASSERT_EQ(
+      expected_delta,
+      delta);
+  }
+}
+
+hobject_t mk_hobject(string name)
+{
+  return hobject_t(
+    std::move(name),
+    string(),
+    CEPH_NOSNAP,
+    0x42,
+    1,
+    string());
+}
+
+object_manifest_t mk_manifest(
+  std::map<uint64_t, std::tuple<uint64_t, uint64_t, string>> m)
+{
+  object_manifest_t ret;
+  ret.type = object_manifest_t::TYPE_CHUNKED;
+  for (auto &[offset, tgt] : m) {
+    auto &[tgt_off, length, name] = tgt;
+    auto &ci = ret.chunk_map[offset];
+    ci.offset = tgt_off;
+    ci.length = length;
+    ci.oid = mk_hobject(name);
+  }
+  return ret;
+}
+
+object_ref_delta_t mk_delta(std::map<string, int> _m) {
+  std::map<hobject_t, int> m;
+  for (auto &[name, delta] : _m) {
+    m.insert(
+      std::make_pair(
+	mk_hobject(name),
+	delta));
+  }
+  return object_ref_delta_t(std::move(m));
+}
+
+TEST(chunk_info_test, calc_refs_to_drop) {
+  ci_ref_test(
+    mk_manifest({}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({{"foo", -1}}));
+
+}
+
+
+TEST(chunk_info_test, calc_refs_to_drop_match) {
+  ci_ref_test(
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_delta({}));
+
+}
+
+TEST(chunk_info_test, calc_refs_to_drop_head_match) {
+  ci_ref_test(
+    mk_manifest({}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_delta({}));
+
+}
+
+TEST(chunk_info_test, calc_refs_to_drop_tail_match) {
+  ci_ref_test(
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({}));
+
+}
+
+TEST(chunk_info_test, calc_refs_to_drop_second_reference) {
+  ci_ref_test(
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}, {4<<10, {0, 1<<10, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({{"foo", -1}}));
+
+}
+
+TEST(chunk_info_test, calc_refs_offsets_dont_match) {
+  ci_ref_test(
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{512, {0, 1024, "foo"}}, {(4<<10) + 512, {0, 1<<10, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({{"foo", -2}}));
+
+}
+
+TEST(chunk_info_test, calc_refs_g_l_match) {
+  ci_ref_test(
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}, {4096, {0, 1024, "bar"}}}),
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_delta({{"foo", -2}, {"bar", -1}}));
+
+}
+
+TEST(chunk_info_test, calc_refs_g_l_match_no_this) {
+  ci_ref_test(
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "bar"}}}),
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_delta({{"foo", -1}, {"bar", -1}}));
+
+}
+
+TEST(chunk_info_test, calc_refs_modify_mismatch) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 1024);
+  clean_regions.mark_data_region_dirty(512, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "bar"}}, {512, {2048, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}, {"ttt", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 1024);
+  clean_regions.mark_data_region_dirty(512, 1024);
+  clean_regions.mark_data_region_dirty(4096, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    mk_manifest({{0, {0, 1024, "bar"}}, {512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match_dirty_overlap) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 256);
+  clean_regions.mark_data_region_dirty(256, 4096);
+  ci_ref_test_on_modify(
+    mk_manifest({}),
+    mk_manifest({{0, {0, 256, "bar"}}, {512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}, {"foo", -1}, {"ttt", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match_dirty_overlap2) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 256);
+  clean_regions.mark_data_region_dirty(256, 1024);
+  clean_regions.mark_data_region_dirty(3584, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    mk_manifest({{0, {0, 256, "bar"}}, {512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match_dirty_overlap3) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 256);
+  clean_regions.mark_data_region_dirty(256, 4096);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    mk_manifest({{0, {0, 256, "bar"}}, {512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match_clone_overlap) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 256);
+  clean_regions.mark_data_region_dirty(256, 1024);
+  clean_regions.mark_data_region_dirty(3584, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    mk_manifest({{0, {0, 256, "bar"}}, {256, {2048, 1024, "foo"}}, {3584, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}, {"foo", -1}, {"ttt", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_no_snap) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 1024);
+  clean_regions.mark_data_region_dirty(512, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({}),
+    mk_manifest({{0, {0, 1024, "bar"}}, {512, {2048, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}, {"ttt", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{1024, {0, 1024, "bar"}}}),
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_delta({{"bar", 1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc2) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{512, {0, 1024, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{1024, {0, 1024, "bar"}}, {4096, {0, 1024, "bbb"}}}),
+    mk_manifest({{512, {0, 1024, "foo"}}}),
+    mk_delta({{"bar", 1}, {"bbb", 1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc_no_l) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({}),
+    mk_manifest({{1024, {0, 1024, "bar"}}, {4096, {0, 1024, "bbb"}}}),
+    mk_manifest({{512, {0, 1024, "foo"}}}),
+    mk_delta({{"bar", 1}, {"bbb", 1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc_no_g) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{512, {0, 1024, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{1024, {0, 1024, "bar"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({{"bar", 1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc_match_g_l) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_delta({{"aaa", -1}, {"foo", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc_match) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{256, {0, 256, "bbb"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "ccc"}}}),
+    mk_delta({}));
+}
 
 /*
  * Local Variables:

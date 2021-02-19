@@ -29,7 +29,7 @@ function run() {
     export objects=200
     export poolprefix=test
     export FORCE_PRIO="255"    # See OSD_RECOVERY_PRIORITY_FORCED
-    export NORMAL_PRIO="180"   # See OSD_RECOVERY_PRIORITY_BASE
+    export NORMAL_PRIO="190"   # See OSD_RECOVERY_PRIORITY_BASE + 10
 
     local funcs=${@:-$(set | sed -n -e 's/^\(TEST_[0-9a-z_]*\) .*/\1/p')}
     for func in $funcs ; do
@@ -125,8 +125,8 @@ function TEST_recovery_priority() {
       fi
     done
 
-    ceph osd pool set $pool2 size 1
-    ceph osd pool set $pool3 size 1
+    ceph osd pool set $pool2 size 1 --yes-i-really-mean-it
+    ceph osd pool set $pool3 size 1 --yes-i-really-mean-it
     wait_for_clean || return 1
 
     dd if=/dev/urandom of=$dir/data bs=1M count=10
@@ -152,7 +152,7 @@ function TEST_recovery_priority() {
     # to be preempted.
     ceph osd pool set $pool3 size 2
     sleep 2
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations || return 1
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations || return 1
 
     # 3. Item is in progress, adjust priority with no higher priority waiting
     for i in $(seq 1 $max_tries)
@@ -167,18 +167,18 @@ function TEST_recovery_priority() {
       sleep 2
     done
     flush_pg_stats || return 1
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations || return 1
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations || return 1
 
     ceph osd out osd.$chk_osd1_2
     sleep 2
     flush_pg_stats || return 1
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations || return 1
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations || return 1
     ceph pg dump pgs
 
     ceph osd pool set $pool2 size 2
     sleep 2
     flush_pg_stats || return 1
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations > $dir/out || return 1
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations > $dir/out || return 1
     cat $dir/out
     ceph pg dump pgs
 
@@ -217,7 +217,7 @@ function TEST_recovery_priority() {
       sleep 2
     done
     sleep 2
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations > $dir/out || return 1
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations > $dir/out || return 1
     cat $dir/out
     PRIO=$(cat $dir/out | jq "(.local_reservations.queues[].items[] | select(.item == \"${PG2}\")).prio")
     if [ "$PRIO" != "$FORCE_PRIO" ];
@@ -232,7 +232,7 @@ function TEST_recovery_priority() {
     ceph pg cancel-force-recovery $PG3 || return 1
     sleep 2
     #ceph osd set norecover
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations > $dir/out || return 1
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations > $dir/out || return 1
     cat $dir/out
     PRIO=$(cat $dir/out | jq "(.local_reservations.queues[].items[] | select(.item == \"${PG3}\")).prio")
     if [ "$PRIO" != "$NORMAL_PRIO" ];
@@ -257,14 +257,14 @@ function TEST_recovery_priority() {
 
     ceph pg cancel-force-recovery $PG2 || return 1
     sleep 5
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations || return 1
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations || return 1
 
     # 2. Item is queued, re-queue and preempt because new priority higher than an in progress item
     flush_pg_stats || return 1
     ceph pg force-recovery $PG3 || return 1
     sleep 2
 
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations > $dir/out || return 1
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations > $dir/out || return 1
     cat $dir/out
     PRIO=$(cat $dir/out | jq "(.local_reservations.queues[].items[] | select(.item == \"${PG2}\")).prio")
     if [ "$PRIO" != "$NORMAL_PRIO" ];
@@ -290,7 +290,7 @@ function TEST_recovery_priority() {
     ceph osd unset noout
     ceph osd unset norecover
 
-    wait_for_clean "CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations" || return 1
+    wait_for_clean "CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations" || return 1
 
     ceph pg dump pgs
 
@@ -318,7 +318,7 @@ function TEST_recovery_priority() {
 # pool 2 with recovery_priority 2
 #
 # Start recovery by changing the pool sizes from 1 to 2
-# Use dump_reservations to verify priorities
+# Use dump_recovery_reservations to verify priorities
 function TEST_recovery_pool_priority() {
     local dir=$1
     local pools=3 # Don't assume the first 2 pools are exact what we want
@@ -401,9 +401,9 @@ function TEST_recovery_pool_priority() {
     pool1_prio=$(expr $NORMAL_PRIO + $pool1_extra_prio)
     pool2_prio=$(expr $NORMAL_PRIO + $pool2_extra_prio)
 
-    ceph osd pool set $pool1 size 1
+    ceph osd pool set $pool1 size 1 --yes-i-really-mean-it
     ceph osd pool set $pool1 recovery_priority $pool1_extra_prio
-    ceph osd pool set $pool2 size 1
+    ceph osd pool set $pool2 size 1 --yes-i-really-mean-it
     ceph osd pool set $pool2 recovery_priority $pool2_extra_prio
     wait_for_clean || return 1
 
@@ -425,11 +425,35 @@ function TEST_recovery_pool_priority() {
 
     ceph osd pool set $pool1 size 2
     ceph osd pool set $pool2 size 2
-    sleep 10
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_reservations > $dir/dump.${chk_osd1_1}.out
+
+    # Wait for both PGs to be in recovering state
+    ceph pg dump pgs
+
+    # Wait for recovery to start
+    set -o pipefail
+    count=0
+    while(true)
+    do
+      if test $(ceph --format json pg dump pgs |
+	      jq '.pg_stats | .[] | .state | contains("recovering")' | grep -c true) == "2"
+      then
+        break
+      fi
+      sleep 2
+      if test "$count" -eq "10"
+      then
+        echo "Recovery never started on both PGs"
+        return 1
+      fi
+      count=$(expr $count + 1)
+    done
+    set +o pipefail
+    ceph pg dump pgs
+
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_1}) dump_recovery_reservations > $dir/dump.${chk_osd1_1}.out
     echo osd.${chk_osd1_1}
     cat $dir/dump.${chk_osd1_1}.out
-    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_2}) dump_reservations > $dir/dump.${chk_osd1_2}.out
+    CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${chk_osd1_2}) dump_recovery_reservations > $dir/dump.${chk_osd1_2}.out
     echo osd.${chk_osd1_2}
     cat $dir/dump.${chk_osd1_2}.out
 

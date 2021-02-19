@@ -16,6 +16,7 @@
 #define MGR_STANDBY_H_
 
 #include "auth/Auth.h"
+#include "common/async/context_pool.h"
 #include "common/Finisher.h"
 #include "common/Timer.h"
 #include "common/LogClient.h"
@@ -39,6 +40,7 @@ public:
 			  const std::set <std::string> &changed) override;
 
 protected:
+  ceph::async::io_context_pool poolctx;
   MonClient monc;
   std::unique_ptr<Messenger> client_messenger;
   Objecter objecter;
@@ -49,7 +51,7 @@ protected:
   LogClient log_client;
   LogChannelRef clog, audit_clog;
 
-  Mutex lock;
+  ceph::mutex lock = ceph::make_mutex("MgrStandby::lock");
   Finisher finisher;
   SafeTimer timer;
 
@@ -61,7 +63,7 @@ protected:
 
   std::string state_str();
 
-  void handle_mgr_map(MMgrMap *m);
+  void handle_mgr_map(ceph::ref_t<MMgrMap> m);
   void _update_log_config();
   void send_beacon();
 
@@ -71,17 +73,15 @@ public:
   MgrStandby(int argc, const char **argv);
   ~MgrStandby() override;
 
-  bool ms_dispatch(Message *m) override;
+  bool ms_dispatch2(const ceph::ref_t<Message>& m) override;
   bool ms_handle_reset(Connection *con) override { return false; }
   void ms_handle_remote_reset(Connection *con) override {}
-  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer) override;
   bool ms_handle_refused(Connection *con) override;
 
   int init();
   void shutdown();
   void respawn();
   int main(vector<const char *> args);
-  void handle_signal(int signum);
   void tick();
 };
 

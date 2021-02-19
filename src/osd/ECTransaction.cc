@@ -21,6 +21,17 @@
 #include "os/ObjectStore.h"
 #include "common/inline_variant.h"
 
+using std::make_pair;
+using std::map;
+using std::pair;
+using std::set;
+using std::string;
+using std::vector;
+
+using ceph::bufferlist;
+using ceph::decode;
+using ceph::encode;
+using ceph::ErasureCodeInterfaceRef;
 
 void encode_and_write(
   pg_t pgid,
@@ -105,7 +116,8 @@ void ECTransaction::generate_transactions(
   map<shard_id_t, ObjectStore::Transaction> *transactions,
   set<hobject_t> *temp_added,
   set<hobject_t> *temp_removed,
-  DoutPrefixProvider *dpp)
+  DoutPrefixProvider *dpp,
+  const ceph_release_t require_osd_release)
 {
   ceph_assert(written_map);
   ceph_assert(transactions);
@@ -184,23 +196,23 @@ void ECTransaction::generate_transactions(
 	entry->mod_desc.update_snaps(op.updated_snaps->first);
       }
 
-      map<string, boost::optional<bufferlist> > xattr_rollback;
+      map<string, std::optional<bufferlist> > xattr_rollback;
       ceph_assert(hinfo);
       bufferlist old_hinfo;
       encode(*hinfo, old_hinfo);
       xattr_rollback[ECUtil::get_hinfo_key()] = old_hinfo;
-      
+
       if (op.is_none() && op.truncate && op.truncate->first == 0) {
 	ceph_assert(op.truncate->first == 0);
 	ceph_assert(op.truncate->first ==
 	       op.truncate->second);
 	ceph_assert(entry);
 	ceph_assert(obc);
-	
+
 	if (op.truncate->first != op.truncate->second) {
 	  op.truncate->first = op.truncate->second;
 	} else {
-	  op.truncate = boost::none;
+	  op.truncate = std::nullopt;
 	}
 
 	op.delete_first = true;
@@ -218,7 +230,7 @@ void ECTransaction::generate_transactions(
       }
 
       if (op.delete_first) {
-	/* We also want to remove the boost::none entries since
+	/* We also want to remove the std::nullopt entries since
 	   * the keys already won't exist */
 	for (auto j = op.attr_updates.begin();
 	     j != op.attr_updates.end();
@@ -264,9 +276,15 @@ void ECTransaction::generate_transactions(
 	[&](const PGTransaction::ObjectOperation::Init::None &) {},
 	[&](const PGTransaction::ObjectOperation::Init::Create &op) {
 	  for (auto &&st: *transactions) {
-	    st.second.touch(
-	      coll_t(spg_t(pgid, st.first)),
-	      ghobject_t(oid, ghobject_t::NO_GEN, st.first));
+	    if (require_osd_release >= ceph_release_t::octopus) {
+	      st.second.create(
+		coll_t(spg_t(pgid, st.first)),
+		ghobject_t(oid, ghobject_t::NO_GEN, st.first));
+	    } else {
+	      st.second.touch(
+		coll_t(spg_t(pgid, st.first)),
+		ghobject_t(oid, ghobject_t::NO_GEN, st.first));
+	    }
 	  }
 	},
 	[&](const PGTransaction::ObjectOperation::Init::Clone &op) {
@@ -332,13 +350,13 @@ void ECTransaction::generate_transactions(
 		xattr_rollback.insert(
 		  make_pair(
 		    j.first,
-		    boost::optional<bufferlist>(citer->second)));
+		    std::optional<bufferlist>(citer->second)));
 	      } else {
 		// won't overwrite anything we put in earlier
 		xattr_rollback.insert(
 		  make_pair(
 		    j.first,
-		    boost::none));
+		    std::nullopt));
 	      }
 	    }
 	    if (j.second) {

@@ -1,10 +1,8 @@
 import { Component, Input, OnInit, TemplateRef, ViewChild } from '@angular/core';
 
-import { I18n } from '@ngx-translate/i18n-polyfill';
-
-import { PerformanceCounterService } from '../../../shared/api/performance-counter.service';
-import { CdTableColumn } from '../../../shared/models/cd-table-column';
-import { CdTableFetchDataContext } from '../../../shared/models/cd-table-fetch-data-context';
+import { PerformanceCounterService } from '~/app/shared/api/performance-counter.service';
+import { CdTableColumn } from '~/app/shared/models/cd-table-column';
+import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data-context';
 
 /**
  * Display the specified performance counters in a datatable.
@@ -33,22 +31,23 @@ export class TablePerformanceCounterComponent implements OnInit {
   @Input()
   serviceId: string;
 
-  constructor(private performanceCounterService: PerformanceCounterService, private i18n: I18n) {}
+  constructor(private performanceCounterService: PerformanceCounterService) {}
 
   ngOnInit() {
     this.columns = [
       {
-        name: this.i18n('Name'),
+        name: $localize`Name`,
         prop: 'name',
         flexGrow: 1
       },
       {
-        name: this.i18n('Description'),
+        name: $localize`Description`,
         prop: 'description',
         flexGrow: 1
       },
       {
-        name: this.i18n('Value'),
+        name: $localize`Value`,
+        prop: 'value',
         cellTemplate: this.valueTpl,
         flexGrow: 1
       }

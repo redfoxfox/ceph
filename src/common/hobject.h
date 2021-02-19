@@ -227,7 +227,7 @@ public:
    * Returns set S of strings such that for any object
    * h where h.match(bits, mask), there is some string
    * s \f$\in\f$ S such that s is a prefix of h.to_str().
-   * Furthermore, for any s $f\in\f$ S, s is a prefix of
+   * Furthermore, for any s \f$\in\f$ S, s is a prefix of
    * h.str() implies that h.match(bits, mask).
    */
   static std::set<std::string> get_prefixes(
@@ -393,6 +393,14 @@ public:
 
   ghobject_t(const hobject_t &obj, gen_t gen, shard_id_t shard)
     : hobj(obj),
+      generation(gen),
+      shard_id(shard),
+      max(false) {}
+
+  ghobject_t(shard_id_t shard, int64_t pool, uint32_t hash,
+             const std::string& nspace, const std::string& oid,
+             snapid_t snap, gen_t gen)
+    : hobj(object_t(oid), "", snap, hash, pool, nspace),
       generation(gen),
       shard_id(shard),
       max(false) {}

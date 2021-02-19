@@ -30,6 +30,22 @@
 #include "messages/MOSDPGRecoveryDelete.h"
 #include "messages/MOSDPGRecoveryDeleteReply.h"
 
+using std::list;
+using std::make_pair;
+using std::map;
+using std::ostream;
+using std::ostringstream;
+using std::pair;
+using std::set;
+using std::string;
+using std::stringstream;
+using std::vector;
+
+using ceph::bufferlist;
+using ceph::bufferptr;
+using ceph::ErasureCodeProfile;
+using ceph::ErasureCodeInterfaceRef;
+
 #define dout_context cct
 #define dout_subsys ceph_subsys_osd
 #define DOUT_PREFIX_ARGS this
@@ -116,7 +132,7 @@ bool PGBackend::handle_message(OpRequestRef op)
 
 void PGBackend::handle_recovery_delete(OpRequestRef op)
 {
-  const MOSDPGRecoveryDelete *m = static_cast<const MOSDPGRecoveryDelete *>(op->get_req());
+  auto m = op->get_req<MOSDPGRecoveryDelete>();
   ceph_assert(m->get_type() == MSG_OSD_PG_RECOVERY_DELETE);
   dout(20) << __func__ << " " << op << dendl;
 
@@ -127,7 +143,7 @@ void PGBackend::handle_recovery_delete(OpRequestRef op)
     get_parent()->remove_missing_object(p.first, p.second, gather.new_sub());
   }
 
-  MOSDPGRecoveryDeleteReply *reply = new MOSDPGRecoveryDeleteReply;
+  auto reply = make_message<MOSDPGRecoveryDeleteReply>();
   reply->from = get_parent()->whoami_shard();
   reply->set_priority(m->get_priority());
   reply->pgid = spg_t(get_parent()->get_info().pgid.pgid, m->from.shard);
@@ -136,7 +152,7 @@ void PGBackend::handle_recovery_delete(OpRequestRef op)
   reply->objects = m->objects;
   ConnectionRef conn = m->get_connection();
 
-  gather.set_finisher(new FunctionContext(
+  gather.set_finisher(new LambdaContext(
     [=](int r) {
       if (r != -EAGAIN) {
 	get_parent()->send_message_osd_cluster(reply, conn.get());
@@ -149,7 +165,7 @@ void PGBackend::handle_recovery_delete(OpRequestRef op)
 
 void PGBackend::handle_recovery_delete_reply(OpRequestRef op)
 {
-  const MOSDPGRecoveryDeleteReply *m = static_cast<const MOSDPGRecoveryDeleteReply *>(op->get_req());
+  auto m = op->get_req<MOSDPGRecoveryDeleteReply>();
   ceph_assert(m->get_type() == MSG_OSD_PG_RECOVERY_DELETE_REPLY);
   dout(20) << __func__ << " " << op << dendl;
 
@@ -197,7 +213,7 @@ void PGBackend::rollback(
       temp.append(t);
       temp.swap(t);
     }
-    void setattrs(map<string, boost::optional<bufferlist> > &attrs) override {
+    void setattrs(map<string, std::optional<bufferlist> > &attrs) override {
       ObjectStore::Transaction temp;
       pg->rollback_setattrs(hoid, attrs, &temp);
       temp.append(t);
@@ -350,13 +366,24 @@ int PGBackend::objects_list_partial(
 
   while (!_next.is_max() && ls->size() < (unsigned)min) {
     vector<ghobject_t> objects;
-    r = store->collection_list(
-      ch,
-      _next,
-      ghobject_t::get_max(),
-      max - ls->size(),
-      &objects,
-      &_next);
+    if (HAVE_FEATURE(parent->min_upacting_features(),
+                     OSD_FIXED_COLLECTION_LIST)) {
+      r = store->collection_list(
+        ch,
+        _next,
+        ghobject_t::get_max(),
+        max - ls->size(),
+        &objects,
+        &_next);
+    } else {
+      r = store->collection_list_legacy(
+        ch,
+        _next,
+        ghobject_t::get_max(),
+        max - ls->size(),
+        &objects,
+        &_next);
+    }
     if (r != 0) {
       derr << __func__ << " list collection " << ch << " got: " << cpp_strerror(r) << dendl;
       break;
@@ -385,13 +412,25 @@ int PGBackend::objects_list_range(
 {
   ceph_assert(ls);
   vector<ghobject_t> objects;
-  int r = store->collection_list(
-    ch,
-    ghobject_t(start, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
-    ghobject_t(end, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
-    INT_MAX,
-    &objects,
-    NULL);
+  int r;
+  if (HAVE_FEATURE(parent->min_upacting_features(),
+                   OSD_FIXED_COLLECTION_LIST)) {
+    r = store->collection_list(
+      ch,
+      ghobject_t(start, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      ghobject_t(end, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      INT_MAX,
+      &objects,
+      NULL);
+  } else {
+    r = store->collection_list_legacy(
+      ch,
+      ghobject_t(start, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      ghobject_t(end, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      INT_MAX,
+      &objects,
+      NULL);
+  }
   ls->reserve(objects.size());
   for (vector<ghobject_t>::iterator i = objects.begin();
        i != objects.end();
@@ -438,15 +477,15 @@ int PGBackend::objects_get_attrs(
 
 void PGBackend::rollback_setattrs(
   const hobject_t &hoid,
-  map<string, boost::optional<bufferlist> > &old_attrs,
+  map<string, std::optional<bufferlist> > &old_attrs,
   ObjectStore::Transaction *t) {
   map<string, bufferlist> to_set;
   ceph_assert(!hoid.is_temp());
-  for (map<string, boost::optional<bufferlist> >::iterator i = old_attrs.begin();
+  for (map<string, std::optional<bufferlist> >::iterator i = old_attrs.begin();
        i != old_attrs.end();
        ++i) {
     if (i->second) {
-      to_set[i->first] = i->second.get();
+      to_set[i->first] = *(i->second);
     } else {
       t->rmattr(
 	coll,
@@ -756,6 +795,18 @@ bool PGBackend::be_compare_scrub_objects(
 		<< " from shard " << auth_shard;
     obj_result.set_size_mismatch();
   }
+  // If the replica is too large and we didn't already count it for this object
+  //
+  if (candidate.size > cct->_conf->osd_max_object_size
+      && !obj_result.has_size_too_large()) {
+    if (error != CLEAN)
+      errorstream << ", ";
+    error = FOUND_ERROR;
+    errorstream << "size " << candidate.size
+		<< " > " << cct->_conf->osd_max_object_size
+		<< " is too large";
+    obj_result.set_size_too_large();
+  }
   for (map<string,bufferptr>::const_iterator i = auth.attrs.begin();
        i != auth.attrs.end();
        ++i) {
@@ -1010,8 +1061,8 @@ void PGBackend::be_compare_scrubmaps(
   map<hobject_t, set<pg_shard_t>> &missing,
   map<hobject_t, set<pg_shard_t>> &inconsistent,
   map<hobject_t, list<pg_shard_t>> &authoritative,
-  map<hobject_t, pair<boost::optional<uint32_t>,
-                      boost::optional<uint32_t>>> &missing_digest,
+  map<hobject_t, pair<std::optional<uint32_t>,
+                      std::optional<uint32_t>>> &missing_digest,
   int &shallow_errors, int &deep_errors,
   Scrub::Store *store,
   const spg_t& pgid,
@@ -1147,7 +1198,7 @@ void PGBackend::be_compare_scrubmaps(
     }
 
     if (fix_digest) {
-      boost::optional<uint32_t> data_digest, omap_digest;
+      std::optional<uint32_t> data_digest, omap_digest;
       ceph_assert(auth_object.digest_present);
       data_digest = auth_object.digest;
       if (auth_object.omap_digest_present) {
@@ -1199,7 +1250,7 @@ void PGBackend::be_compare_scrubmaps(
 	utime_t age = now - auth_oi.local_mtime;
 	if (update == FORCE ||
 	    age > cct->_conf->osd_deep_scrub_update_digest_min_age) {
-          boost::optional<uint32_t> data_digest, omap_digest;
+          std::optional<uint32_t> data_digest, omap_digest;
           if (auth_object.digest_present) {
             data_digest = auth_object.digest;
 	    dout(20) << __func__ << " will update data digest on " << *k << dendl;
@@ -1247,6 +1298,10 @@ void PGBackend::be_omap_checks(const map<pg_shard_t,ScrubMap*> &maps,
   // Iterate through objects and update omap stats
   for (const auto& k : master_set) {
     for (const auto& map : maps) {
+      if (map.first != get_parent()->primary_shard()) {
+        // Only set omap stats for the primary
+        continue;
+      }
       auto it = map.second->objects.find(k);
       if (it == map.second->objects.end())
         continue;
@@ -1254,10 +1309,16 @@ void PGBackend::be_omap_checks(const map<pg_shard_t,ScrubMap*> &maps,
       omap_stats.omap_bytes += obj.object_omap_bytes;
       omap_stats.omap_keys += obj.object_omap_keys;
       if (obj.large_omap_object_found) {
+        pg_t pg;
+        auto osdmap = get_osdmap();
+        osdmap->map_to_pg(k.pool, k.oid.name, k.get_key(), k.nspace, &pg);
+        pg_t mpg = osdmap->raw_pg_to_pg(pg);
         omap_stats.large_omap_objects++;
-        warnstream << "Large omap object found. Object: " << k << " Key count: "
-                   << obj.large_omap_object_key_count << " Size (bytes): "
-                   << obj.large_omap_object_value_size << '\n';
+        warnstream << "Large omap object found. Object: " << k
+                   << " PG: " << pg << " (" << mpg << ")"
+                   << " Key count: " << obj.large_omap_object_key_count
+                   << " Size (bytes): " << obj.large_omap_object_value_size
+                   << '\n';
         break;
       }
     }

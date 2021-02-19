@@ -5,9 +5,12 @@
 #include "common/dout.h"
 #include "common/errno.h"
 #include "cls/rbd/cls_rbd_client.h"
+#include "librbd/ConfigWatcher.h"
 #include "librbd/ImageCtx.h"
+#include "librbd/PluginRegistry.h"
 #include "librbd/Utils.h"
 #include "librbd/cache/ObjectCacherObjectDispatch.h"
+#include "librbd/cache/WriteAroundObjectDispatch.h"
 #include "librbd/image/CloseRequest.h"
 #include "librbd/image/RefreshRequest.h"
 #include "librbd/image/SetSnapRequest.h"
@@ -474,13 +477,20 @@ Context *OpenRequest<I>::handle_v2_get_data_pool(int *result) {
     *result = util::create_ioctx(m_image_ctx->md_ctx, "data pool", data_pool_id,
                                  {}, &m_image_ctx->data_ctx);
     if (*result < 0) {
-      send_close_image(*result);
-      return nullptr;
+      if (*result != -ENOENT) {
+        send_close_image(*result);
+        return nullptr;
+      }
+      m_image_ctx->data_ctx.close();
+    } else {
+      m_image_ctx->data_ctx.set_namespace(m_image_ctx->md_ctx.get_namespace());
+      m_image_ctx->rebuild_data_io_context();
     }
-    m_image_ctx->data_ctx.set_namespace(m_image_ctx->md_ctx.get_namespace());
+  } else {
+    data_pool_id = m_image_ctx->md_ctx.get_id();
   }
 
-  m_image_ctx->init_layout();
+  m_image_ctx->init_layout(data_pool_id);
   send_refresh();
   return nullptr;
 }
@@ -491,6 +501,9 @@ void OpenRequest<I>::send_refresh() {
 
   CephContext *cct = m_image_ctx->cct;
   ldout(cct, 10) << this << " " << __func__ << dendl;
+
+  m_image_ctx->config_watcher = ConfigWatcher<I>::create(*m_image_ctx);
+  m_image_ctx->config_watcher->init();
 
   using klass = OpenRequest<I>;
   RefreshRequest<I> *req = RefreshRequest<I>::create(
@@ -511,34 +524,81 @@ Context *OpenRequest<I>::handle_refresh(int *result) {
     return nullptr;
   }
 
+  send_init_plugin_registry();
+  return nullptr;
+}
+
+template <typename I>
+void OpenRequest<I>::send_init_plugin_registry() {
+  CephContext *cct = m_image_ctx->cct;
+
+  auto plugins = m_image_ctx->config.template get_val<std::string>(
+    "rbd_plugins");
+  ldout(cct, 10) << __func__ << ": plugins=" << plugins << dendl;
+
+  auto ctx = create_context_callback<
+    OpenRequest<I>, &OpenRequest<I>::handle_init_plugin_registry>(this);
+  m_image_ctx->plugin_registry->init(plugins, ctx);
+}
+
+template <typename I>
+Context* OpenRequest<I>::handle_init_plugin_registry(int *result) {
+  CephContext *cct = m_image_ctx->cct;
+  ldout(cct, 10) << __func__ << ": r=" << *result << dendl;
+
+  if (*result < 0) {
+    lderr(cct) << "failed to initialize plugin registry: "
+               << cpp_strerror(*result) << dendl;
+    send_close_image(*result);
+    return nullptr;
+  }
+
   return send_init_cache(result);
 }
 
 template <typename I>
 Context *OpenRequest<I>::send_init_cache(int *result) {
-  // cache is disabled or parent image context
-  if (!m_image_ctx->cache || m_image_ctx->child != nullptr) {
+  if (!m_image_ctx->cache || m_image_ctx->child != nullptr ||
+      !m_image_ctx->data_ctx.is_valid()) {
     return send_register_watch(result);
   }
 
   CephContext *cct = m_image_ctx->cct;
   ldout(cct, 10) << this << " " << __func__ << dendl;
 
-  auto cache = cache::ObjectCacherObjectDispatch<I>::create(m_image_ctx);
-  cache->init();
+  size_t max_dirty = m_image_ctx->config.template get_val<Option::size_t>(
+    "rbd_cache_max_dirty");
+  auto writethrough_until_flush = m_image_ctx->config.template get_val<bool>(
+    "rbd_cache_writethrough_until_flush");
+  auto cache_policy = m_image_ctx->config.template get_val<std::string>(
+    "rbd_cache_policy");
+  if (cache_policy == "writearound") {
+    auto cache = cache::WriteAroundObjectDispatch<I>::create(
+      m_image_ctx, max_dirty, writethrough_until_flush);
+    cache->init();
 
-  // readahead requires the cache
-  m_image_ctx->readahead.set_trigger_requests(
-    m_image_ctx->config.template get_val<uint64_t>("rbd_readahead_trigger_requests"));
-  m_image_ctx->readahead.set_max_readahead_size(
-    m_image_ctx->config.template get_val<Option::size_t>("rbd_readahead_max_bytes"));
+    m_image_ctx->readahead.set_max_readahead_size(0);
+  } else if (cache_policy == "writethrough" || cache_policy == "writeback") {
+    if (cache_policy == "writethrough") {
+      max_dirty = 0;
+    }
 
+    auto cache = cache::ObjectCacherObjectDispatch<I>::create(
+      m_image_ctx, max_dirty, writethrough_until_flush);
+    cache->init();
+
+    // readahead requires the object cacher cache
+    m_image_ctx->readahead.set_trigger_requests(
+      m_image_ctx->config.template get_val<uint64_t>("rbd_readahead_trigger_requests"));
+    m_image_ctx->readahead.set_max_readahead_size(
+      m_image_ctx->config.template get_val<Option::size_t>("rbd_readahead_max_bytes"));
+  }
   return send_register_watch(result);
 }
 
 template <typename I>
 Context *OpenRequest<I>::send_register_watch(int *result) {
-  if (m_image_ctx->read_only) {
+  if ((m_image_ctx->read_only_flags & IMAGE_READ_ONLY_FLAG_USER) != 0U) {
     return send_set_snap(result);
   }
 
@@ -585,7 +645,7 @@ Context *OpenRequest<I>::send_set_snap(int *result) {
   uint64_t snap_id = CEPH_NOSNAP;
   std::swap(m_image_ctx->open_snap_id, snap_id);
   if (snap_id == CEPH_NOSNAP) {
-    RWLock::RLocker snap_locker(m_image_ctx->snap_lock);
+    std::shared_lock image_locker{m_image_ctx->image_lock};
     snap_id = m_image_ctx->get_snap_id(m_image_ctx->snap_namespace,
                                        m_image_ctx->snap_name);
   }

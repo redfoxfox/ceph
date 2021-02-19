@@ -1,52 +1,76 @@
 import { Injectable } from '@angular/core';
 
-import * as _ from 'lodash';
+import _ from 'lodash';
 
 import { PrometheusService } from '../api/prometheus.service';
-import { PrometheusAlert, PrometheusCustomAlert } from '../models/prometheus-alerts';
+import {
+  AlertmanagerAlert,
+  PrometheusCustomAlert,
+  PrometheusRule
+} from '../models/prometheus-alerts';
 import { PrometheusAlertFormatter } from './prometheus-alert-formatter';
-import { ServicesModule } from './services.module';
 
 @Injectable({
-  providedIn: ServicesModule
+  providedIn: 'root'
 })
 export class PrometheusAlertService {
   private canAlertsBeNotified = false;
-  private connected = true;
-  alerts: PrometheusAlert[] = [];
+  alerts: AlertmanagerAlert[] = [];
+  rules: PrometheusRule[] = [];
+  activeAlerts: number;
 
   constructor(
     private alertFormatter: PrometheusAlertFormatter,
     private prometheusService: PrometheusService
   ) {}
 
-  refresh() {
-    this.prometheusService.ifAlertmanagerConfigured((url) => {
-      if (this.connected) {
-        this.prometheusService.list().subscribe(
-          (alerts) => this.handleAlerts(alerts),
-          (resp) => {
-            const errorMsg = `Please check if <a target="_blank" href="${url}">Prometheus Alertmanager</a> is still running`;
-            resp['application'] = 'Prometheus';
-            if (resp.status === 500) {
-              this.connected = false;
-              resp.error.detail = errorMsg;
-            }
+  getAlerts() {
+    this.prometheusService.ifAlertmanagerConfigured(() => {
+      this.prometheusService.getAlerts().subscribe(
+        (alerts) => this.handleAlerts(alerts),
+        (resp) => {
+          if ([404, 504].includes(resp.status)) {
+            this.prometheusService.disableAlertmanagerConfig();
           }
-        );
-      }
+        }
+      );
     });
   }
 
-  private handleAlerts(alerts: PrometheusAlert[]) {
+  getRules() {
+    this.prometheusService.ifPrometheusConfigured(() => {
+      this.prometheusService.getRules('alerting').subscribe((groups) => {
+        this.rules = groups['groups'].reduce((acc, group) => {
+          return acc.concat(
+            group.rules.map((rule) => {
+              rule.group = group.name;
+              return rule;
+            })
+          );
+        }, []);
+      });
+    });
+  }
+
+  refresh() {
+    this.getAlerts();
+    this.getRules();
+  }
+
+  private handleAlerts(alerts: AlertmanagerAlert[]) {
     if (this.canAlertsBeNotified) {
       this.notifyOnAlertChanges(alerts, this.alerts);
     }
+    this.activeAlerts = _.reduce<AlertmanagerAlert, number>(
+      this.alerts,
+      (result, alert) => (alert.status.state === 'active' ? ++result : result),
+      0
+    );
     this.alerts = alerts;
     this.canAlertsBeNotified = true;
   }
 
-  private notifyOnAlertChanges(alerts: PrometheusAlert[], oldAlerts: PrometheusAlert[]) {
+  private notifyOnAlertChanges(alerts: AlertmanagerAlert[], oldAlerts: AlertmanagerAlert[]) {
     const changedAlerts = this.getChangedAlerts(
       this.alertFormatter.convertToCustomAlerts(alerts),
       this.alertFormatter.convertToCustomAlerts(oldAlerts)

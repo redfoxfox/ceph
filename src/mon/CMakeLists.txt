@@ -2,7 +2,6 @@ set(lib_mon_srcs
   ${CMAKE_SOURCE_DIR}/src/auth/cephx/CephxKeyServer.cc
   ${CMAKE_SOURCE_DIR}/src/auth/cephx/CephxServiceHandler.cc
   ${CMAKE_SOURCE_DIR}/src/auth/AuthServiceHandler.cc
-  ${osd_mon_files}
   Paxos.cc
   PaxosService.cc
   OSDMonitor.cc
@@ -18,11 +17,14 @@ set(lib_mon_srcs
   ConfigMap.cc
   ConfigMonitor.cc
   Elector.cc
+  ElectionLogic.cc
+  ConnectionTracker.cc
   HealthMonitor.cc
   ConfigKeyService.cc
   ../mds/MDSAuthCaps.cc
   ../mgr/mgr_commands.cc
-  ../osd/OSDCap.cc)
+  ../osd/OSDCap.cc
+  $<TARGET_OBJECTS:mgr_cap_obj>)
 
 if(HAVE_GSSAPI)
   list(APPEND lib_mon_srcs
@@ -30,6 +32,8 @@ if(HAVE_GSSAPI)
 endif()
 
 add_library(mon STATIC
-  ${lib_mon_srcs}
-  $<TARGET_OBJECTS:kv_objs>)
-target_link_libraries(mon heap_profiler)
+  ${lib_mon_srcs})
+target_link_libraries(mon kv heap_profiler)
+if(WITH_JAEGER)
+  target_link_libraries(mon jaeger-base)
+endif()

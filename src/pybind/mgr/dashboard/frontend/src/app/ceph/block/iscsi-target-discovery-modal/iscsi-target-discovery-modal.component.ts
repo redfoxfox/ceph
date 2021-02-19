@@ -1,14 +1,16 @@
 import { Component, OnInit } from '@angular/core';
 import { FormControl, Validators } from '@angular/forms';
 
-import { I18n } from '@ngx-translate/i18n-polyfill';
-import { BsModalRef } from 'ngx-bootstrap/modal';
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 
-import { IscsiService } from '../../../shared/api/iscsi.service';
-import { NotificationType } from '../../../shared/enum/notification-type.enum';
-import { CdFormGroup } from '../../../shared/forms/cd-form-group';
-import { CdValidators } from '../../../shared/forms/cd-validators';
-import { NotificationService } from '../../../shared/services/notification.service';
+import { IscsiService } from '~/app/shared/api/iscsi.service';
+import { ActionLabelsI18n } from '~/app/shared/constants/app.constants';
+import { NotificationType } from '~/app/shared/enum/notification-type.enum';
+import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
+import { CdValidators } from '~/app/shared/forms/cd-validators';
+import { Permission } from '~/app/shared/models/permissions';
+import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
+import { NotificationService } from '~/app/shared/services/notification.service';
 
 @Component({
   selector: 'cd-iscsi-target-discovery-modal',
@@ -17,21 +19,36 @@ import { NotificationService } from '../../../shared/services/notification.servi
 })
 export class IscsiTargetDiscoveryModalComponent implements OnInit {
   discoveryForm: CdFormGroup;
+  permission: Permission;
+  hasPermission: boolean;
 
-  USER_REGEX = /[\w\.:@_-]{8,64}/;
-  PASSWORD_REGEX = /[\w@\-_\/]{12,16}/;
+  USER_REGEX = /^[\w\.:@_-]{8,64}$/;
+  PASSWORD_REGEX = /^[\w@\-_\/]{12,16}$/;
 
   constructor(
-    public bsModalRef: BsModalRef,
+    private authStorageService: AuthStorageService,
+    public activeModal: NgbActiveModal,
+    public actionLabels: ActionLabelsI18n,
     private iscsiService: IscsiService,
-    private notificationService: NotificationService,
-    private i18n: I18n
+    private notificationService: NotificationService
   ) {
+    this.permission = this.authStorageService.getPermissions().iscsi;
+  }
+
+  ngOnInit() {
+    this.hasPermission = this.permission.update;
+    this.createForm();
+    this.iscsiService.getDiscovery().subscribe((auth) => {
+      this.discoveryForm.patchValue(auth);
+    });
+  }
+
+  createForm() {
     this.discoveryForm = new CdFormGroup({
-      user: new FormControl(''),
-      password: new FormControl(''),
-      mutual_user: new FormControl(''),
-      mutual_password: new FormControl('')
+      user: new FormControl({ value: '', disabled: !this.hasPermission }),
+      password: new FormControl({ value: '', disabled: !this.hasPermission }),
+      mutual_user: new FormControl({ value: '', disabled: !this.hasPermission }),
+      mutual_password: new FormControl({ value: '', disabled: !this.hasPermission })
     });
 
     CdValidators.validateIf(
@@ -89,23 +106,17 @@ export class IscsiTargetDiscoveryModalComponent implements OnInit {
     );
   }
 
-  ngOnInit() {
-    this.iscsiService.getDiscovery().subscribe((auth) => {
-      this.discoveryForm.patchValue(auth);
-    });
-  }
-
   submitAction() {
     this.iscsiService.updateDiscovery(this.discoveryForm.value).subscribe(
       () => {
         this.notificationService.show(
           NotificationType.success,
-          this.i18n('Updated discovery authentication')
+          $localize`Updated discovery authentication`
         );
-        this.bsModalRef.hide();
+        this.activeModal.close();
       },
       () => {
-        this.bsModalRef.hide();
+        this.discoveryForm.setErrors({ cdSubmitButton: true });
       }
     );
   }

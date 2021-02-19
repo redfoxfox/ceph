@@ -1,11 +1,10 @@
-import { I18n } from '@ngx-translate/i18n-polyfill';
-
-import { CdTableAction } from '../../../shared/models/cd-table-action';
-import { CdTableSelection } from '../../../shared/models/cd-table-selection';
+import { RbdService } from '~/app/shared/api/rbd.service';
+import { ActionLabelsI18n } from '~/app/shared/constants/app.constants';
+import { Icons } from '~/app/shared/enum/icons.enum';
+import { CdTableAction } from '~/app/shared/models/cd-table-action';
+import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
 
 export class RbdSnapshotActionsModel {
-  i18n: I18n;
-
   create: CdTableAction;
   rename: CdTableAction;
   protect: CdTableAction;
@@ -16,62 +15,70 @@ export class RbdSnapshotActionsModel {
   deleteSnap: CdTableAction;
   ordering: CdTableAction[];
 
-  constructor(i18n: I18n) {
-    this.i18n = i18n;
+  cloneFormatVersion = 1;
+
+  constructor(
+    actionLabels: ActionLabelsI18n,
+    public featuresName: string[],
+    rbdService: RbdService
+  ) {
+    rbdService.cloneFormatVersion().subscribe((version: number) => {
+      this.cloneFormatVersion = version;
+    });
 
     this.create = {
       permission: 'create',
-      icon: 'fa-plus',
-      name: this.i18n('Create')
+      icon: Icons.add,
+      name: actionLabels.CREATE
     };
     this.rename = {
       permission: 'update',
-      icon: 'fa-pencil',
-      name: this.i18n('Rename')
+      icon: Icons.edit,
+      name: actionLabels.RENAME
     };
     this.protect = {
       permission: 'update',
-      icon: 'fa-lock',
+      icon: Icons.lock,
       visible: (selection: CdTableSelection) =>
         selection.hasSingleSelection && !selection.first().is_protected,
-      name: this.i18n('Protect')
+      name: actionLabels.PROTECT
     };
     this.unprotect = {
       permission: 'update',
-      icon: 'fa-unlock',
+      icon: Icons.unlock,
       visible: (selection: CdTableSelection) =>
         selection.hasSingleSelection && selection.first().is_protected,
-      name: this.i18n('Unprotect')
+      name: actionLabels.UNPROTECT
     };
     this.clone = {
       permission: 'create',
       canBePrimary: (selection: CdTableSelection) => selection.hasSingleSelection,
       disable: (selection: CdTableSelection) =>
-        !selection.hasSingleSelection || selection.first().cdExecuting,
-      icon: 'fa-clone',
-      name: this.i18n('Clone')
+        this.getCloneDisableDesc(selection, this.featuresName),
+      icon: Icons.clone,
+      name: actionLabels.CLONE
     };
     this.copy = {
       permission: 'create',
       canBePrimary: (selection: CdTableSelection) => selection.hasSingleSelection,
       disable: (selection: CdTableSelection) =>
         !selection.hasSingleSelection || selection.first().cdExecuting,
-      icon: 'fa-copy',
-      name: this.i18n('Copy')
+      icon: Icons.copy,
+      name: actionLabels.COPY
     };
     this.rollback = {
       permission: 'update',
-      icon: 'fa-undo',
-      name: this.i18n('Rollback')
+      icon: Icons.undo,
+      name: actionLabels.ROLLBACK
     };
     this.deleteSnap = {
       permission: 'delete',
-      icon: 'fa-times',
+      icon: Icons.destroy,
       disable: (selection: CdTableSelection) => {
         const first = selection.first();
         return !selection.hasSingleSelection || first.cdExecuting || first.is_protected;
       },
-      name: this.i18n('Delete')
+      name: actionLabels.DELETE
     };
 
     this.ordering = [
@@ -84,5 +91,21 @@ export class RbdSnapshotActionsModel {
       this.rollback,
       this.deleteSnap
     ];
+  }
+
+  getCloneDisableDesc(selection: CdTableSelection, featuresName: string[]): boolean | string {
+    if (selection.hasSingleSelection && !selection.first().cdExecuting) {
+      if (!featuresName?.includes('layering')) {
+        return $localize`Parent image must support Layering`;
+      }
+
+      if (this.cloneFormatVersion === 1 && !selection.first().is_protected) {
+        return $localize`Snapshot must be protected in order to clone.`;
+      }
+
+      return false;
+    }
+
+    return true;
   }
 }

@@ -34,9 +34,9 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "stack "
 
-std::function<void ()> NetworkStack::add_thread(unsigned i)
+std::function<void ()> NetworkStack::add_thread(unsigned worker_id)
 {
-  Worker *w = workers[i];
+  Worker *w = workers[worker_id];
   return [this, w]() {
       char tp_name[16];
       sprintf(tp_name, "msgr-worker-%u", w->id);
@@ -63,49 +63,46 @@ std::function<void ()> NetworkStack::add_thread(unsigned i)
   };
 }
 
-std::shared_ptr<NetworkStack> NetworkStack::create(CephContext *c, const string &t)
+std::shared_ptr<NetworkStack> NetworkStack::create(CephContext *c,
+						   const std::string &t)
 {
+  std::shared_ptr<NetworkStack> stack = nullptr;
+
   if (t == "posix")
-    return std::make_shared<PosixNetworkStack>(c, t);
+    stack.reset(new PosixNetworkStack(c));
 #ifdef HAVE_RDMA
   else if (t == "rdma")
-    return std::make_shared<RDMAStack>(c, t);
+    stack.reset(new RDMAStack(c));
 #endif
 #ifdef HAVE_DPDK
   else if (t == "dpdk")
-    return std::make_shared<DPDKStack>(c, t);
+    stack.reset(new DPDKStack(c));
 #endif
 
-  lderr(c) << __func__ << " ms_async_transport_type " << t <<
+  if (stack == nullptr) {
+    lderr(c) << __func__ << " ms_async_transport_type " << t <<
     " is not supported! " << dendl;
-  ceph_abort();
-  return nullptr;
+    ceph_abort();
+    return nullptr;
+  }
+  
+  const int InitEventNumber = 5000;
+  for (unsigned worker_id = 0; worker_id < stack->num_workers; ++worker_id) {
+    Worker *w = stack->create_worker(c, worker_id);
+    int ret = w->center.init(InitEventNumber, worker_id, t);
+    if (ret)
+      throw std::system_error(-ret, std::generic_category());
+    stack->workers.push_back(w);
+  }
+
+  return stack;
 }
 
-Worker* NetworkStack::create_worker(CephContext *c, const string &type, unsigned i)
-{
-  if (type == "posix")
-    return new PosixWorker(c, i);
-#ifdef HAVE_RDMA
-  else if (type == "rdma")
-    return new RDMAWorker(c, i);
-#endif
-#ifdef HAVE_DPDK
-  else if (type == "dpdk")
-    return new DPDKWorker(c, i);
-#endif
-
-  lderr(c) << __func__ << " ms_async_transport_type " << type <<
-    " is not supported! " << dendl;
-  ceph_abort();
-  return nullptr;
-}
-
-NetworkStack::NetworkStack(CephContext *c, const string &t): type(t), started(false), cct(c)
+NetworkStack::NetworkStack(CephContext *c)
+  : cct(c)
 {
   ceph_assert(cct->_conf->ms_async_op_threads > 0);
 
-  const int InitEventNumber = 5000;
   num_workers = cct->_conf->ms_async_op_threads;
   if (num_workers >= EventCenter::MAX_EVENTCENTER) {
     ldout(cct, 0) << __func__ << " max thread limit is "
@@ -113,12 +110,6 @@ NetworkStack::NetworkStack(CephContext *c, const string &t): type(t), started(fa
                   << "Higher thread values are unnecessary and currently unsupported."
                   << dendl;
     num_workers = EventCenter::MAX_EVENTCENTER;
-  }
-
-  for (unsigned i = 0; i < num_workers; ++i) {
-    Worker *w = create_worker(cct, type, i);
-    w->center.init(InitEventNumber, i, type);
-    workers.push_back(w);
   }
 }
 
@@ -171,7 +162,7 @@ Worker* NetworkStack::get_worker()
 
 void NetworkStack::stop()
 {
-  std::lock_guard<decltype(pool_spin)> lk(pool_spin);
+  std::lock_guard lk(pool_spin);
   for (unsigned i = 0; i < num_workers; ++i) {
     workers[i]->done = true;
     workers[i]->center.wakeup();
@@ -181,23 +172,21 @@ void NetworkStack::stop()
 }
 
 class C_drain : public EventCallback {
-  Mutex drain_lock;
-  Cond drain_cond;
+  ceph::mutex drain_lock = ceph::make_mutex("C_drain::drain_lock");
+  ceph::condition_variable drain_cond;
   unsigned drain_count;
 
  public:
   explicit C_drain(size_t c)
-      : drain_lock("C_drain::drain_lock"),
-        drain_count(c) {}
+      : drain_count(c) {}
   void do_request(uint64_t id) override {
-    Mutex::Locker l(drain_lock);
+    std::lock_guard l{drain_lock};
     drain_count--;
-    if (drain_count == 0) drain_cond.Signal();
+    if (drain_count == 0) drain_cond.notify_all();
   }
   void wait() {
-    Mutex::Locker l(drain_lock);
-    while (drain_count)
-      drain_cond.Wait(drain_lock);
+    std::unique_lock l{drain_lock};
+    drain_cond.wait(l, [this] { return drain_count == 0; });
   }
 };
 

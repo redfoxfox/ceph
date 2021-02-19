@@ -2,14 +2,14 @@
 from __future__ import absolute_import
 
 import json
-import unittest
 import threading
 import time
+import unittest
 from collections import defaultdict
 from functools import partial
 
 from ..services.exception import serialize_dashboard_exception
-from ..tools import NotificationQueue, TaskManager, TaskExecutor
+from ..tools import NotificationQueue, TaskExecutor, TaskManager
 
 
 class MyTask(object):
@@ -123,7 +123,7 @@ class TaskTest(unittest.TestCase):
         TaskManager.FINISHED_TASK_SIZE = 10
         TaskManager.FINISHED_TASK_TTL = 60.0
 
-    def assertTaskResult(self, result):
+    def assertTaskResult(self, result):  # noqa: N802
         self.assertEqual(result,
                          {'args': ['dummy arg'], 'kwargs': {'dummy': 'arg'}})
 

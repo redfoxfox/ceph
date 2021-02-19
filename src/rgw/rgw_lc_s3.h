@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #ifndef CEPH_RGW_LC_S3_H
 #define CEPH_RGW_LC_S3_H
@@ -95,7 +95,7 @@ public:
   RGWLifecycleConfiguration_S3() : RGWLifecycleConfiguration(nullptr) {}
 
   void decode_xml(XMLObj *obj);
-  int rebuild(RGWRados *store, RGWLifecycleConfiguration& dest);
+  int rebuild(RGWLifecycleConfiguration& dest);
   void dump_xml(Formatter *f) const;
 };
 

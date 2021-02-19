@@ -3,10 +3,11 @@ import { HttpClientTestingModule, HttpTestingController } from '@angular/common/
 import { fakeAsync, TestBed, tick } from '@angular/core/testing';
 import { Router } from '@angular/router';
 
-import { ToastsManager } from 'ng2-toastr';
+import { ToastrService } from 'ngx-toastr';
 
-import { configureTestBed, i18nProviders } from '../../../testing/unit-test-helper';
-import { AppModule } from '../../app.module';
+import { AppModule } from '~/app/app.module';
+import { configureTestBed } from '~/testing/unit-test-helper';
+import { NotificationType } from '../enum/notification-type.enum';
 import { CdNotification, CdNotificationConfig } from '../models/cd-notification';
 import { ApiInterceptorService } from './api-interceptor.service';
 import { NotificationService } from './notification.service';
@@ -18,9 +19,9 @@ describe('ApiInterceptorService', () => {
   let router: Router;
   const url = 'api/xyz';
 
-  const httpError = (error, errorOpts, done = (_resp) => {}) => {
+  const httpError = (error: any, errorOpts: object, done = (_resp: any): any => undefined) => {
     httpClient.get(url).subscribe(
-      () => {},
+      () => true,
       (resp) => {
         // Error must have been forwarded by the interceptor.
         expect(resp instanceof HttpErrorResponse).toBeTruthy();
@@ -30,20 +31,30 @@ describe('ApiInterceptorService', () => {
     httpTesting.expectOne(url).error(error, errorOpts);
   };
 
-  const runRouterTest = (errorOpts, expectedCallParams) => {
+  const runRouterTest = (errorOpts: object, expectedCallParams: any[]) => {
     httpError(new ErrorEvent('abc'), errorOpts);
     httpTesting.verify();
     expect(router.navigate).toHaveBeenCalledWith(...expectedCallParams);
   };
 
-  const runNotificationTest = (error, errorOpts, expectedCallParams) => {
+  const runNotificationTest = (
+    error: any,
+    errorOpts: object,
+    expectedCallParams: CdNotification
+  ) => {
     httpError(error, errorOpts);
     httpTesting.verify();
     expect(notificationService.show).toHaveBeenCalled();
     expect(notificationService.save).toHaveBeenCalledWith(expectedCallParams);
   };
 
-  const createCdNotification = (type, title?, message?, options?, application?) => {
+  const createCdNotification = (
+    type: NotificationType,
+    title?: string,
+    message?: string,
+    options?: any,
+    application?: string
+  ) => {
     return new CdNotification(new CdNotificationConfig(type, title, message, options, application));
   };
 
@@ -51,9 +62,8 @@ describe('ApiInterceptorService', () => {
     imports: [AppModule, HttpClientTestingModule],
     providers: [
       NotificationService,
-      i18nProviders,
       {
-        provide: ToastsManager,
+        provide: ToastrService,
         useValue: {
           error: () => true
         }
@@ -65,19 +75,19 @@ describe('ApiInterceptorService', () => {
     const baseTime = new Date('2022-02-22');
     spyOn(global, 'Date').and.returnValue(baseTime);
 
-    httpClient = TestBed.get(HttpClient);
-    httpTesting = TestBed.get(HttpTestingController);
+    httpClient = TestBed.inject(HttpClient);
+    httpTesting = TestBed.inject(HttpTestingController);
 
-    notificationService = TestBed.get(NotificationService);
+    notificationService = TestBed.inject(NotificationService);
     spyOn(notificationService, 'show').and.callThrough();
     spyOn(notificationService, 'save');
 
-    router = TestBed.get(Router);
+    router = TestBed.inject(Router);
     spyOn(router, 'navigate');
   });
 
   it('should be created', () => {
-    const service = TestBed.get(ApiInterceptorService);
+    const service = TestBed.inject(ApiInterceptorService);
     expect(service).toBeTruthy();
   });
 
@@ -100,7 +110,7 @@ describe('ApiInterceptorService', () => {
         {
           status: 403
         },
-        [['/403']]
+        [['error'], {'state': {'header': 'Access Denied', 'icon': 'fa fa-lock', 'message': 'Sorry, you don’t have permission to view this page or resource.', 'source': 'forbidden'}}] // prettier-ignore
       );
     });
 
@@ -170,16 +180,23 @@ describe('ApiInterceptorService', () => {
   });
 
   describe('interceptor error handling', () => {
+    const expectSaveToHaveBeenCalled = (called: boolean) => {
+      tick(510);
+      if (called) {
+        expect(notificationService.save).toHaveBeenCalled();
+      } else {
+        expect(notificationService.save).not.toHaveBeenCalled();
+      }
+    };
+
     it('should show default behaviour', fakeAsync(() => {
       httpError(undefined, { status: 500 });
-      tick(10);
-      expect(notificationService.save).toHaveBeenCalled();
+      expectSaveToHaveBeenCalled(true);
     }));
 
     it('should prevent the default behaviour with preventDefault', fakeAsync(() => {
       httpError(undefined, { status: 500 }, (resp) => resp.preventDefault());
-      tick(10);
-      expect(notificationService.save).not.toHaveBeenCalled();
+      expectSaveToHaveBeenCalled(false);
     }));
 
     it('should be able to use preventDefault with 400 errors', fakeAsync(() => {
@@ -188,14 +205,12 @@ describe('ApiInterceptorService', () => {
         { status: 400 },
         (resp) => resp.preventDefault()
       );
-      tick(10);
-      expect(notificationService.save).not.toHaveBeenCalled();
+      expectSaveToHaveBeenCalled(false);
     }));
 
     it('should prevent the default behaviour by status code', fakeAsync(() => {
       httpError(undefined, { status: 500 }, (resp) => resp.ignoreStatusCode(500));
-      tick(10);
-      expect(notificationService.save).not.toHaveBeenCalled();
+      expectSaveToHaveBeenCalled(false);
     }));
 
     it('should use different application icon (default Ceph) in error message', fakeAsync(() => {
@@ -203,7 +218,7 @@ describe('ApiInterceptorService', () => {
       httpError(undefined, { status: 500 }, (resp) => {
         (resp.application = 'Prometheus'), (resp.message = msg);
       });
-      tick(10);
+      expectSaveToHaveBeenCalled(true);
       expect(notificationService.save).toHaveBeenCalledWith(
         createCdNotification(0, '500 - Unknown Error', msg, undefined, 'Prometheus')
       );

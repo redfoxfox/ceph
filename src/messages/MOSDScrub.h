@@ -22,31 +22,29 @@
  * instruct an OSD to scrub some or all pg(s)
  */
 
-class MOSDScrub : public MessageInstance<MOSDScrub> {
+class MOSDScrub final : public Message {
 public:
-  friend factory;
-
   static constexpr int HEAD_VERSION = 2;
   static constexpr int COMPAT_VERSION = 2;
 
   uuid_d fsid;
-  vector<pg_t> scrub_pgs;
+  std::vector<pg_t> scrub_pgs;
   bool repair = false;
   bool deep = false;
 
-  MOSDScrub() : MessageInstance(MSG_OSD_SCRUB, HEAD_VERSION, COMPAT_VERSION) {}
+  MOSDScrub() : Message{MSG_OSD_SCRUB, HEAD_VERSION, COMPAT_VERSION} {}
   MOSDScrub(const uuid_d& f, bool r, bool d) :
-    MessageInstance(MSG_OSD_SCRUB, HEAD_VERSION, COMPAT_VERSION),
+    Message{MSG_OSD_SCRUB, HEAD_VERSION, COMPAT_VERSION},
     fsid(f), repair(r), deep(d) {}
-  MOSDScrub(const uuid_d& f, vector<pg_t>& pgs, bool r, bool d) :
-    MessageInstance(MSG_OSD_SCRUB, HEAD_VERSION, COMPAT_VERSION),
+  MOSDScrub(const uuid_d& f, std::vector<pg_t>& pgs, bool r, bool d) :
+    Message{MSG_OSD_SCRUB, HEAD_VERSION, COMPAT_VERSION},
     fsid(f), scrub_pgs(pgs), repair(r), deep(d) {}
 private:
-  ~MOSDScrub() override {}
+  ~MOSDScrub() final {}
 
 public:
   std::string_view get_type_name() const override { return "scrub"; }
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "scrub(";
     if (scrub_pgs.empty())
       out << "osd";
@@ -67,12 +65,16 @@ public:
     encode(deep, payload);
   }
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(fsid, p);
     decode(scrub_pgs, p);
     decode(repair, p);
     decode(deep, p);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

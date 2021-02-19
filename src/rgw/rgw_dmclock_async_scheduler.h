@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 /*
  * Ceph - scalable distributed file system
  *
@@ -82,7 +82,8 @@ class AsyncScheduler : public md_config_obs_t, public Scheduler {
   using Completion = async::Completion<Signature, async::AsBase<Request>>;
 
   using Clock = ceph::coarse_real_clock;
-  using Timer = boost::asio::basic_waitable_timer<Clock>;
+  using Timer = boost::asio::basic_waitable_timer<Clock,
+        boost::asio::wait_traits<Clock>, executor_type>;
   Timer timer; //< timer for the next scheduled request
 
   CephContext *const cct;
@@ -186,6 +187,11 @@ public:
 
   void request_complete() override {
     --outstanding_requests;
+    if (auto c = counters();
+        c != nullptr) {
+      c->inc(throttle_counters::l_outstanding, -1);
+    }
+
   }
 
 private:
@@ -195,6 +201,7 @@ private:
     if (outstanding_requests++ >= max_requests) {
       if (auto c = counters();
           c != nullptr) {
+        c->inc(throttle_counters::l_outstanding);
         c->inc(throttle_counters::l_throttle);
       }
       return -EAGAIN;

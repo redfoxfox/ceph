@@ -8,13 +8,14 @@ import {
   ViewChild
 } from '@angular/core';
 
-import * as _ from 'lodash';
+import _ from 'lodash';
 
-import { CellTemplate } from '../../enum/cell-template.enum';
-import { CdTableColumn } from '../../models/cd-table-column';
+import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
+import { CdTableColumn } from '~/app/shared/models/cd-table-column';
+import { CdDatePipe } from '~/app/shared/pipes/cd-date.pipe';
 import { TableComponent } from '../table/table.component';
 
-class Item {
+interface KeyValueItem {
   key: string;
   value: any;
 }
@@ -33,7 +34,7 @@ class Item {
   styleUrls: ['./table-key-value.component.scss']
 })
 export class TableKeyValueComponent implements OnInit, OnChanges {
-  @ViewChild(TableComponent)
+  @ViewChild(TableComponent, { static: true })
   table: TableComponent;
 
   @Input()
@@ -47,13 +48,15 @@ export class TableKeyValueComponent implements OnInit, OnChanges {
   appendParentKey = true;
   @Input()
   hideEmpty = false;
+  @Input()
+  hideKeys: string[] = []; // Keys of pairs not to be displayed
 
   // If set, the classAddingTpl is used to enable different css for different values
   @Input()
-  customCss?: { [css: string]: number | string | ((any) => boolean) };
+  customCss?: { [css: string]: number | string | ((any: any) => boolean) };
 
   columns: Array<CdTableColumn> = [];
-  tableData: Item[];
+  tableData: KeyValueItem[];
 
   /**
    * The function that will be called to update the input data.
@@ -61,7 +64,7 @@ export class TableKeyValueComponent implements OnInit, OnChanges {
   @Output()
   fetchData = new EventEmitter();
 
-  constructor() {}
+  constructor(private datePipe: CdDatePipe) {}
 
   ngOnInit() {
     this.columns = [
@@ -99,26 +102,35 @@ export class TableKeyValueComponent implements OnInit, OnChanges {
     if (!this.data) {
       return; // Wait for data
     }
-    this.tableData = this._makePairs(this.data);
+    let pairs = this.makePairs(this.data);
+    if (this.hideKeys) {
+      pairs = pairs.filter((pair) => !this.hideKeys.includes(pair.key));
+    }
+    this.tableData = pairs;
   }
 
-  _makePairs(data: any): Item[] {
-    let temp = [];
+  private makePairs(data: any): KeyValueItem[] {
+    let result: KeyValueItem[] = [];
     if (!data) {
-      return; // Wait for data
+      return undefined; // Wait for data
     } else if (_.isArray(data)) {
-      temp = this._makePairsFromArray(data);
+      result = this.makePairsFromArray(data);
     } else if (_.isObject(data)) {
-      temp = this._makePairsFromObject(data);
+      result = this.makePairsFromObject(data);
     } else {
       throw new Error('Wrong data format');
     }
-    temp = temp.map((v) => this._convertValue(v)).filter((o) => o); // Filters out undefined
-    return _.sortBy(this.renderObjects ? this.insertFlattenObjects(temp) : temp, 'key');
+    result = result
+      .map((item) => {
+        item.value = this.convertValue(item.value);
+        return item;
+      })
+      .filter((i) => i.value !== null);
+    return _.sortBy(this.renderObjects ? this.insertFlattenObjects(result) : result, 'key');
   }
 
-  _makePairsFromArray(data: any[]): Item[] {
-    let temp = [];
+  private makePairsFromArray(data: any[]): KeyValueItem[] {
+    let temp: any[] = [];
     const first = data[0];
     if (_.isArray(first)) {
       if (first.length === 2) {
@@ -127,14 +139,17 @@ export class TableKeyValueComponent implements OnInit, OnChanges {
           value: a[1]
         }));
       } else {
-        throw new Error('Wrong array format: [string, any][]');
+        throw new Error(
+          `Array contains too many elements (${first.length}). ` +
+            `Needs to be of type [string, any][]`
+        );
       }
     } else if (_.isObject(first)) {
       if (_.has(first, 'key') && _.has(first, 'value')) {
         temp = [...data];
       } else {
         temp = data.reduce(
-          (previous: any[], item) => previous.concat(this._makePairsFromObject(item)),
+          (previous: any[], item) => previous.concat(this.makePairsFromObject(item)),
           temp
         );
       }
@@ -142,16 +157,16 @@ export class TableKeyValueComponent implements OnInit, OnChanges {
     return temp;
   }
 
-  _makePairsFromObject(data: object): Item[] {
+  private makePairsFromObject(data: any): KeyValueItem[] {
     return Object.keys(data).map((k) => ({
       key: k,
       value: data[k]
     }));
   }
 
-  private insertFlattenObjects(temp: Item[]): any[] {
+  private insertFlattenObjects(data: KeyValueItem[]): any[] {
     return _.flattenDeep(
-      temp.map((item) => {
+      data.map((item) => {
         const value = item.value;
         const isObject = _.isObject(value);
         if (!isObject || _.isEmpty(value)) {
@@ -169,25 +184,41 @@ export class TableKeyValueComponent implements OnInit, OnChanges {
    * Split item into items will call _makePairs inside _makePairs (recursion), in oder to split
    * the object item up into items as planned.
    */
-  private splitItemIntoItems(v: { key: string; value: object }): Item[] {
-    return this._makePairs(v.value).map((item) => {
+  private splitItemIntoItems(data: { key: string; value: object }): KeyValueItem[] {
+    return this.makePairs(data.value).map((item) => {
       if (this.appendParentKey) {
-        item.key = v.key + ' ' + item.key;
+        item.key = data.key + ' ' + item.key;
       }
       return item;
     });
   }
 
-  _convertValue(v: Item): Item {
-    if (_.isArray(v.value)) {
-      v.value = v.value.map((item) => (_.isObject(item) ? JSON.stringify(item) : item)).join(', ');
+  private convertValue(value: any): KeyValueItem {
+    if (_.isArray(value)) {
+      if (_.isEmpty(value) && this.hideEmpty) {
+        return null;
+      }
+      value = value.map((item) => (_.isObject(item) ? JSON.stringify(item) : item)).join(', ');
+    } else if (_.isObject(value)) {
+      if ((this.hideEmpty && _.isEmpty(value)) || !this.renderObjects) {
+        return null;
+      }
+    } else if (_.isString(value)) {
+      if (value === '' && this.hideEmpty) {
+        return null;
+      }
+      if (this.isDate(value)) {
+        value = this.datePipe.transform(value) || value;
+      }
     }
-    const isEmpty = _.isEmpty(v.value) && !_.isNumber(v.value);
-    if ((this.hideEmpty && isEmpty) || (_.isObject(v.value) && !this.renderObjects)) {
-      return;
-    } else if (isEmpty && !this.hideEmpty && v.value !== '') {
-      v.value = '';
-    }
-    return v;
+
+    return value;
+  }
+
+  private isDate(s: string) {
+    const sep = '[ -:.TZ]';
+    const n = '\\d{2}' + sep;
+    //                            year     -    m - d - h : m : s . someRest  Z (if UTC)
+    return s.match(new RegExp('^\\d{4}' + sep + n + n + n + n + n + '\\d*' + 'Z?$'));
   }
 }

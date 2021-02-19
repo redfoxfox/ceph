@@ -25,6 +25,15 @@
 #define dout_context cct
 #define dout_subsys ceph_subsys_filestore
 
+using std::map;
+using std::pair;
+using std::set;
+using std::string;
+using std::vector;
+
+using ceph::bufferptr;
+using ceph::bufferlist;
+
 const string HashIndex::SUBDIR_ATTR = "contents";
 const string HashIndex::SETTINGS_ATTR = "settings";
 const string HashIndex::IN_PROGRESS_OP_TAG = "in_progress_op";
@@ -703,10 +712,11 @@ int HashIndex::pre_split_folder(uint32_t pg_num, uint64_t expected_num_objs)
   const uint32_t subs = (1 << split_bits);
   // Calculate how many levels we create starting from here
   int level  = 0;
-  leavies /= subs;
-  while (leavies > 1) {
+  int level_limit = MAX_HASH_LEVEL - dump_num - 1;
+  uint64_t actual_leaves = subs;
+  while (actual_leaves < leavies && level < level_limit) {
     ++level;
-    leavies = leavies >> 4;
+    actual_leaves <<= 4;
   }
   for (uint32_t i = 0; i < subs; ++i) {
     ceph_assert(split_bits <= 4); // otherwise BAD_SHIFT

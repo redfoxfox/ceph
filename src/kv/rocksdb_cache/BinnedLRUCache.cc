@@ -101,9 +101,10 @@ void BinnedLRUHandleTable::Resize() {
   length_ = new_length;
 }
 
-BinnedLRUCacheShard::BinnedLRUCacheShard(size_t capacity, bool strict_capacity_limit,
+BinnedLRUCacheShard::BinnedLRUCacheShard(CephContext *c, size_t capacity, bool strict_capacity_limit,
                              double high_pri_pool_ratio)
-    : capacity_(0),
+    : cct(c),
+      capacity_(0),
       high_pri_pool_usage_(0),
       strict_capacity_limit_(strict_capacity_limit),
       high_pri_pool_ratio_(high_pri_pool_ratio),
@@ -480,7 +481,7 @@ BinnedLRUCache::BinnedLRUCache(CephContext *c,
   size_t per_shard = (capacity + (num_shards_ - 1)) / num_shards_;
   for (int i = 0; i < num_shards_; i++) {
     new (&shards_[i])
-        BinnedLRUCacheShard(per_shard, strict_capacity_limit, high_pri_pool_ratio);
+        BinnedLRUCacheShard(c, per_shard, strict_capacity_limit, high_pri_pool_ratio);
   }
 }
 
@@ -488,7 +489,7 @@ BinnedLRUCache::~BinnedLRUCache() {
   for (int i = 0; i < num_shards_; i++) {
     shards_[i].~BinnedLRUCacheShard();
   }
-  free(shards_);
+  aligned_free(shards_);
 }
 
 CacheShard* BinnedLRUCache::GetShard(int shard) {
@@ -563,8 +564,8 @@ int64_t BinnedLRUCache::request_cache_bytes(PriorityCache::Priority pri, uint64_
       request = GetHighPriPoolUsage();
       break;
     }
-  // All other cache items are currently shoved into the LAST priority. 
-  case PriorityCache::Priority::LAST:
+  // All other cache items are currently shoved into the PRI1 priority. 
+  case PriorityCache::Priority::PRI1:
     {
       request = GetUsage();
       request -= GetHighPriPoolUsage();
@@ -587,8 +588,14 @@ int64_t BinnedLRUCache::commit_cache_size(uint64_t total_bytes)
   ldout(cct, 10) << __func__ << " old: " << old_bytes
                  << " new: " << new_bytes << dendl;
   SetCapacity((size_t) new_bytes);
-  double ratio =
-      (double) get_cache_bytes(PriorityCache::Priority::PRI0) / new_bytes;
+
+  double ratio = 0;
+  if (new_bytes > 0) {
+    int64_t pri0_bytes = get_cache_bytes(PriorityCache::Priority::PRI0);
+    // Add 10% of the "reserved" bytes so the ratio can't get stuck at 0 
+    pri0_bytes += (new_bytes - get_cache_bytes()) / 10;
+    ratio = (double) pri0_bytes / new_bytes;
+  }
   ldout(cct, 10) << __func__ << " High Pri Pool Ratio set to " << ratio << dendl;
   SetHighPriPoolRatio(ratio);
   return new_bytes;

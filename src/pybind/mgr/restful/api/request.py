@@ -16,17 +16,12 @@ class RequestId(RestController):
         """
         Show the information for the request id
         """
-        request = filter(
-            lambda x: x.id == self.request_id,
-            context.instance.requests
-        )
-
+        request = [x for x in context.instance.requests
+                   if x.id == self.request_id]
         if len(request) != 1:
             response.status = 500
             return {'message': 'Unknown request id "{}"'.format(self.request_id)}
-
-        request = request[0]
-        return request
+        return request[0]
 
 
     @expose(template='json')
@@ -66,15 +61,13 @@ class Request(RestController):
         """
         num_requests = len(context.instance.requests)
 
-        context.instance.requests = filter(
-            lambda x: not x.is_finished(),
-            context.instance.requests
-        )
-
+        context.instance.requests = [x for x in context.instance.requests
+                                     if not x.is_finished()]
+        remaining = len(context.instance.requests)
         # Return the job statistics
         return {
-            'cleaned': num_requests - len(context.instance.requests),
-            'remaining': len(context.instance.requests),
+            'cleaned': num_requests - remaining,
+            'remaining': remaining,
         }
 
 
@@ -84,6 +77,14 @@ class Request(RestController):
         """
         Pass through method to create any request
         """
+        if isinstance(request.json, list):
+            if all(isinstance(element, list) for element in request.json):
+                return context.instance.submit_request(request.json, **kwargs)
+
+            # The request.json has wrong format
+            response.status = 500
+            return {'message': 'The request format should be [[{c1},{c2}]]'}
+
         return context.instance.submit_request([[request.json]], **kwargs)
 
 

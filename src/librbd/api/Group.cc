@@ -1,6 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
+#include "common/Cond.h"
 #include "common/errno.h"
 
 #include "librbd/ExclusiveLock.h"
@@ -10,6 +11,7 @@
 #include "librbd/ImageWatcher.h"
 #include "librbd/Operations.h"
 #include "librbd/Utils.h"
+#include "librbd/internal.h"
 #include "librbd/io/AioCompletion.h"
 
 #define dout_subsys ceph_subsys_rbd
@@ -37,10 +39,16 @@ namespace {
 template <typename I>
 snap_t get_group_snap_id(I* ictx,
                          const cls::rbd::SnapshotNamespace& in_snap_namespace) {
-  ceph_assert(ictx->snap_lock.is_locked());
-  auto it = ictx->snap_ids.lower_bound({in_snap_namespace, ""});
-  if (it != ictx->snap_ids.end() && it->first.first == in_snap_namespace) {
-    return it->second;
+  ceph_assert(ceph_mutex_is_locked(ictx->image_lock));
+  auto it = ictx->snap_ids.lower_bound({cls::rbd::GroupSnapshotNamespace{},
+                                        ""});
+  for (; it != ictx->snap_ids.end(); ++it) {
+    if (it->first.first == in_snap_namespace) {
+      return it->second;
+    } else if (boost::get<cls::rbd::GroupSnapshotNamespace>(&it->first.first) ==
+                 nullptr) {
+      break;
+    }
   }
   return CEPH_NOSNAP;
 }
@@ -243,7 +251,6 @@ int group_snap_remove_by_record(librados::IoCtx& group_ioctx,
     r = on_finishes[i]->wait();
     delete on_finishes[i];
     if (r < 0) {
-      delete ictxs[i];
       ictxs[i] = nullptr;
       ret_code = r;
     }
@@ -260,10 +267,10 @@ int group_snap_remove_by_record(librados::IoCtx& group_ioctx,
     on_finishes[i] = new C_SaferCond;
 
     std::string snap_name;
-    ictx->snap_lock.get_read();
+    ictx->image_lock.lock_shared();
     snap_t snap_id = get_group_snap_id(ictx, ne);
     r = ictx->get_snap_name(snap_id, &snap_name);
-    ictx->snap_lock.put_read();
+    ictx->image_lock.unlock_shared();
 
     if (r >= 0) {
       ldout(cct, 20) << "removing individual snapshot from image " << ictx->name
@@ -351,7 +358,6 @@ int group_snap_rollback_by_record(librados::IoCtx& group_ioctx,
     r = on_finishes[i]->wait();
     delete on_finishes[i];
     if (r < 0) {
-      delete ictxs[i];
       ictxs[i] = nullptr;
       ret_code = r;
     }
@@ -362,14 +368,14 @@ int group_snap_rollback_by_record(librados::IoCtx& group_ioctx,
 
   ldout(cct, 20) << "Requesting exclusive locks for images" << dendl;
   for (auto ictx: ictxs) {
-    RWLock::RLocker owner_lock(ictx->owner_lock);
+    std::shared_lock owner_lock{ictx->owner_lock};
     if (ictx->exclusive_lock != nullptr) {
       ictx->exclusive_lock->block_requests(-EBUSY);
     }
   }
   for (int i = 0; i < snap_count; ++i) {
     ImageCtx *ictx = ictxs[i];
-    RWLock::RLocker owner_lock(ictx->owner_lock);
+    std::shared_lock owner_lock{ictx->owner_lock};
 
     on_finishes[i] = new C_SaferCond;
     if (ictx->exclusive_lock != nullptr) {
@@ -397,12 +403,12 @@ int group_snap_rollback_by_record(librados::IoCtx& group_ioctx,
     ImageCtx *ictx = ictxs[i];
     on_finishes[i] = new C_SaferCond;
 
-    RWLock::RLocker owner_locker(ictx->owner_lock);
+    std::shared_lock owner_locker{ictx->owner_lock};
     std::string snap_name;
-    ictx->snap_lock.get_read();
+    ictx->image_lock.lock_shared();
     snap_t snap_id = get_group_snap_id(ictx, ne);
     r = ictx->get_snap_name(snap_id, &snap_name);
-    ictx->snap_lock.put_read();
+    ictx->image_lock.unlock_shared();
 
     if (r >= 0) {
       ldout(cct, 20) << "rolling back to individual snapshot for image " << ictx->name
@@ -428,6 +434,57 @@ finish:
       ictxs[i]->state->close();
     }
   }
+  return ret_code;
+}
+
+template <typename I>
+void notify_unquiesce(std::vector<I*> &ictxs,
+                      const std::vector<uint64_t> &requests) {
+  if (requests.empty()) {
+    return;
+  }
+
+  ceph_assert(requests.size() == ictxs.size());
+  int image_count = ictxs.size();
+  std::vector<C_SaferCond> on_finishes(image_count);
+
+  for (int i = 0; i < image_count; ++i) {
+    ImageCtx *ictx = ictxs[i];
+
+    ictx->image_watcher->notify_unquiesce(requests[i], &on_finishes[i]);
+  }
+
+  for (int i = 0; i < image_count; ++i) {
+    on_finishes[i].wait();
+  }
+}
+
+template <typename I>
+int notify_quiesce(std::vector<I*> &ictxs, ProgressContext &prog_ctx,
+                   std::vector<uint64_t> *requests) {
+  int image_count = ictxs.size();
+  std::vector<C_SaferCond> on_finishes(image_count);
+
+  requests->resize(image_count);
+  for (int i = 0; i < image_count; ++i) {
+    auto ictx = ictxs[i];
+
+    ictx->image_watcher->notify_quiesce(&(*requests)[i], prog_ctx,
+                                        &on_finishes[i]);
+  }
+
+  int ret_code = 0;
+  for (int i = 0; i < image_count; ++i) {
+    int r = on_finishes[i].wait();
+    if (r < 0) {
+      ret_code = r;
+    }
+  }
+
+  if (ret_code != 0) {
+    notify_unquiesce(ictxs, *requests);
+  }
+
   return ret_code;
 }
 
@@ -582,9 +639,6 @@ int Group<I>::list(IoCtx& io_ctx, vector<string> *names)
     map<string, string> groups;
     r = cls_client::group_dir_list(&io_ctx, RBD_GROUP_DIRECTORY, last_read,
                                    max_read, &groups);
-    if (r == -ENOENT) {
-      return 0; // Ignore missing rbd group directory. It means we don't have any groups yet.
-    }
     if (r < 0) {
       if (r != -ENOENT) {
         lderr(cct) << "error listing group in directory: "
@@ -825,8 +879,8 @@ int Group<I>::image_get_group(I *ictx, group_info_t *group_info)
 
 template <typename I>
 int Group<I>::snap_create(librados::IoCtx& group_ioctx,
-    const char *group_name, const char *snap_name)
-{
+                          const char *group_name, const char *snap_name,
+                          uint32_t flags) {
   CephContext *cct = (CephContext *)group_ioctx.cct();
 
   string group_id;
@@ -836,9 +890,19 @@ int Group<I>::snap_create(librados::IoCtx& group_ioctx,
 
   std::vector<librbd::ImageCtx*> ictxs;
   std::vector<C_SaferCond*> on_finishes;
+  std::vector<uint64_t> quiesce_requests;
+  NoOpProgressContext prog_ctx;
+  uint64_t internal_flags = 0;
 
-  int r = cls_client::dir_get_id(&group_ioctx, RBD_GROUP_DIRECTORY,
-				 group_name, &group_id);
+  int r = util::snap_create_flags_api_to_internal(cct, flags, &internal_flags);
+  if (r < 0) {
+    return r;
+  }
+  internal_flags &= ~(SNAP_CREATE_FLAG_SKIP_NOTIFY_QUIESCE |
+                      SNAP_CREATE_FLAG_IGNORE_NOTIFY_QUIESCE_ERROR);
+
+  r = cls_client::dir_get_id(&group_ioctx, RBD_GROUP_DIRECTORY, group_name,
+                             &group_id);
   if (r < 0) {
     lderr(cct) << "error reading group id object: "
 	       << cpp_strerror(r)
@@ -916,7 +980,6 @@ int Group<I>::snap_create(librados::IoCtx& group_ioctx,
     r = on_finishes[i]->wait();
     delete on_finishes[i];
     if (r < 0) {
-      delete ictxs[i];
       ictxs[i] = nullptr;
       ret_code = r;
     }
@@ -924,17 +987,26 @@ int Group<I>::snap_create(librados::IoCtx& group_ioctx,
   if (ret_code != 0) {
     goto remove_record;
   }
+
+  if ((flags & RBD_SNAP_CREATE_SKIP_QUIESCE) == 0) {
+    ldout(cct, 20) << "Sending quiesce notification" << dendl;
+    ret_code = notify_quiesce(ictxs, prog_ctx, &quiesce_requests);
+    if (ret_code != 0 && (flags & RBD_SNAP_CREATE_IGNORE_QUIESCE_ERROR) == 0) {
+      goto remove_record;
+    }
+  }
+
   ldout(cct, 20) << "Requesting exclusive locks for images" << dendl;
 
   for (auto ictx: ictxs) {
-    RWLock::RLocker owner_lock(ictx->owner_lock);
+    std::shared_lock owner_lock{ictx->owner_lock};
     if (ictx->exclusive_lock != nullptr) {
       ictx->exclusive_lock->block_requests(-EBUSY);
     }
   }
   for (int i = 0; i < image_count; ++i) {
     ImageCtx *ictx = ictxs[i];
-    RWLock::RLocker owner_lock(ictx->owner_lock);
+    std::shared_lock owner_lock{ictx->owner_lock};
 
     on_finishes[i] = new C_SaferCond;
     if (ictx->exclusive_lock != nullptr) {
@@ -955,6 +1027,7 @@ int Group<I>::snap_create(librados::IoCtx& group_ioctx,
     }
   }
   if (ret_code != 0) {
+    notify_unquiesce(ictxs, quiesce_requests);
     goto remove_record;
   }
 
@@ -966,7 +1039,10 @@ int Group<I>::snap_create(librados::IoCtx& group_ioctx,
 
     C_SaferCond* on_finish = new C_SaferCond;
 
-    ictx->operations->snap_create(ne, ind_snap_name.c_str(), on_finish);
+    std::shared_lock owner_locker{ictx->owner_lock};
+    ictx->operations->execute_snap_create(
+        ne, ind_snap_name.c_str(), on_finish, 0,
+        SNAP_CREATE_FLAG_SKIP_NOTIFY_QUIESCE, prog_ctx);
 
     on_finishes[i] = on_finish;
   }
@@ -979,9 +1055,9 @@ int Group<I>::snap_create(librados::IoCtx& group_ioctx,
       ret_code = r;
     } else {
       ImageCtx *ictx = ictxs[i];
-      ictx->snap_lock.get_read();
+      ictx->image_lock.lock_shared();
       snap_t snap_id = get_group_snap_id(ictx, ne);
-      ictx->snap_lock.put_read();
+      ictx->image_lock.unlock_shared();
       if (snap_id == CEPH_NOSNAP) {
 	ldout(cct, 20) << "Couldn't find created snapshot with namespace: "
                        << ne << dendl;
@@ -1006,9 +1082,13 @@ int Group<I>::snap_create(librados::IoCtx& group_ioctx,
     goto remove_image_snaps;
   }
 
+  ldout(cct, 20) << "Sending unquiesce notification" << dendl;
+  notify_unquiesce(ictxs, quiesce_requests);
+
   goto finish;
 
 remove_image_snaps:
+  notify_unquiesce(ictxs, quiesce_requests);
 
   for (int i = 0; i < image_count; ++i) {
     ImageCtx *ictx = ictxs[i];
@@ -1017,10 +1097,10 @@ remove_image_snaps:
 
     on_finishes[i] = new C_SaferCond;
     std::string snap_name;
-    ictx->snap_lock.get_read();
+    ictx->image_lock.lock_shared();
     snap_t snap_id = get_group_snap_id(ictx, ne);
     r = ictx->get_snap_name(snap_id, &snap_name);
-    ictx->snap_lock.put_read();
+    ictx->image_lock.unlock_shared();
     if (r >= 0) {
       ictx->operations->snap_remove(ne, snap_name.c_str(), on_finishes[i]);
     } else {

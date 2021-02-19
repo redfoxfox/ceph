@@ -1,3 +1,6 @@
+
+.. _balancer:
+
 Balancer
 ========
 
@@ -16,17 +19,15 @@ The current status of the balancer can be checked at any time with::
 Automatic balancing
 -------------------
 
-The automatic balancing can be enabled, using the default settings, with::
-
-  ceph balancer on
-
-The balancer can be turned back off again with::
+The automatic balancing feature is enabled by default in ``upmap``
+mode. Please refer to :ref:`upmap` for more details. The balancer can be
+turned off with::
 
   ceph balancer off
 
-This will use the ``crush-compat`` mode, which is backward compatible
-with older clients, and will make small changes to the data
-distribution over time to ensure that OSDs are equally utilized.
+The balancer mode can be changed to ``crush-compat`` mode, which is
+backward compatible with older clients, and will make small changes to
+the data distribution over time to ensure that OSDs are equally utilized.
 
 
 Throttling
@@ -83,11 +84,7 @@ There are currently two supported balancer modes:
 
    Note that using upmap requires that all clients be Luminous or newer.
 
-The default mode is ``crush-compat``.  The mode can be adjusted with::
-
-  ceph balancer mode upmap
-
-or::
+The default mode is ``upmap``.  The mode can be adjusted with::
 
   ceph balancer mode crush-compat
 
@@ -100,7 +97,7 @@ The balancer operation is broken into a few distinct phases:
 #. evaluating the quality of the data distribution, either for the current PG distribution, or the PG distribution that would result after executing a *plan*
 #. executing the *plan*
 
-To evautate and score the current distribution,::
+To evaluate and score the current distribution::
 
   ceph balancer eval
 

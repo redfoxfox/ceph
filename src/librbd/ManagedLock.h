@@ -8,7 +8,6 @@
 #include "include/Context.h"
 #include "include/rados/librados.hpp"
 #include "common/AsyncOpTracker.h"
-#include "common/Mutex.h"
 #include "cls/lock/cls_lock_types.h"
 #include "librbd/watcher/Types.h"
 #include "librbd/managed_lock/Types.h"
@@ -16,12 +15,11 @@
 #include <string>
 #include <utility>
 
-class ContextWQ;
-
 namespace librbd {
 
+struct AsioEngine;
 struct ImageCtx;
-
+namespace asio { struct ContextWQ; }
 namespace managed_lock { struct Locker; }
 
 template <typename ImageCtxT = librbd::ImageCtx>
@@ -31,22 +29,23 @@ private:
   typedef typename TypeTraits::Watcher Watcher;
 
 public:
-  static ManagedLock *create(librados::IoCtx& ioctx, ContextWQ *work_queue,
+  static ManagedLock *create(librados::IoCtx& ioctx,
+                             AsioEngine& asio_engine,
                              const std::string& oid, Watcher *watcher,
                              managed_lock::Mode mode,
-                             bool blacklist_on_break_lock,
-                             uint32_t blacklist_expire_seconds) {
-    return new ManagedLock(ioctx, work_queue, oid, watcher, mode,
-                           blacklist_on_break_lock, blacklist_expire_seconds);
+                             bool blocklist_on_break_lock,
+                             uint32_t blocklist_expire_seconds) {
+    return new ManagedLock(ioctx, asio_engine, oid, watcher, mode,
+                           blocklist_on_break_lock, blocklist_expire_seconds);
   }
   void destroy() {
     delete this;
   }
 
-  ManagedLock(librados::IoCtx& ioctx, ContextWQ *work_queue,
+  ManagedLock(librados::IoCtx& ioctx, AsioEngine& asio_engine,
               const std::string& oid, Watcher *watcher,
-              managed_lock::Mode mode, bool blacklist_on_break_lock,
-              uint32_t blacklist_expire_seconds);
+              managed_lock::Mode mode, bool blocklist_on_break_lock,
+              uint32_t blocklist_expire_seconds);
   virtual ~ManagedLock();
 
   bool is_lock_owner() const;
@@ -63,67 +62,67 @@ public:
   int assert_header_locked();
 
   bool is_shutdown() const {
-    Mutex::Locker l(m_lock);
+    std::lock_guard l{m_lock};
     return is_state_shutdown();
   }
 
 protected:
-  mutable Mutex m_lock;
+  mutable ceph::mutex m_lock;
 
   inline void set_state_uninitialized() {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     ceph_assert(m_state == STATE_UNLOCKED);
     m_state = STATE_UNINITIALIZED;
   }
   inline void set_state_initializing() {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     ceph_assert(m_state == STATE_UNINITIALIZED);
     m_state = STATE_INITIALIZING;
   }
   inline void set_state_unlocked() {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     ceph_assert(m_state == STATE_INITIALIZING || m_state == STATE_RELEASING);
     m_state = STATE_UNLOCKED;
   }
   inline void set_state_waiting_for_lock() {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     ceph_assert(m_state == STATE_ACQUIRING);
     m_state = STATE_WAITING_FOR_LOCK;
   }
   inline void set_state_post_acquiring() {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     ceph_assert(m_state == STATE_ACQUIRING);
     m_state = STATE_POST_ACQUIRING;
   }
 
   bool is_state_shutdown() const;
   inline bool is_state_acquiring() const {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     return m_state == STATE_ACQUIRING;
   }
   inline bool is_state_post_acquiring() const {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     return m_state == STATE_POST_ACQUIRING;
   }
   inline bool is_state_releasing() const {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     return m_state == STATE_RELEASING;
   }
   inline bool is_state_pre_releasing() const {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     return m_state == STATE_PRE_RELEASING;
   }
   inline bool is_state_locked() const {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     return m_state == STATE_LOCKED;
   }
   inline bool is_state_waiting_for_lock() const {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     return m_state == STATE_WAITING_FOR_LOCK;
   }
 
   inline bool is_action_acquire_lock() const {
-    ceph_assert(m_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(m_lock));
     return get_active_action() == ACTION_ACQUIRE_LOCK;
   }
 
@@ -212,12 +211,13 @@ private:
 
   librados::IoCtx& m_ioctx;
   CephContext *m_cct;
-  ContextWQ *m_work_queue;
+  AsioEngine& m_asio_engine;
+  asio::ContextWQ* m_work_queue;
   std::string m_oid;
   Watcher *m_watcher;
   managed_lock::Mode m_mode;
-  bool m_blacklist_on_break_lock;
-  uint32_t m_blacklist_expire_seconds;
+  bool m_blocklist_on_break_lock;
+  uint32_t m_blocklist_expire_seconds;
 
   std::string m_cookie;
   std::string m_new_cookie;
@@ -228,7 +228,7 @@ private:
   ActionsContexts m_actions_contexts;
   AsyncOpTracker m_async_op_tracker;
 
-  bool is_lock_owner(Mutex &lock) const;
+  bool is_lock_owner(ceph::mutex &lock) const;
   bool is_transition_state() const;
 
   void append_context(Action action, Context *ctx);

@@ -10,11 +10,13 @@ import {
 } from '@angular/core';
 
 import * as Chart from 'chart.js';
-import * as _ from 'lodash';
+import _ from 'lodash';
+import { PluginServiceGlobalRegistrationAndOptions } from 'ng2-charts';
 
-import { ChartTooltip } from '../../../shared/models/chart-tooltip';
-import { DimlessBinaryPipe } from '../../../shared/pipes/dimless-binary.pipe';
-import { HealthPieColor } from './health-pie-color.enum';
+import { ChartTooltip } from '~/app/shared/models/chart-tooltip';
+import { DimlessBinaryPipe } from '~/app/shared/pipes/dimless-binary.pipe';
+import { DimlessPipe } from '~/app/shared/pipes/dimless.pipe';
+import styles from '~/styles.scss';
 
 @Component({
   selector: 'cd-health-pie',
@@ -22,83 +24,124 @@ import { HealthPieColor } from './health-pie-color.enum';
   styleUrls: ['./health-pie.component.scss']
 })
 export class HealthPieComponent implements OnChanges, OnInit {
-  @ViewChild('chartCanvas')
+  @ViewChild('chartCanvas', { static: true })
   chartCanvasRef: ElementRef;
-  @ViewChild('chartTooltip')
+  @ViewChild('chartTooltip', { static: true })
   chartTooltipRef: ElementRef;
 
   @Input()
   data: any;
   @Input()
-  chartType: string;
+  config = {};
   @Input()
   isBytesData = false;
   @Input()
-  displayLegend = false;
-  @Input()
   tooltipFn: any;
+  @Input()
+  showLabelAsTooltip = false;
   @Output()
   prepareFn = new EventEmitter();
 
   chartConfig: any = {
+    chartType: 'doughnut',
     dataset: [
       {
         label: null,
         borderWidth: 0
       }
     ],
+    colors: [
+      {
+        backgroundColor: [
+          styles.chartHealthColorGreen,
+          styles.chartHealthColorYellow,
+          styles.chartHealthColorOrange,
+          styles.chartHealthColorRed,
+          styles.chartHealthColorBlue
+        ]
+      }
+    ],
     options: {
+      cutoutPercentage: 90,
+      events: ['click', 'mouseout', 'touchstart'],
       legend: {
-        display: false,
+        display: true,
         position: 'right',
-        labels: { usePointStyle: true },
-        onClick: (event, legendItem) => {
-          this.onLegendClick(event, legendItem);
+        labels: {
+          boxWidth: 10,
+          usePointStyle: false
         }
       },
-      animation: { duration: 0 },
-
+      plugins: {
+        center_text: true
+      },
       tooltips: {
-        enabled: false
+        enabled: true,
+        displayColors: false,
+        backgroundColor: styles.chartHealthTootlipBgColor,
+        cornerRadius: 0,
+        bodyFontSize: 14,
+        bodyFontStyle: '600',
+        position: 'nearest',
+        xPadding: 12,
+        yPadding: 12,
+        callbacks: {
+          label: (item: Record<string, any>, data: Record<string, any>) => {
+            let text = data.labels[item.index];
+            if (!text.includes('%')) {
+              text = `${text} (${data.datasets[item.datasetIndex].data[item.index]}%)`;
+            }
+            return text;
+          }
+        }
+      },
+      title: {
+        display: false
       }
     }
   };
-  private hiddenSlices = [];
 
-  constructor(private dimlessBinary: DimlessBinaryPipe) {}
-
-  ngOnInit() {
-    // An extension to Chart.js to enable rendering some
-    // text in the middle of a doughnut
-    Chart.pluginService.register({
-      beforeDraw: function(chart) {
-        if (!chart.options.center_text) {
+  public doughnutChartPlugins: PluginServiceGlobalRegistrationAndOptions[] = [
+    {
+      id: 'center_text',
+      beforeDraw(chart: Chart) {
+        const defaultFontFamily = 'Helvetica Neue, Helvetica, Arial, sans-serif';
+        Chart.defaults.global.defaultFontFamily = defaultFontFamily;
+        const ctx = chart.ctx;
+        if (!chart.options.plugins.center_text || !chart.data.datasets[0].label) {
           return;
         }
 
-        const width = chart.chart.width,
-          height = chart.chart.height,
-          ctx = chart.chart.ctx;
+        ctx.save();
+        const label = chart.data.datasets[0].label.split('\n');
 
-        ctx.restore();
-        const fontSize = (height / 114).toFixed(2);
-        ctx.font = fontSize + 'em sans-serif';
+        const centerX = (chart.chartArea.left + chart.chartArea.right) / 2;
+        const centerY = (chart.chartArea.top + chart.chartArea.bottom) / 2;
+        ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        const text = chart.options.center_text,
-          textX = Math.round((width - ctx.measureText(text).width) / 2),
-          textY = height / 2;
+        ctx.font = `24px ${defaultFontFamily}`;
+        ctx.fillStyle = styles.chartHealthCenterTextColor;
+        ctx.fillText(label[0], centerX, centerY - 10);
 
-        ctx.fillText(text, textX, textY);
-        ctx.save();
+        if (label.length > 1) {
+          ctx.font = `14px ${defaultFontFamily}`;
+          ctx.fillStyle = styles.chartHealthCenterTextDescriptionColor;
+          ctx.fillText(label[1], centerX, centerY + 10);
+        }
+        ctx.restore();
       }
-    });
+    }
+  ];
 
-    const getStyleTop = (tooltip, positionY) => {
+  constructor(private dimlessBinary: DimlessBinaryPipe, private dimless: DimlessPipe) {}
+
+  ngOnInit() {
+    const getStyleTop = (tooltip: any, positionY: number) => {
       return positionY + tooltip.caretY - tooltip.height - 10 + 'px';
     };
 
-    const getStyleLeft = (tooltip, positionX) => {
+    const getStyleLeft = (tooltip: any, positionX: number) => {
       return positionX + tooltip.caretX + 'px';
     };
 
@@ -109,84 +152,42 @@ export class HealthPieComponent implements OnChanges, OnInit {
       getStyleTop
     );
 
-    const getBody = (body) => {
+    chartTooltip.getBody = (body: any) => {
       return this.getChartTooltipBody(body);
     };
 
-    chartTooltip.getBody = getBody;
-
-    this.chartConfig.options.tooltips.custom = (tooltip) => {
-      chartTooltip.customTooltips(tooltip);
-    };
-
-    this.setChartType();
-
-    this.chartConfig.options.legend.display = this.displayLegend;
-
-    this.chartConfig.colors = [
-      {
-        backgroundColor: [
-          HealthPieColor.DEFAULT_RED,
-          HealthPieColor.DEFAULT_BLUE,
-          HealthPieColor.DEFAULT_ORANGE,
-          HealthPieColor.DEFAULT_GREEN,
-          HealthPieColor.DEFAULT_MAGENTA
-        ]
-      }
-    ];
+    _.merge(this.chartConfig, this.config);
 
     this.prepareFn.emit([this.chartConfig, this.data]);
   }
 
   ngOnChanges() {
     this.prepareFn.emit([this.chartConfig, this.data]);
-    this.hideSlices();
     this.setChartSliceBorderWidth();
   }
 
-  private getChartTooltipBody(body) {
+  private getChartTooltipBody(body: string[]) {
     const bodySplit = body[0].split(': ');
 
-    if (this.isBytesData) {
-      bodySplit[1] = this.dimlessBinary.transform(bodySplit[1]);
+    if (this.showLabelAsTooltip) {
+      return bodySplit[0];
     }
+
+    bodySplit[1] = this.isBytesData
+      ? this.dimlessBinary.transform(bodySplit[1])
+      : this.dimless.transform(bodySplit[1]);
 
     return bodySplit.join(': ');
   }
 
-  private setChartType() {
-    const chartTypes = ['doughnut', 'pie'];
-    const selectedChartType = chartTypes.find((chartType) => chartType === this.chartType);
-
-    if (selectedChartType !== undefined) {
-      this.chartConfig.chartType = selectedChartType;
-    } else {
-      this.chartConfig.chartType = chartTypes[0];
-    }
-  }
-
   private setChartSliceBorderWidth() {
     let nonZeroValueSlices = 0;
-    _.forEach(this.chartConfig.dataset[0].data, function(slice) {
+    _.forEach(this.chartConfig.dataset[0].data, function (slice) {
       if (slice > 0) {
         nonZeroValueSlices += 1;
       }
     });
 
     this.chartConfig.dataset[0].borderWidth = nonZeroValueSlices > 1 ? 1 : 0;
-  }
-
-  private onLegendClick(event, legendItem) {
-    event.stopPropagation();
-    this.hiddenSlices[legendItem.index] = !legendItem.hidden;
-    this.ngOnChanges();
-  }
-
-  private hideSlices() {
-    _.forEach(this.chartConfig.dataset[0].data, (_slice, sliceIndex) => {
-      if (this.hiddenSlices[sliceIndex]) {
-        this.chartConfig.dataset[0].data[sliceIndex] = undefined;
-      }
-    });
   }
 }

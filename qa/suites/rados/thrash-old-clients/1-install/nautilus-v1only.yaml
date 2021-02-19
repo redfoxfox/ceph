@@ -1,7 +1,8 @@
 overrides:
   ceph:
     mon_bind_msgr2: false
-    mon_bind_addrvec: false
+    log-ignorelist:
+      - \(MON_DOWN\)
     conf:
       global:
         ms type: async
@@ -9,7 +10,16 @@ overrides:
 tasks:
 - install:
     branch: nautilus
-- install.upgrade:
-    mon.a:
-    mon.b:
-    mon.c:
+    exclude_packages:
+      - cephadm
+      - ceph-mgr-cephadm
+      - ceph-immutable-object-cache
+      - python3-rados
+      - python3-rgw
+      - python3-rbd
+      - python3-cephfs
+    extra_packages:
+      - python-rados
+      - python-rgw
+      - python-rbd
+      - python-cephfs

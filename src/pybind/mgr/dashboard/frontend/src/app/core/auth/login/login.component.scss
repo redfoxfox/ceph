@@ -1,31 +1,54 @@
-@import '../../../../defaults';
+@use 'sass:map';
+@use './src/styles/vendor/variables' as vv;
 
-::ng-deep .login {
-  height: 100%;
+$dark-secondary: darken(vv.$secondary, 4%);
 
-  .row {
-    color: $color-login-row-text;
-    background-color: $color-login-row-bg;
-  }
+::ng-deep cd-login {
+  .form-group {
+    background-color: $dark-secondary;
+    border-left: 4px solid vv.$white;
+    height: auto;
+    margin-bottom: 2rem;
 
-  h1 {
-    margin-top: 0;
-    margin-bottom: 30px;
+    &:focus-within {
+      border-left: 4px solid map.get(vv.$theme-colors, 'accent');
+    }
   }
 
   .btn-password,
-  .form-control {
-    color: $color-password-toggle-text;
-    background-color: $color-password-toggle-bg;
+  .btn-password:focus,
+  .form-control,
+  .form-control:focus {
+    background-color: $dark-secondary;
+    border: 0;
+    box-shadow: none;
+    color: vv.$body-color-bright;
+    filter: none;
+    outline: none;
+  }
+
+  .placeholder {
+    color: vv.$gray-600;
   }
 
   .btn-password:focus {
-    outline-color: $color-password-toggle-focus;
+    outline-color: vv.$primary;
   }
+}
 
-  .checkbox-primary input[type='checkbox']:checked + label::before,
-  .checkbox-primary input[type='radio']:checked + label::before {
-    background-color: $color-login-checkbox-bg;
-    border-color: $color-login-checkbox-border;
+// This will override the colors applied by chrome
+@keyframes autofill {
+  to {
+    background-color: $dark-secondary;
+    color: vv.$body-color-bright;
   }
+}
+
+input:-webkit-autofill {
+  animation-fill-mode: both;
+  animation-name: autofill;
+  border-radius: 0;
+  box-shadow: 0 0 0 1000px $dark-secondary inset;
+  -webkit-text-fill-color: vv.$body-color-bright;
+  transition-property: none;
 }

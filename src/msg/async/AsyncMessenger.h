@@ -18,7 +18,6 @@
 #define CEPH_ASYNCMESSENGER_H
 
 #include <map>
-#include <mutex>
 
 #include "include/types.h"
 #include "include/xlist.h"
@@ -26,7 +25,7 @@
 #include "include/unordered_map.h"
 #include "include/unordered_set.h"
 
-#include "common/Mutex.h"
+#include "common/ceph_mutex.h"
 #include "common/Cond.h"
 #include "common/Thread.h"
 
@@ -45,9 +44,9 @@ class AsyncMessenger;
  */
 class Processor {
   AsyncMessenger *msgr;
-  NetHandler net;
+  ceph::NetHandler net;
   Worker *worker;
-  vector<ServerSocket> listen_sockets;
+  std::vector<ServerSocket> listen_sockets;
   EventCallbackRef listen_handler;
 
   class C_processor_accept;
@@ -58,7 +57,7 @@ class Processor {
 
   void stop();
   int bind(const entity_addrvec_t &bind_addrs,
-	   const set<int>& avoid_ports,
+	   const std::set<int>& avoid_ports,
 	   entity_addrvec_t* bound_addrs);
   void start();
   void accept();
@@ -83,7 +82,7 @@ public:
    * be a value that will be repeated if the daemon restarts.
    */
   AsyncMessenger(CephContext *cct, entity_name_t name, const std::string &type,
-                 string mname, uint64_t _nonce);
+                 std::string mname, uint64_t _nonce);
 
   /**
    * Destroy the AsyncMessenger. Pretty simple since all the work is done
@@ -116,10 +115,12 @@ public:
   }
 
   int bind(const entity_addr_t& bind_addr) override;
-  int rebind(const set<int>& avoid_ports) override;
+  int rebind(const std::set<int>& avoid_ports) override;
+  int bindv(const entity_addrvec_t& bind_addrs) override;
+
   int client_bind(const entity_addr_t& bind_addr) override;
 
-  int bindv(const entity_addrvec_t& bind_addrs) override;
+  int client_reset() override;
 
   bool should_use_msgr2() override;
 
@@ -148,7 +149,8 @@ public:
    * @{
    */
   ConnectionRef connect_to(int type,
-			   const entity_addrvec_t& addrs) override;
+			   const entity_addrvec_t& addrs,
+			   bool anon, bool not_local_dest=false) override;
   ConnectionRef get_loopback_connection() override;
   void mark_down(const entity_addr_t& addr) override {
     mark_down_addrs(entity_addrvec_t(addr));
@@ -197,22 +199,9 @@ private:
    * @return a pointer to the newly-created connection. Caller does not own a
    * reference; take one if you need it.
    */
-  AsyncConnectionRef create_connect(const entity_addrvec_t& addrs, int type);
+  AsyncConnectionRef create_connect(const entity_addrvec_t& addrs, int type,
+				    bool anon);
 
-  /**
-   * Queue up a Message for delivery to the entity specified
-   * by addr and dest_type.
-   * submit_message() is responsible for creating
-   * new AsyncConnection (and closing old ones) as necessary.
-   *
-   * @param m The Message to queue up. This function eats a reference.
-   * @param con The existing Connection to use, or NULL if you don't know of one.
-   * @param dest_addr The address to send the Message to.
-   * @param dest_type The peer type of the address we're sending to
-   * just drop silently under failure.
-   */
-  void submit_message(Message *m, AsyncConnectionRef con,
-                      const entity_addrvec_t& dest_addrs, int dest_type);
 
   void _finish_bind(const entity_addrvec_t& bind_addrs,
 		    const entity_addrvec_t& listen_addrs);
@@ -233,14 +222,14 @@ private:
   std::string ms_type;
 
   /// overall lock used for AsyncMessenger data structures
-  Mutex lock;
+  ceph::mutex lock = ceph::make_mutex("AsyncMessenger::lock");
   // AsyncMessenger stuff
   /// approximately unique ID set by the Constructor for use in entity_addr_t
   uint64_t nonce;
 
   /// true, specifying we haven't learned our addr; set false when we find it.
   // maybe this should be protected by the lock?
-  bool need_addr;
+  bool need_addr = true;
 
   /**
    * set to bind addresses if bind was called before NetworkStack was ready to
@@ -262,9 +251,9 @@ private:
    *  false; set to true if the AsyncMessenger bound to a specific address;
    *  and set false again by Accepter::stop().
    */
-  bool did_bind;
+  bool did_bind = false;
   /// counter for the global seq our connection protocol uses
-  __u32 global_seq;
+  __u32 global_seq = 0;
   /// lock to protect the global_seq
   ceph::spinlock global_seq_lock;
 
@@ -281,7 +270,10 @@ private:
    *
    * These are not yet in the conns map.
    */
-  set<AsyncConnectionRef> accepting_conns;
+  std::set<AsyncConnectionRef> accepting_conns;
+
+  /// anonymous outgoing connections
+  std::set<AsyncConnectionRef> anon_conns;
 
   /**
    * list of connection are closed which need to be clean up
@@ -294,36 +286,41 @@ private:
    * deleted for AsyncConnection. "_lookup_conn" must ensure not return a
    * AsyncConnection in this set.
    */
-  Mutex deleted_lock;
-  set<AsyncConnectionRef> deleted_conns;
+  ceph::mutex deleted_lock = ceph::make_mutex("AsyncMessenger::deleted_lock");
+  std::set<AsyncConnectionRef> deleted_conns;
 
   EventCallbackRef reap_handler;
 
   /// internal cluster protocol version, if any, for talking to entities of the same type.
-  int cluster_protocol;
+  int cluster_protocol = 0;
 
-  Cond  stop_cond;
-  bool stopped;
+  ceph::condition_variable  stop_cond;
+  bool stopped = true;
 
-  AsyncConnectionRef _lookup_conn(const entity_addrvec_t& k) {
-    ceph_assert(lock.is_locked());
+  /* You must hold this->lock for the duration of use! */
+  const auto& _lookup_conn(const entity_addrvec_t& k) {
+    static const AsyncConnectionRef nullref;
+    ceph_assert(ceph_mutex_is_locked(lock));
     auto p = conns.find(k);
-    if (p == conns.end())
-      return NULL;
+    if (p == conns.end()) {
+      return nullref;
+    }
 
     // lazy delete, see "deleted_conns"
-    Mutex::Locker l(deleted_lock);
-    if (deleted_conns.erase(p->second)) {
-      p->second->get_perf_counter()->dec(l_msgr_active_connections);
-      conns.erase(p);
-      return NULL;
+    // don't worry omit, Connection::send_message can handle this case.
+    if (p->second->is_unregistered()) {
+      std::lock_guard l{deleted_lock};
+      if (deleted_conns.erase(p->second)) {
+	conns.erase(p);
+	return nullref;
+      }
     }
 
     return p->second;
   }
 
   void _init_local_connection() {
-    ceph_assert(lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(lock));
     local_connection->peer_addrs = *my_addrs;
     local_connection->peer_type = my_name.type();
     local_connection->set_features(CEPH_FEATURES_ALL);
@@ -345,11 +342,11 @@ public:
    * This wraps _lookup_conn.
    */
   AsyncConnectionRef lookup_conn(const entity_addrvec_t& k) {
-    Mutex::Locker l(lock);
-    return _lookup_conn(k);
+    std::lock_guard l{lock};
+    return _lookup_conn(k); /* make new ref! */
   }
 
-  int accept_conn(AsyncConnectionRef conn);
+  int accept_conn(const AsyncConnectionRef& conn);
   bool learned_addr(const entity_addr_t &peer_addr_for_me);
   void add_accept(Worker *w, ConnectedSocket cli_socket,
 		  const entity_addr_t &listen_addr,
@@ -390,7 +387,7 @@ public:
    * is used for delivering messages back to ourself.
    */
   void init_local_connection() {
-    Mutex::Locker l(lock);
+    std::lock_guard l{lock};
     local_connection->is_loopback = true;
     _init_local_connection();
   }
@@ -400,9 +397,12 @@ public:
    *
    * See "deleted_conns"
    */
-  void unregister_conn(AsyncConnectionRef conn) {
-    Mutex::Locker l(deleted_lock);
-    deleted_conns.insert(conn);
+  void unregister_conn(const AsyncConnectionRef& conn) {
+    std::lock_guard l{deleted_lock};
+    if (!accepting_conns.count(conn) || anon_conns.count(conn))
+      conn->get_perf_counter()->dec(l_msgr_active_connections);
+    deleted_conns.emplace(std::move(conn));
+    conn->unregister();
 
     if (deleted_conns.size() >= ReapDeadConnectionThreshold) {
       local_worker->center.dispatch_event_external(reap_handler);
@@ -416,7 +416,7 @@ public:
    *
    * See "deleted_conns"
    */
-  int reap_dead();
+  void reap_dead();
 
   /**
    * @} // AsyncMessenger Internals

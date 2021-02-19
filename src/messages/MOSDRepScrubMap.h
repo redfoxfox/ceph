@@ -21,17 +21,15 @@
  * pass a ScrubMap from a shard back to the primary
  */
 
-class MOSDRepScrubMap : public MessageInstance<MOSDRepScrubMap, MOSDFastDispatchOp> {
+class MOSDRepScrubMap final : public MOSDFastDispatchOp {
 public:
-  friend factory;
-
   static constexpr int HEAD_VERSION = 2;
   static constexpr int COMPAT_VERSION = 1;
 
   spg_t pgid;            // primary spg_t
   epoch_t map_epoch = 0;
   pg_shard_t from;   // whose scrubmap this is
-  bufferlist scrub_map_bl;
+  ceph::buffer::list scrub_map_bl;
   bool preempted = false;
 
   epoch_t get_map_epoch() const override {
@@ -42,20 +40,20 @@ public:
   }
 
   MOSDRepScrubMap()
-    : MessageInstance(MSG_OSD_REP_SCRUBMAP, HEAD_VERSION, COMPAT_VERSION) {}
+    : MOSDFastDispatchOp{MSG_OSD_REP_SCRUBMAP, HEAD_VERSION, COMPAT_VERSION} {}
 
   MOSDRepScrubMap(spg_t pgid, epoch_t map_epoch, pg_shard_t from)
-    : MessageInstance(MSG_OSD_REP_SCRUBMAP, HEAD_VERSION, COMPAT_VERSION),
+    : MOSDFastDispatchOp{MSG_OSD_REP_SCRUBMAP, HEAD_VERSION, COMPAT_VERSION},
       pgid(pgid),
       map_epoch(map_epoch),
       from(from) {}
 
 private:
-  ~MOSDRepScrubMap() {}
+  ~MOSDRepScrubMap() final {}
 
 public:
   std::string_view get_type_name() const override { return "rep_scrubmap"; }
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "rep_scrubmap(" << pgid << " e" << map_epoch
 	<< " from shard " << from
 	<< (preempted ? " PREEMPTED":"") << ")";
@@ -69,6 +67,7 @@ public:
     encode(preempted, payload);
   }
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(pgid, p);
     decode(map_epoch, p);
@@ -77,7 +76,9 @@ public:
       decode(preempted, p);
     }
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
-
 
 #endif

@@ -19,7 +19,7 @@ with no arguments.  For example::
 	ceph> health
 	ceph> status
 	ceph> quorum_status
-	ceph> mon_status
+	ceph> mon stat
 
 Non-default paths
 -----------------
@@ -159,6 +159,172 @@ to a health state:
     2017-07-25 10:11:13.535493 mon.a mon.0 172.21.9.34:6789/0 110 : cluster [INF] Health check cleared: PG_DEGRADED (was: Degraded data redundancy: 2 pgs unclean, 2 pgs degraded, 2 pgs undersized)
     2017-07-25 10:11:13.535577 mon.a mon.0 172.21.9.34:6789/0 111 : cluster [INF] Cluster is now healthy
 
+Network Performance Checks
+--------------------------
+
+Ceph OSDs send heartbeat ping messages amongst themselves to monitor daemon availability.  We
+also use the response times to monitor network performance.
+While it is possible that a busy OSD could delay a ping response, we can assume
+that if a network switch fails multiple delays will be detected between distinct pairs of OSDs.
+
+By default we will warn about ping times which exceed 1 second (1000 milliseconds).
+
+::
+
+    HEALTH_WARN Slow OSD heartbeats on back (longest 1118.001ms)
+
+The health detail will add the combination of OSDs are seeing the delays and by how much.  There is a limit of 10
+detail line items.
+
+::
+
+    [WRN] OSD_SLOW_PING_TIME_BACK: Slow OSD heartbeats on back (longest 1118.001ms)
+        Slow OSD heartbeats on back from osd.0 [dc1,rack1] to osd.1 [dc1,rack1] 1118.001 msec possibly improving
+        Slow OSD heartbeats on back from osd.0 [dc1,rack1] to osd.2 [dc1,rack2] 1030.123 msec
+        Slow OSD heartbeats on back from osd.2 [dc1,rack2] to osd.1 [dc1,rack1] 1015.321 msec
+        Slow OSD heartbeats on back from osd.1 [dc1,rack1] to osd.0 [dc1,rack1] 1010.456 msec
+
+To see even more detail and a complete dump of network performance information the ``dump_osd_network`` command can be used.  Typically, this would be
+sent to a mgr, but it can be limited to a particular OSD's interactions by issuing it to any OSD.  The current threshold which defaults to 1 second
+(1000 milliseconds) can be overridden as an argument in milliseconds.
+
+The following command will show all gathered network performance data by specifying a threshold of 0 and sending to the mgr.
+
+::
+
+    $ ceph daemon /var/run/ceph/ceph-mgr.x.asok dump_osd_network 0
+    {
+        "threshold": 0,
+        "entries": [
+            {
+                "last update": "Wed Sep  4 17:04:49 2019",
+                "stale": false,
+                "from osd": 2,
+                "to osd": 0,
+                "interface": "front",
+                "average": {
+                    "1min": 1.023,
+                    "5min": 0.860,
+                    "15min": 0.883
+                },
+                "min": {
+                    "1min": 0.818,
+                    "5min": 0.607,
+                    "15min": 0.607
+                },
+                "max": {
+                    "1min": 1.164,
+                    "5min": 1.173,
+                    "15min": 1.544
+                },
+                "last": 0.924
+            },
+            {
+                "last update": "Wed Sep  4 17:04:49 2019",
+                "stale": false,
+                "from osd": 2,
+                "to osd": 0,
+                "interface": "back",
+                "average": {
+                    "1min": 0.968,
+                    "5min": 0.897,
+                    "15min": 0.830
+                },
+                "min": {
+                    "1min": 0.860,
+                    "5min": 0.563,
+                    "15min": 0.502
+                },
+                "max": {
+                    "1min": 1.171,
+                    "5min": 1.216,
+                    "15min": 1.456
+                },
+                "last": 0.845
+            },
+            {
+                "last update": "Wed Sep  4 17:04:48 2019",
+                "stale": false,
+                "from osd": 0,
+                "to osd": 1,
+                "interface": "front",
+                "average": {
+                    "1min": 0.965,
+                    "5min": 0.811,
+                    "15min": 0.850
+                },
+                "min": {
+                    "1min": 0.650,
+                    "5min": 0.488,
+                    "15min": 0.466
+                },
+                "max": {
+                    "1min": 1.252,
+                    "5min": 1.252,
+                    "15min": 1.362
+                },
+            "last": 0.791
+        },
+        ...
+
+
+
+Muting health checks
+--------------------
+
+Health checks can be muted so that they do not affect the overall
+reported status of the cluster.  Alerts are specified using the health
+check code (see :ref:`health-checks`)::
+
+  ceph health mute <code>
+
+For example, if there is a health warning, muting it will make the
+cluster report an overall status of ``HEALTH_OK``.  For example, to
+mute an ``OSD_DOWN`` alert,::
+
+  ceph health mute OSD_DOWN
+
+Mutes are reported as part of the short and long form of the ``ceph health`` command.
+For example, in the above scenario, the cluster would report::
+
+  $ ceph health
+  HEALTH_OK (muted: OSD_DOWN)
+  $ ceph health detail
+  HEALTH_OK (muted: OSD_DOWN)
+  (MUTED) OSD_DOWN 1 osds down
+      osd.1 is down
+
+A mute can be explicitly removed with::
+
+  ceph health unmute <code>
+
+For example,::
+
+  ceph health unmute OSD_DOWN
+
+A health check mute may optionally have a TTL (time to live)
+associated with it, such that the mute will automatically expire
+after the specified period of time has elapsed.  The TTL is specified as an optional
+duration argument, e.g.::
+
+  ceph health mute OSD_DOWN 4h    # mute for 4 hours
+  ceph health mute MON_DOWN 15m   # mute for 15  minutes
+
+Normally, if a muted health alert is resolved (e.g., in the example
+above, the OSD comes back up), the mute goes away.  If the alert comes
+back later, it will be reported in the usual way.
+
+It is possible to make a mute "sticky" such that the mute will remain even if the
+alert clears.  For example,::
+
+  ceph health mute OSD_DOWN 1h --sticky   # ignore any/all down OSDs for next hour
+
+Most health mutes also disappear if the extent of an alert gets worse.  For example,
+if there is one OSD down, and the alert is muted, the mute will disappear if one
+or more additional OSDs go down.  This is true for any health alert that involves
+a count indicating how much or how many of something is triggering the warning or
+error.
+
 
 Detecting configuration issues
 ==============================
@@ -179,72 +345,127 @@ the following::
 
 	ceph df
 
-The **RAW STORAGE** section of the output provides an overview of the
-amount of storage that is managed by your cluster.
+The output of ``ceph df`` looks like this::
 
-- **CLASS:** The class of OSD device (or the total for the cluster)
+   CLASS     SIZE    AVAIL     USED  RAW USED  %RAW USED
+   ssd    202 GiB  200 GiB  2.0 GiB   2.0 GiB       1.00
+   TOTAL  202 GiB  200 GiB  2.0 GiB   2.0 GiB       1.00
+
+   --- POOLS ---
+   POOL                   ID  PGS   STORED   (DATA)   (OMAP)   OBJECTS     USED  (DATA)   (OMAP)   %USED  MAX AVAIL  QUOTA OBJECTS  QUOTA BYTES  DIRTY  USED COMPR  UNDER COMPR
+   device_health_metrics   1    1  242 KiB   15 KiB  227 KiB         4  251 KiB  24 KiB  227 KiB       0    297 GiB            N/A          N/A      4         0 B          0 B
+   cephfs.a.meta           2   32  6.8 KiB  6.8 KiB      0 B        22   96 KiB  96 KiB      0 B       0    297 GiB            N/A          N/A     22         0 B          0 B
+   cephfs.a.data           3   32      0 B      0 B      0 B         0      0 B     0 B      0 B       0     99 GiB            N/A          N/A      0         0 B          0 B
+   test                    4   32   22 MiB   22 MiB   50 KiB       248   19 MiB  19 MiB   50 KiB       0    297 GiB            N/A          N/A    248         0 B          0 B
+
+
+
+
+
+- **CLASS:** for example, "ssd" or "hdd"
 - **SIZE:** The amount of storage capacity managed by the cluster.
 - **AVAIL:** The amount of free space available in the cluster.
-- **USED:** The amount of raw storage consumed by user data.
-- **RAW USED:** The amount of raw storage consumed by user data, internal overhead, or reserved capacity.
+- **USED:** The amount of raw storage consumed by user data (excluding
+  BlueStore's database)
+- **RAW USED:** The amount of raw storage consumed by user data, internal
+  overhead, or reserved capacity.
 - **%RAW USED:** The percentage of raw storage used. Use this number in
   conjunction with the ``full ratio`` and ``near full ratio`` to ensure that 
   you are not reaching your cluster's capacity. See `Storage Capacity`_ for 
   additional details.
 
+
+**POOLS:**  
+
 The **POOLS** section of the output provides a list of pools and the notional 
 usage of each pool. The output from this section **DOES NOT** reflect replicas,
 clones or snapshots. For example, if you store an object with 1MB of data, the 
 notional usage will be 1MB, but the actual usage may be 2MB or more depending 
-on the number of replicas, clones and snapshots.
+on the number of replicas, clones and snapshots.  
 
-- **NAME:** The name of the pool.
-- **ID:** The pool ID.
-- **USED:** The notional amount of data stored in kilobytes, unless the number 
-  appends **M** for megabytes or **G** for gigabytes.
+- **ID:** The number of the node within the pool.
+- **STORED:** actual amount of data user/Ceph has stored in a pool. This is
+  similar to the USED column in earlier versions of Ceph but the calculations
+  (for BlueStore!) are more precise (gaps are properly handled).
+
+  - **(DATA):** usage for RBD (RADOS Block Device), CephFS file data, and RGW
+    (RADOS Gateway) object data.
+  - **(OMAP):** key-value pairs. Used primarily by CephFS and RGW (RADOS
+    Gateway) for metadata storage.
+
+- **OBJECTS:** The notional number of objects stored per pool. "Notional" is
+  defined above in the paragraph immediately under "POOLS".
+- **USED:** The space allocated for a pool over all OSDs. This includes
+  replication, allocation granularity, and erasure-coding overhead. Compression
+  savings and object content gaps are also taken into account. BlueStore's
+  database is not included in this amount.
+
+  - **(DATA):** object usage for RBD (RADOS Block Device), CephFS file data, and RGW
+    (RADOS Gateway) object data.
+  - **(OMAP):** object key-value pairs. Used primarily by CephFS and RGW (RADOS
+    Gateway) for metadata storage.
+
 - **%USED:** The notional percentage of storage used per pool.
 - **MAX AVAIL:** An estimate of the notional amount of data that can be written
   to this pool.
-- **OBJECTS:** The notional number of objects stored per pool.
+- **QUOTA OBJECTS:** The number of quota objects.
+- **QUOTA BYTES:** The number of bytes in the quota objects.
+- **DIRTY:** "DIRTY" is meaningful only when cache tiering is in use. If cache
+  tiering is in use, the "DIRTY" column lists the number of objects in the
+  cache pool that have been written to the cache pool but have not flushed yet
+  to the base pool.
+- **USED COMPR:** amount of space allocated for compressed data (i.e. this
+  includes comrpessed data plus all the allocation, replication and erasure
+  coding overhead).
+- **UNDER COMPR:** amount of data passed through compression (summed over all
+  replicas) and beneficial enough to be stored in a compressed form.
 
-.. note:: The numbers in the **POOLS** section are notional. They are not 
-   inclusive of the number of replicas, snapshots or clones. As a result, 
-   the sum of the **USED** and **%USED** amounts will not add up to the 
-   **USED** and **%USED** amounts in the **RAW** section of the
-   output.
 
-.. note:: The **MAX AVAIL** value is a complicated function of the
-   replication or erasure code used, the CRUSH rule that maps storage
-   to devices, the utilization of those devices, and the configured
-   mon_osd_full_ratio.
+.. note:: The numbers in the POOLS section are notional. They are not
+   inclusive of the number of replicas, snapshots or clones. As a result, the
+   sum of the USED and %USED amounts will not add up to the USED and %USED
+   amounts in the RAW section of the output.
 
+.. note:: The MAX AVAIL value is a complicated function of the replication
+   or erasure code used, the CRUSH rule that maps storage to devices, the
+   utilization of those devices, and the configured ``mon_osd_full_ratio``.
 
 
 Checking OSD Status
 ===================
 
-You can check OSDs to ensure they are ``up`` and ``in`` by executing:: 
+You can check OSDs to ensure they are ``up`` and ``in`` by executing the
+following command:
 
-	ceph osd stat
+.. prompt:: bash #
+
+  ceph osd stat
 	
-Or:: 
+Or: 
 
-	ceph osd dump
+.. prompt:: bash #
+
+  ceph osd dump
 	
-You can also check view OSDs according to their position in the CRUSH map. :: 
+You can also check view OSDs according to their position in the CRUSH map by
+using the folloiwng command:
 
-	ceph osd tree
+.. prompt:: bash #
+
+   ceph osd tree
 
 Ceph will print out a CRUSH tree with a host, its OSDs, whether they are up
-and their weight. ::  
+and their weight:
 
-	#ID CLASS WEIGHT  TYPE NAME             STATUS REWEIGHT PRI-AFF
-	 -1       3.00000 pool default
-	 -3       3.00000 rack mainrack
-	 -2       3.00000 host osd-host
-	  0   ssd 1.00000         osd.0             up  1.00000 1.00000
-	  1   ssd 1.00000         osd.1             up  1.00000 1.00000
-	  2   ssd 1.00000         osd.2             up  1.00000 1.00000
+.. code-block:: bash
+
+   #ID CLASS WEIGHT  TYPE NAME             STATUS REWEIGHT PRI-AFF
+    -1       3.00000 pool default
+    -3       3.00000 rack mainrack
+    -2       3.00000 host osd-host
+     0   ssd 1.00000         osd.0             up  1.00000 1.00000
+     1   ssd 1.00000         osd.1             up  1.00000 1.00000
+     2   ssd 1.00000         osd.2             up  1.00000 1.00000
 
 For a detailed discussion, refer to `Monitoring OSDs and Placement Groups`_.
 
@@ -333,6 +554,7 @@ For a detailed discussion, refer to `Monitoring OSDs and Placement Groups`_.
 
 .. _Monitoring OSDs and Placement Groups: ../monitoring-osd-pg
 
+.. _rados-monitoring-using-admin-socket:
 
 Using the Admin Socket
 ======================

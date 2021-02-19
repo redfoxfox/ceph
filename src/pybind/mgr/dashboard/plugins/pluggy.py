@@ -21,8 +21,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-"""
-
+"""\
 """
 CAVEAT:
 This is a minimal implementation of python-pluggy (based on 0.8.0 interface:
@@ -41,10 +40,15 @@ distros and releases currently targeted for Ceph Nautilus:
 TODO: Once this becomes available in the above distros, this file should be
 REMOVED, and the fully featured python-pluggy should be used instead.
 """
+try:
+    from typing import DefaultDict
+except ImportError:
+    pass  # For typing only
 
 
 class HookspecMarker(object):
     """ Dummy implementation. No spec validation. """
+
     def __init__(self, project_name):
         self.project_name = project_name
 
@@ -74,9 +78,10 @@ class _HookRelay(object):
     Provides the PluginManager.hook.<method_name>() syntax and
     functionality.
     """
+
     def __init__(self):
         from collections import defaultdict
-        self._registry = defaultdict(list)
+        self._registry = defaultdict(list)  # type: DefaultDict[str, list]
 
     def __getattr__(self, hook_name):
         return lambda *args, **kwargs: [
@@ -103,9 +108,9 @@ class PluginManager(object):
 
     def add_hookspecs(self, module_or_class):
         """ Dummy method"""
-        pass
 
-    def register(self, plugin, name=None):
+    def register(self, plugin, name=None):  # pylint: disable=unused-argument
         for attr in dir(plugin):
             if self.parse_hookimpl_opts(plugin, attr) is not None:
+                # pylint: disable=protected-access
                 self.hook._add_hookimpl(attr, getattr(plugin, attr))

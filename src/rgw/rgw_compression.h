@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #ifndef CEPH_RGW_COMPRESSION_H
 #define CEPH_RGW_COMPRESSION_H
@@ -9,6 +9,14 @@
 #include "compressor/Compressor.h"
 #include "rgw_putobj.h"
 #include "rgw_op.h"
+#include "rgw_compression_types.h"
+
+int rgw_compression_info_from_attr(const bufferlist& attr,
+                                   bool& need_decompress,
+                                   RGWCompressionInfo& cs_info);
+int rgw_compression_info_from_attrset(const map<string, bufferlist>& attrs,
+                                      bool& need_decompress,
+                                      RGWCompressionInfo& cs_info);
 
 class RGWGetObj_Decompress : public RGWGetObj_Filter
 {
@@ -37,6 +45,7 @@ class RGWPutObj_Compress : public rgw::putobj::Pipe
   CephContext* cct;
   bool compressed{false};
   CompressorRef compressor;
+  boost::optional<int32_t> compressor_message;
   std::vector<compression_block> blocks;
 public:
   RGWPutObj_Compress(CephContext* cct_, CompressorRef compressor,
@@ -47,6 +56,7 @@ public:
 
   bool is_compressed() { return compressed; }
   vector<compression_block>& get_compression_blocks() { return blocks; }
+  boost::optional<int32_t> get_compressor_message() { return compressor_message; }
 
 }; /* RGWPutObj_Compress */
 

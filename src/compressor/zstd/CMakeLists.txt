@@ -14,14 +14,8 @@ ExternalProject_Add(zstd_ext
              -G${CMAKE_GENERATOR}
   BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/libzstd
   BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target libzstd_static
+  BUILD_BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/libzstd/lib/libzstd.a"
   INSTALL_COMMAND "true")
-
-# force zstd make to be called on each time
-ExternalProject_Add_Step(zstd_ext forcebuild
-  DEPENDEES configure
-  DEPENDERS build
-  COMMAND "true"
-  ALWAYS 1)
 
 add_library(zstd STATIC IMPORTED)
 set_target_properties(zstd PROPERTIES
@@ -34,7 +28,7 @@ set(zstd_sources
 )
 
 add_library(ceph_zstd SHARED ${zstd_sources})
-target_link_libraries(ceph_zstd PRIVATE zstd)
+target_link_libraries(ceph_zstd PRIVATE zstd $<$<PLATFORM_ID:Windows>:ceph-common>)
 set_target_properties(ceph_zstd PROPERTIES
   VERSION 2.0.0
   SOVERSION 2

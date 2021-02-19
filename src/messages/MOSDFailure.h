@@ -19,9 +19,7 @@
 #include "messages/PaxosServiceMessage.h"
 
 
-class MOSDFailure : public MessageInstance<MOSDFailure, PaxosServiceMessage> {
-public:
-  friend factory;
+class MOSDFailure final : public PaxosServiceMessage {
 private:
   static constexpr int HEAD_VERSION = 4;
   static constexpr int COMPAT_VERSION = 4;
@@ -40,10 +38,10 @@ private:
   epoch_t epoch = 0;
   int32_t failed_for = 0;  // known to be failed since at least this long
 
-  MOSDFailure() : MessageInstance(MSG_OSD_FAILURE, 0, HEAD_VERSION) { }
+  MOSDFailure() : PaxosServiceMessage(MSG_OSD_FAILURE, 0, HEAD_VERSION) { }
   MOSDFailure(const uuid_d &fs, int osd, const entity_addrvec_t& av,
 	      int duration, epoch_t e)
-    : MessageInstance(MSG_OSD_FAILURE, e, HEAD_VERSION, COMPAT_VERSION),
+    : PaxosServiceMessage(MSG_OSD_FAILURE, e, HEAD_VERSION, COMPAT_VERSION),
       fsid(fs),
       target_osd(osd),
       target_addrs(av),
@@ -52,14 +50,14 @@ private:
   MOSDFailure(const uuid_d &fs, int osd, const entity_addrvec_t& av,
 	      int duration,
               epoch_t e, __u8 extra_flags)
-    : MessageInstance(MSG_OSD_FAILURE, e, HEAD_VERSION, COMPAT_VERSION),
+    : PaxosServiceMessage(MSG_OSD_FAILURE, e, HEAD_VERSION, COMPAT_VERSION),
       fsid(fs),
       target_osd(osd),
       target_addrs(av),
       flags(extra_flags),
       epoch(e), failed_for(duration) { }
 private:
-  ~MOSDFailure() override {}
+  ~MOSDFailure() final {}
 
 public:
   int get_target_osd() { return target_osd; }
@@ -73,6 +71,7 @@ public:
   epoch_t get_epoch() const { return epoch; }
 
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     paxos_decode(p);
     decode(fsid, p);
@@ -115,7 +114,7 @@ public:
   }
 
   std::string_view get_type_name() const override { return "osd_failure"; }
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "osd_failure("
 	<< (if_osd_failed() ? "failed " : "recovered ")
 	<< (is_immediate() ? "immediate " : "timeout ")
@@ -123,6 +122,9 @@ public:
 	<< " for " << failed_for << "sec e" << epoch
 	<< " v" << version << ")";
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

@@ -23,21 +23,21 @@ Options
 
 ``port`` and ``ssl_port``
 
-:Description: Sets the listening port number. Can be specified multiple
+:Description: Sets the ipv4 & ipv6 listening port number. Can be specified multiple
               times as in ``port=80 port=8000``.
-
 :Type: Integer
 :Default: ``80``
 
 
 ``endpoint`` and ``ssl_endpoint``
 
-:Description: Sets the listening address in the form ``address[:port]``,
-              where the address is an IPv4 address string in dotted decimal
-              form, or an IPv6 address in hexadecimal notation surrounded
-              by square brackets. The optional port defaults to 80 for
-              ``endpoint`` and 443 for ``ssl_endpoint``. Can be specified
-              multiple times as in ``endpoint=[::1] endpoint=192.168.0.100:8000``.
+:Description: Sets the listening address in the form ``address[:port]``, where
+              the address is an IPv4 address string in dotted decimal form, or
+              an IPv6 address in hexadecimal notation surrounded by square
+              brackets. Specifying a IPv6 endpoint would listen to v6 only. The
+              optional port defaults to 80 for ``endpoint`` and 443 for
+              ``ssl_endpoint``. Can be specified multiple times as in
+              ``endpoint=[::1] endpoint=192.168.0.100:8000``.
 
 :Type: Integer
 :Default: None
@@ -46,6 +46,8 @@ Options
 ``ssl_certificate``
 
 :Description: Path to the SSL certificate file used for SSL-enabled endpoints.
+              If path is prefixed with ``config://``, the certificate will be
+              pulled from the ceph monitor ``config-key`` database.
 
 :Type: String
 :Default: None
@@ -56,6 +58,8 @@ Options
 :Description: Optional path to the private key file used for SSL-enabled
               endpoints. If one is not given, the ``ssl_certificate`` file
               is used as the private key.
+              If path is prefixed with ``config://``, the certificate will be
+              pulled from the ceph monitor ``config-key`` database.
 
 :Type: String
 :Default: None
@@ -72,6 +76,24 @@ Options
 
 :Type: Integer (0 or 1)
 :Default: 0
+
+``max_connection_backlog``
+
+:Description: Optional value to define the maximum size for the queue of
+              connections waiting to be accepted. If not configured, the value
+              from ``boost::asio::socket_base::max_connections`` will be used.
+
+:Type: Integer
+:Default: None
+
+``request_timeout_ms``
+
+:Description: The amount of time in milliseconds that Beast will wait
+              for more incoming data or outgoing data before giving up.
+              Setting this value to 0 will disable timeout.
+
+:Type: Integer
+:Default: ``65000``
 
 
 Civetweb

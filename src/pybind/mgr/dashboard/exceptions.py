@@ -42,7 +42,14 @@ class DashboardException(Exception):
     def code(self):
         if self._code:
             return str(self._code)
-        return str(abs(self.errno))
+        return str(abs(self.errno)) if self.errno is not None else 'Error'
+
+
+class InvalidCredentialsError(DashboardException):
+    def __init__(self):
+        super().__init__(msg='Invalid credentials',
+                         code='invalid_credentials',
+                         component='auth')
 
 
 # access control module exceptions
@@ -101,3 +108,17 @@ class RoleNotInUser(Exception):
         super(RoleNotInUser, self).__init__(
             "Role '{}' is not associated with user '{}'"
             .format(rolename, username))
+
+
+class PwdExpirationDateNotValid(Exception):
+    def __init__(self):
+        super(PwdExpirationDateNotValid, self).__init__(
+            "The password expiration date must not be in the past")
+
+
+class GrafanaError(Exception):
+    pass
+
+
+class PasswordPolicyException(Exception):
+    pass

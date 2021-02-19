@@ -82,13 +82,13 @@ void InoTable::apply_alloc_ids(interval_set<inodeno_t>& ids)
 }
 
 
-void InoTable::project_release_ids(interval_set<inodeno_t>& ids) 
+void InoTable::project_release_ids(const interval_set<inodeno_t>& ids) 
 {
   dout(10) << "project_release_ids " << ids << " to " << projected_free << "/" << free << dendl;
   projected_free.insert(ids);
   ++projected_version;
 }
-void InoTable::apply_release_ids(interval_set<inodeno_t>& ids) 
+void InoTable::apply_release_ids(const interval_set<inodeno_t>& ids) 
 {
   dout(10) << "apply_release_ids " << ids << " to " << projected_free << "/" << free << dendl;
   free.insert(ids);
@@ -226,15 +226,10 @@ bool InoTable::repair(inodeno_t id)
 
 bool InoTable::force_consume_to(inodeno_t ino)
 {
-  auto it = free.begin();
-  if (it != free.end() && it.get_start() <= ino) {
-    inodeno_t min = it.get_start();
-    derr << "erasing " << min << " to " << ino << dendl;
-    free.erase(min, ino - min + 1);
-    projected_free = free;
-    projected_version = ++version;
-    return true;
-  } else {
+  inodeno_t first = free.range_start();
+  if (first > ino)
     return false;
-  }
+
+  skip_inos(inodeno_t(ino + 1 - first));
+  return true;
 }

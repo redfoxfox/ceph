@@ -1,6 +1,7 @@
-#ifndef CEPH_RGW_SERVICES_FINISHER_H
-#define CEPH_RGW_SERVICES_FINISHER_H
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab ft=cpp
 
+#pragma once
 
 #include "rgw/rgw_service.h"
 
@@ -24,7 +25,7 @@ private:
 
 protected:
   void init() {}
-  int do_start() override;
+  int do_start(optional_yield y, const DoutPrefixProvider *dpp) override;
 
 public:
   RGWSI_Finisher(CephContext *cct): RGWServiceInstance(cct) {}
@@ -41,5 +42,3 @@ public:
 
   void schedule_context(Context *c);
 };
-
-#endif

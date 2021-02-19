@@ -40,6 +40,12 @@ extern char *sys_siglist[];
 
 #define dout_context g_ceph_context
 
+using std::ostringstream;
+using std::string;
+
+using ceph::BackTrace;
+using ceph::JSONFormatter;
+
 void install_sighandler(int signum, signal_handler_t handler, int flags)
 {
   int ret;
@@ -255,6 +261,29 @@ static void handle_fatal_signal(int signum)
 	  jf.dump_string("assert_msg", g_assert_msg);
 	}
 
+	// eio?
+	if (g_eio) {
+	  jf.dump_bool("io_error", true);
+	  if (g_eio_devname[0]) {
+	    jf.dump_string("io_error_devname", g_eio_devname);
+	  }
+	  if (g_eio_path[0]) {
+	    jf.dump_string("io_error_path", g_eio_path);
+	  }
+	  if (g_eio_error) {
+	    jf.dump_int("io_error_code", g_eio_error);
+	  }
+	  if (g_eio_iotype) {
+	    jf.dump_int("io_error_optype", g_eio_iotype);
+	  }
+	  if (g_eio_offset) {
+	    jf.dump_unsigned("io_error_offset", g_eio_offset);
+	  }
+	  if (g_eio_length) {
+	    jf.dump_unsigned("io_error_length", g_eio_length);
+	  }
+	}
+
 	// backtrace
 	bt.dump(&jf);
 
@@ -295,7 +324,13 @@ static void handle_fatal_signal(int signum)
     }
   }
 
-  reraise_fatal(signum);
+  if (g_eio) {
+    // if this was an EIO crash, we don't need to trigger a core dump,
+    // since the problem is hardware, or some layer beneath us.
+    _exit(EIO);
+  } else {
+    reraise_fatal(signum);
+  }
 }
 
 void install_standard_sighandlers(void)
@@ -409,7 +444,7 @@ struct SignalHandler : public Thread {
 
   SignalHandler() {
     // create signal pipe
-    int r = pipe_cloexec(pipefd);
+    int r = pipe_cloexec(pipefd, 0);
     ceph_assert(r == 0);
     r = fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
     ceph_assert(r == 0);
@@ -546,7 +581,7 @@ void SignalHandler::register_handler(int signum, signal_handler_t handler, bool 
 
   safe_handler *h = new safe_handler;
 
-  r = pipe_cloexec(h->pipefd);
+  r = pipe_cloexec(h->pipefd, 0);
   ceph_assert(r == 0);
   r = fcntl(h->pipefd[0], F_SETFL, O_NONBLOCK);
   ceph_assert(r == 0);

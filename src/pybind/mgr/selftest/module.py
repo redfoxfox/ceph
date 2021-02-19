@@ -4,7 +4,6 @@ import threading
 import random
 import json
 import errno
-import six
 
 
 class Module(MgrModule):
@@ -142,7 +141,7 @@ class Module(MgrModule):
             try:
                 r = self.remote(command['module'], "self_test")
             except RuntimeError as e:
-                return -1, '', "Test failed: {0}".format(e.message)
+                return -1, '', "Test failed: {0}".format(e)
             else:
                 return 0, str(r), "Self-test OK"
         elif command['prefix'] == 'mgr self-test health set':
@@ -153,10 +152,10 @@ class Module(MgrModule):
             return self._insights_set_now_offset(inbuf, command)
         elif command['prefix'] == 'mgr self-test cluster-log':
             priority_map = {
-                'info': self.CLUSTER_LOG_PRIO_INFO,
-                'security': self.CLUSTER_LOG_PRIO_SEC,
-                'warning': self.CLUSTER_LOG_PRIO_WARN,
-                'error': self.CLUSTER_LOG_PRIO_ERROR
+                'info': self.ClusterLogPrio.INFO,
+                'security': self.ClusterLogPrio.SEC,
+                'warning': self.ClusterLogPrio.WARN,
+                'error': self.ClusterLogPrio.ERROR
             }
             self.cluster_log(command['channel'],
                              priority_map[command['priority']],
@@ -170,17 +169,18 @@ class Module(MgrModule):
         try:
             checks = json.loads(command["checks"])
         except Exception as e:
-            return -1, "", "Failed to decode JSON input: {}".format(e.message)
+            return -1, "", "Failed to decode JSON input: {}".format(e)
 
         try:
-            for check, info in six.iteritems(checks):
+            for check, info in checks.items():
                 self._health[check] = {
                     "severity": str(info["severity"]),
                     "summary": str(info["summary"]),
+                    "count": 123,
                     "detail": [str(m) for m in info["detail"]]
                 }
         except Exception as e:
-            return -1, "", "Invalid health check format: {}".format(e.message)
+            return -1, "", "Invalid health check format: {}".format(e)
 
         self.set_health_checks(self._health)
         return 0, "", ""
@@ -198,9 +198,9 @@ class Module(MgrModule):
 
     def _insights_set_now_offset(self, inbuf, command):
         try:
-            hours = long(command["hours"])
+            hours = int(command["hours"])
         except Exception as e:
-            return -1, "", "Timestamp must be numeric: {}".format(e.message)
+            return -1, "", "Timestamp must be numeric: {}".format(e)
 
         self.remote("insights", "testing_set_now_time_offset", hours)
         return 0, "", ""
@@ -235,8 +235,12 @@ class Module(MgrModule):
                 "pg_summary",
                 "pg_status",
                 "pg_dump",
+                "pg_ready",
                 "df",
+                "pg_stats",
+                "pool_stats",
                 "osd_stats",
+                "osd_ping_times",
                 "health",
                 "mon_status",
                 "mgr_map"
@@ -423,6 +427,17 @@ class Module(MgrModule):
         else:
             raise RuntimeError("KeyError not raised")
 
+    def remote_from_orchestrator_cli_self_test(self, what):
+        import orchestrator
+        if what == 'OrchestratorError':
+            c = orchestrator.TrivialReadCompletion(result=None)
+            c.fail(orchestrator.OrchestratorError('hello, world'))
+            return c
+        elif what == "ZeroDivisionError":
+            c = orchestrator.TrivialReadCompletion(result=None)
+            c.fail(ZeroDivisionError('hello, world'))
+            return c
+        assert False, repr(what)
 
     def shutdown(self):
         self._workload = self.SHUTDOWN

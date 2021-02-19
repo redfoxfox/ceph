@@ -20,10 +20,8 @@
 
 #include "msg/Message.h"
 
-class MClientLease : public MessageInstance<MClientLease> {
+class MClientLease final : public SafeMessage {
 public:
-  friend factory;
-
   struct ceph_mds_lease h;
   std::string dname;
   
@@ -35,13 +33,13 @@ public:
   snapid_t get_last() const { return snapid_t(h.last); }
 
 protected:
-  MClientLease() : MessageInstance(CEPH_MSG_CLIENT_LEASE) {}
+  MClientLease() : SafeMessage(CEPH_MSG_CLIENT_LEASE) {}
   MClientLease(const MClientLease& m) :
-    MessageInstance(CEPH_MSG_CLIENT_LEASE),
+    SafeMessage(CEPH_MSG_CLIENT_LEASE),
     h(m.h),
     dname(m.dname) {}
   MClientLease(int ac, ceph_seq_t seq, int m, uint64_t i, uint64_t sf, uint64_t sl) :
-    MessageInstance(CEPH_MSG_CLIENT_LEASE) {
+    SafeMessage(CEPH_MSG_CLIENT_LEASE) {
     h.action = ac;
     h.seq = seq;
     h.mask = m;
@@ -51,7 +49,7 @@ protected:
     h.duration_ms = 0;
   }
   MClientLease(int ac, ceph_seq_t seq, int m, uint64_t i, uint64_t sf, uint64_t sl, std::string_view d) :
-    MessageInstance(CEPH_MSG_CLIENT_LEASE),
+    SafeMessage(CEPH_MSG_CLIENT_LEASE),
     dname(d) {
     h.action = ac;
     h.seq = seq;
@@ -61,11 +59,11 @@ protected:
     h.last = sl;
     h.duration_ms = 0;
   }
-  ~MClientLease() override {}
+  ~MClientLease() final {}
 
 public:
   std::string_view get_type_name() const override { return "client_lease"; }
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "client_lease(a=" << ceph_lease_op_name(get_action())
 	<< " seq " << get_seq()
 	<< " mask " << get_mask();
@@ -76,8 +74,9 @@ public:
       out << "/" << dname;
     out << ")";
   }
-  
+
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(h, p);
     decode(dname, p);
@@ -88,6 +87,9 @@ public:
     encode(dname, payload);
   }
 
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

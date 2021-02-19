@@ -4,12 +4,12 @@
 #include "librbd/journal/DemoteRequest.h"
 #include "common/dout.h"
 #include "common/errno.h"
-#include "common/WorkQueue.h"
 #include "journal/Journaler.h"
 #include "journal/Settings.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Journal.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 #include "librbd/journal/OpenRequest.h"
 
 #define dout_subsys ceph_subsys_rbd
@@ -26,7 +26,7 @@ using librbd::util::create_context_callback;
 template <typename I>
 DemoteRequest<I>::DemoteRequest(I &image_ctx, Context *on_finish)
   : m_image_ctx(image_ctx), m_on_finish(on_finish),
-    m_lock("DemoteRequest::m_lock") {
+    m_lock(ceph::make_mutex("DemoteRequest::m_lock")) {
 }
 
 template <typename I>
@@ -45,7 +45,7 @@ void DemoteRequest<I>::open_journaler() {
   ldout(cct, 20) << dendl;
 
   m_journaler = new Journaler(m_image_ctx.md_ctx, m_image_ctx.id,
-                              Journal<>::IMAGE_CLIENT_ID, {});
+                              Journal<>::IMAGE_CLIENT_ID, {}, nullptr);
   auto ctx = create_async_context_callback(
     m_image_ctx, create_context_callback<
       DemoteRequest<I>, &DemoteRequest<I>::handle_open_journaler>(this));
@@ -135,7 +135,7 @@ void DemoteRequest<I>::append_event() {
   bufferlist event_entry_bl;
   encode(event_entry, event_entry_bl);
 
-  m_journaler->start_append(0, 0, 0, 0);
+  m_journaler->start_append(0);
   m_future = m_journaler->append(m_tag_tid, event_entry_bl);
 
   auto ctx = create_context_callback<

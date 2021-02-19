@@ -1,6 +1,7 @@
-#ifndef CEPH_RGW_SERVICES_ZONEUTILS_H
-#define CEPH_RGW_SERVICES_ZONEUTILS_H
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab ft=cpp
 
+#pragma once
 
 #include "rgw/rgw_service.h"
 
@@ -23,7 +24,7 @@ class RGWSI_ZoneUtils : public RGWServiceInstance
     zone_svc = _zone_svc;
   }
 
-  int do_start() override;
+  int do_start(optional_yield, const DoutPrefixProvider *dpp) override;
 
   void init_unique_trans_id_deps();
 
@@ -35,5 +36,3 @@ public:
 
   string unique_trans_id(const uint64_t unique_num);
 };
-
-#endif

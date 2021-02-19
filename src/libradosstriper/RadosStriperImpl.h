@@ -17,6 +17,8 @@
 
 #include <string>
 
+#include <boost/intrusive_ptr.hpp>
+
 #include "include/rados/librados.h"
 #include "include/rados/librados.hpp"
 #include "include/radosstriper/libradosstriper.h"
@@ -26,6 +28,7 @@
 #include "librados/IoCtxImpl.h"
 #include "librados/AioCompletionImpl.h"
 #include "common/RefCountedObj.h"
+#include "common/ceph_context.h"
 
 namespace libradosstriper {
 
@@ -111,18 +114,17 @@ struct RadosStriperImpl {
 
   // reference counting
   void get() {
-    lock.Lock();
+    std::lock_guard l{lock};
     m_refCnt ++ ;
-    lock.Unlock();
   }
   void put() {
     bool deleteme = false;
-    lock.Lock();
+    lock.lock();
     m_refCnt --;
     if (m_refCnt == 0)
       deleteme = true;
-    cond.Signal();
-    lock.Unlock();
+    cond.notify_all();
+    lock.unlock();
     if (deleteme)
       delete this;
   }
@@ -257,9 +259,9 @@ struct RadosStriperImpl {
   }
 
   // reference counting
-  Cond  cond;
+  std::condition_variable cond;
   int m_refCnt;
-  Mutex lock;
+  std::mutex lock;
 
 
   // Context

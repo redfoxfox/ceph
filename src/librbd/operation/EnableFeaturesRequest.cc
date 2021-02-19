@@ -10,8 +10,9 @@
 #include "librbd/Journal.h"
 #include "librbd/Utils.h"
 #include "librbd/image/SetFlagsRequest.h"
-#include "librbd/io/ImageRequestWQ.h"
+#include "librbd/io/ImageDispatcherInterface.h"
 #include "librbd/journal/CreateRequest.h"
+#include "librbd/journal/TypeTraits.h"
 #include "librbd/mirror/EnableRequest.h"
 #include "librbd/object_map/CreateRequest.h"
 
@@ -38,7 +39,7 @@ template <typename I>
 void EnableFeaturesRequest<I>::send_op() {
   I &image_ctx = this->m_image_ctx;
   CephContext *cct = image_ctx.cct;
-  ceph_assert(image_ctx.owner_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
 
   ldout(cct, 20) << this << " " << __func__ << ": features=" << m_features
 		 << dendl;
@@ -90,8 +91,8 @@ void EnableFeaturesRequest<I>::send_block_writes() {
   CephContext *cct = image_ctx.cct;
   ldout(cct, 20) << this << " " << __func__ << dendl;
 
-  RWLock::WLocker locker(image_ctx.owner_lock);
-  image_ctx.io_work_queue->block_writes(create_context_callback<
+  std::unique_lock locker{image_ctx.owner_lock};
+  image_ctx.io_image_dispatcher->block_writes(create_context_callback<
     EnableFeaturesRequest<I>,
     &EnableFeaturesRequest<I>::handle_block_writes>(this));
 }
@@ -163,7 +164,7 @@ Context *EnableFeaturesRequest<I>::handle_get_mirror_mode(int *result) {
 
   bool create_journal = false;
   do {
-    RWLock::WLocker locker(image_ctx.owner_lock);
+    std::unique_lock locker{image_ctx.owner_lock};
 
     // avoid accepting new requests from peers while we manipulate
     // the image features
@@ -175,6 +176,13 @@ Context *EnableFeaturesRequest<I>::handle_get_mirror_mode(int *result) {
     }
 
     m_features &= ~image_ctx.features;
+
+    // interlock object-map and fast-diff together
+    if (((m_features & RBD_FEATURE_OBJECT_MAP) != 0) ||
+        ((m_features & RBD_FEATURE_FAST_DIFF) != 0)) {
+      m_features |= (RBD_FEATURE_OBJECT_MAP | RBD_FEATURE_FAST_DIFF);
+    }
+
     m_new_features = image_ctx.features | m_features;
     m_features_mask = m_features;
 
@@ -186,12 +194,13 @@ Context *EnableFeaturesRequest<I>::handle_get_mirror_mode(int *result) {
 	break;
       }
       m_enable_flags |= RBD_FLAG_OBJECT_MAP_INVALID;
-      m_features_mask |= RBD_FEATURE_EXCLUSIVE_LOCK;
+      m_features_mask |= (RBD_FEATURE_EXCLUSIVE_LOCK | RBD_FEATURE_FAST_DIFF);
     }
     if ((m_features & RBD_FEATURE_FAST_DIFF) != 0) {
       m_enable_flags |= RBD_FLAG_FAST_DIFF_INVALID;
-      m_features_mask |= (RBD_FEATURE_OBJECT_MAP | RBD_FEATURE_EXCLUSIVE_LOCK);
+      m_features_mask |= (RBD_FEATURE_EXCLUSIVE_LOCK | RBD_FEATURE_OBJECT_MAP);
     }
+
     if ((m_features & RBD_FEATURE_JOURNALING) != 0) {
       if ((m_new_features & RBD_FEATURE_EXCLUSIVE_LOCK) == 0) {
 	lderr(cct) << "cannot enable journaling. exclusive-lock must be "
@@ -227,13 +236,16 @@ void EnableFeaturesRequest<I>::send_create_journal() {
     EnableFeaturesRequest<I>,
     &EnableFeaturesRequest<I>::handle_create_journal>(this);
 
+  typename journal::TypeTraits<I>::ContextWQ* context_wq;
+  Journal<I>::get_work_queue(cct, &context_wq);
+
   journal::CreateRequest<I> *req = journal::CreateRequest<I>::create(
     image_ctx.md_ctx, image_ctx.id,
     image_ctx.config.template get_val<uint64_t>("rbd_journal_order"),
     image_ctx.config.template get_val<uint64_t>("rbd_journal_splay_width"),
     image_ctx.config.template get_val<std::string>("rbd_journal_pool"),
     cls::journal::Tag::TAG_CLASS_NEW, tag_data,
-    librbd::Journal<>::IMAGE_CLIENT_ID, image_ctx.op_work_queue, ctx);
+    librbd::Journal<>::IMAGE_CLIENT_ID, context_wq, ctx);
 
   req->send();
 }
@@ -400,19 +412,20 @@ template <typename I>
 void EnableFeaturesRequest<I>::send_enable_mirror_image() {
   I &image_ctx = this->m_image_ctx;
   CephContext *cct = image_ctx.cct;
-  ldout(cct, 20) << this << " " << __func__ << dendl;
 
   if (!m_enable_mirroring) {
     send_notify_update();
     return;
   }
 
+  ldout(cct, 20) << this << " " << __func__ << dendl;
+
   Context *ctx = create_context_callback<
     EnableFeaturesRequest<I>,
     &EnableFeaturesRequest<I>::handle_enable_mirror_image>(this);
 
-  mirror::EnableRequest<I> *req =
-    mirror::EnableRequest<I>::create(&image_ctx, ctx);
+  auto req = mirror::EnableRequest<I>::create(
+    &image_ctx, cls::rbd::MIRROR_IMAGE_MODE_JOURNAL, "", false, ctx);
   req->send();
 }
 
@@ -461,13 +474,13 @@ Context *EnableFeaturesRequest<I>::handle_finish(int r) {
   ldout(cct, 20) << this << " " << __func__ << ": r=" << r << dendl;
 
   {
-    RWLock::WLocker locker(image_ctx.owner_lock);
+    std::unique_lock locker{image_ctx.owner_lock};
 
     if (image_ctx.exclusive_lock != nullptr && m_requests_blocked) {
       image_ctx.exclusive_lock->unblock_requests();
     }
     if (m_writes_blocked) {
-      image_ctx.io_work_queue->unblock_writes();
+      image_ctx.io_image_dispatcher->unblock_writes();
     }
   }
   image_ctx.state->handle_prepare_lock_complete();

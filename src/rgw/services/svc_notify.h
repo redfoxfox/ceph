@@ -1,11 +1,14 @@
-#ifndef CEPH_RGW_SERVICES_NOTIFY_H
-#define CEPH_RGW_SERVICES_NOTIFY_H
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab ft=cpp
 
+#pragma once
 
 #include "rgw/rgw_service.h"
 
 #include "svc_rados.h"
 
+
+class Context;
 
 class RGWSI_Zone;
 class RGWSI_Finisher;
@@ -27,7 +30,7 @@ private:
   RGWSI_RADOS *rados_svc{nullptr};
   RGWSI_Finisher *finisher_svc{nullptr};
 
-  RWLock watchers_lock{"watchers_lock"};
+  ceph::shared_mutex watchers_lock = ceph::make_shared_mutex("watchers_lock");
   rgw_pool control_pool;
 
   int num_watchers{0};
@@ -50,7 +53,7 @@ private:
 
   bool finalized{false};
 
-  int init_watch();
+  int init_watch(optional_yield y);
   void finalize_watch();
 
   void init(RGWSI_Zone *_zone_svc,
@@ -60,7 +63,7 @@ private:
     rados_svc = _rados_svc;
     finisher_svc = _finisher_svc;
   }
-  int do_start() override;
+  int do_start(optional_yield, const DoutPrefixProvider *dpp) override;
   void shutdown() override;
 
   int unwatch(RGWSI_RADOS::Obj& obj, uint64_t watch_handle);
@@ -96,6 +99,3 @@ public:
 
   void register_watch_cb(CB *cb);
 };
-
-#endif
-

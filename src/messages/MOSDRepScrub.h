@@ -22,10 +22,8 @@
  * instruct an OSD initiate a replica scrub on a specific PG
  */
 
-class MOSDRepScrub : public MessageInstance<MOSDRepScrub, MOSDFastDispatchOp> {
+class MOSDRepScrub final : public MOSDFastDispatchOp {
 public:
-  friend factory;
-
   static constexpr int HEAD_VERSION = 9;
   static constexpr int COMPAT_VERSION = 6;
 
@@ -52,14 +50,14 @@ public:
   }
 
   MOSDRepScrub()
-    : MessageInstance(MSG_OSD_REP_SCRUB, HEAD_VERSION, COMPAT_VERSION),
+    : MOSDFastDispatchOp{MSG_OSD_REP_SCRUB, HEAD_VERSION, COMPAT_VERSION},
       chunky(false),
       deep(false) { }
 
   MOSDRepScrub(spg_t pgid, eversion_t scrub_to, epoch_t map_epoch, epoch_t min_epoch,
                hobject_t start, hobject_t end, bool deep,
 	       bool preemption, int prio, bool highprio)
-    : MessageInstance(MSG_OSD_REP_SCRUB, HEAD_VERSION, COMPAT_VERSION),
+    : MOSDFastDispatchOp{MSG_OSD_REP_SCRUB, HEAD_VERSION, COMPAT_VERSION},
       pgid(pgid),
       scrub_to(scrub_to),
       map_epoch(map_epoch),
@@ -74,11 +72,11 @@ public:
 
 
 private:
-  ~MOSDRepScrub() override {}
+  ~MOSDRepScrub() final {}
 
 public:
   std::string_view get_type_name() const override { return "replica scrub"; }
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "replica_scrub(pg: "	<< pgid
 	<< ",from:" << scrub_from
 	<< ",to:" << scrub_to
@@ -111,6 +109,7 @@ public:
     encode(high_priority, payload);
   }
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(pgid.pgid, p);
     decode(scrub_from, p);

@@ -9,6 +9,7 @@
 #include "librbd/image/DetachParentRequest.h"
 #include "librbd/Types.h"
 #include "librbd/io/ObjectRequest.h"
+#include "librbd/io/Utils.h"
 #include "common/dout.h"
 #include "common/errno.h"
 #include <boost/lambda/bind.hpp>
@@ -29,14 +30,14 @@ template <typename I>
 class C_FlattenObject : public C_AsyncObjectThrottle<I> {
 public:
   C_FlattenObject(AsyncObjectThrottle<I> &throttle, I *image_ctx,
-                  ::SnapContext snapc, uint64_t object_no)
-    : C_AsyncObjectThrottle<I>(throttle, *image_ctx), m_snapc(snapc),
+                  IOContext io_context, uint64_t object_no)
+    : C_AsyncObjectThrottle<I>(throttle, *image_ctx), m_io_context(io_context),
       m_object_no(object_no) {
   }
 
   int send() override {
     I &image_ctx = this->m_image_ctx;
-    ceph_assert(image_ctx.owner_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
     CephContext *cct = image_ctx.cct;
 
     if (image_ctx.exclusive_lock != nullptr &&
@@ -46,7 +47,7 @@ public:
     }
 
     {
-      RWLock::RLocker snap_lock(image_ctx.snap_lock);
+      std::shared_lock image_lock{image_ctx.image_lock};
       if (image_ctx.object_map != nullptr &&
           !image_ctx.object_map->object_may_not_exist(m_object_no)) {
         // can skip because the object already exists
@@ -54,24 +55,18 @@ public:
       }
     }
 
-    bufferlist bl;
-    string oid = image_ctx.get_object_name(m_object_no);
-    auto req = new io::ObjectWriteRequest<I>(&image_ctx, oid, m_object_no, 0,
-                                             std::move(bl), m_snapc, 0, {},
-                                             this);
-    if (!req->has_parent()) {
+    if (!io::util::trigger_copyup(
+            &image_ctx, m_object_no, m_io_context, this)) {
       // stop early if the parent went away - it just means
       // another flatten finished first or the image was resized
-      delete req;
       return 1;
     }
 
-    req->send();
     return 0;
   }
 
 private:
-  ::SnapContext m_snapc;
+  IOContext m_io_context;
   uint64_t m_object_no;
 };
 
@@ -94,18 +89,19 @@ void FlattenRequest<I>::send_op() {
 template <typename I>
 void FlattenRequest<I>::flatten_objects() {
   I &image_ctx = this->m_image_ctx;
-  ceph_assert(image_ctx.owner_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
 
   CephContext *cct = image_ctx.cct;
   ldout(cct, 5) << dendl;
 
-  assert(image_ctx.owner_lock.is_locked());
+  assert(ceph_mutex_is_locked(image_ctx.owner_lock));
   auto ctx = create_context_callback<
     FlattenRequest<I>,
     &FlattenRequest<I>::handle_flatten_objects>(this);
   typename AsyncObjectThrottle<I>::ContextFactory context_factory(
     boost::lambda::bind(boost::lambda::new_ptr<C_FlattenObject<I> >(),
-      boost::lambda::_1, &image_ctx, m_snapc, boost::lambda::_2));
+      boost::lambda::_1, &image_ctx, image_ctx.get_data_io_context(),
+      boost::lambda::_2));
   AsyncObjectThrottle<I> *throttle = new AsyncObjectThrottle<I>(
     this, image_ctx, context_factory, ctx, &m_prog_ctx, 0, m_overlap_objects);
   throttle->start_ops(
@@ -137,22 +133,22 @@ void FlattenRequest<I>::detach_child() {
   CephContext *cct = image_ctx.cct;
 
   // should have been canceled prior to releasing lock
-  image_ctx.owner_lock.get_read();
+  image_ctx.owner_lock.lock_shared();
   ceph_assert(image_ctx.exclusive_lock == nullptr ||
               image_ctx.exclusive_lock->is_lock_owner());
 
   // if there are no snaps, remove from the children object as well
   // (if snapshots remain, they have their own parent info, and the child
   // will be removed when the last snap goes away)
-  image_ctx.snap_lock.get_read();
+  image_ctx.image_lock.lock_shared();
   if ((image_ctx.features & RBD_FEATURE_DEEP_FLATTEN) == 0 &&
       !image_ctx.snaps.empty()) {
-    image_ctx.snap_lock.put_read();
-    image_ctx.owner_lock.put_read();
+    image_ctx.image_lock.unlock_shared();
+    image_ctx.owner_lock.unlock_shared();
     detach_parent();
     return;
   }
-  image_ctx.snap_lock.put_read();
+  image_ctx.image_lock.unlock_shared();
 
   ldout(cct, 5) << dendl;
   auto ctx = create_context_callback<
@@ -160,7 +156,7 @@ void FlattenRequest<I>::detach_child() {
     &FlattenRequest<I>::handle_detach_child>(this);
   auto req = image::DetachChildRequest<I>::create(image_ctx, ctx);
   req->send();
-  image_ctx.owner_lock.put_read();
+  image_ctx.owner_lock.unlock_shared();
 }
 
 template <typename I>
@@ -185,21 +181,21 @@ void FlattenRequest<I>::detach_parent() {
   ldout(cct, 5) << dendl;
 
   // should have been canceled prior to releasing lock
-  image_ctx.owner_lock.get_read();
+  image_ctx.owner_lock.lock_shared();
   ceph_assert(image_ctx.exclusive_lock == nullptr ||
               image_ctx.exclusive_lock->is_lock_owner());
 
   // stop early if the parent went away - it just means
   // another flatten finished first, so this one is useless.
-  image_ctx.parent_lock.get_read();
+  image_ctx.image_lock.lock_shared();
   if (!image_ctx.parent) {
     ldout(cct, 5) << "image already flattened" << dendl;
-    image_ctx.parent_lock.put_read();
-    image_ctx.owner_lock.put_read();
+    image_ctx.image_lock.unlock_shared();
+    image_ctx.owner_lock.unlock_shared();
     this->complete(0);
     return;
   }
-  image_ctx.parent_lock.put_read();
+  image_ctx.image_lock.unlock_shared();
 
   // remove parent from this (base) image
   auto ctx = create_context_callback<
@@ -207,7 +203,7 @@ void FlattenRequest<I>::detach_parent() {
     &FlattenRequest<I>::handle_detach_parent>(this);
   auto req = image::DetachParentRequest<I>::create(image_ctx, ctx);
   req->send();
-  image_ctx.owner_lock.put_read();
+  image_ctx.owner_lock.unlock_shared();
 }
 
 template <typename I>

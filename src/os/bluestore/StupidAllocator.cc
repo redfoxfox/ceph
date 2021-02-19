@@ -10,11 +10,15 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "stupidalloc 0x" << this << " "
 
-StupidAllocator::StupidAllocator(CephContext* cct)
-  : cct(cct), num_free(0),
-    free(10),
-    last_alloc(0)
+StupidAllocator::StupidAllocator(CephContext* cct,
+                                 const std::string& name,
+                                 int64_t _size,
+                                 int64_t _block_size)
+  : Allocator(name, _size, _block_size), cct(cct), num_free(0),
+    free(10)
 {
+  ceph_assert(cct != nullptr);
+  bdev_block_size = cct->_conf->bdev_block_size;
 }
 
 StupidAllocator::~StupidAllocator()
@@ -23,7 +27,8 @@ StupidAllocator::~StupidAllocator()
 
 unsigned StupidAllocator::_choose_bin(uint64_t orig_len)
 {
-  uint64_t len = orig_len / cct->_conf->bdev_block_size;
+  ceph_assert(bdev_block_size > 0);
+  uint64_t len = orig_len / bdev_block_size;
   int bin = std::min((int)cbits(len), (int)free.size() - 1);
   ldout(cct, 30) << __func__ << " len 0x" << std::hex << orig_len
 		 << std::dec << " -> " << bin << dendl;
@@ -193,6 +198,8 @@ int64_t StupidAllocator::allocate(
   if (max_alloc_size == 0) {
     max_alloc_size = want_size;
   }
+  // cap with 32-bit val
+  max_alloc_size = std::min(max_alloc_size, 0x10000000 - alloc_unit);
 
   while (allocated_size < want_size) {
     res = allocate_int(std::min(max_alloc_size, (want_size - allocated_size)),
@@ -206,10 +213,13 @@ int64_t StupidAllocator::allocate(
     bool can_append = true;
     if (!extents->empty()) {
       bluestore_pextent_t &last_extent  = extents->back();
-      if ((last_extent.end() == offset) &&
-	  ((last_extent.length + length) <= max_alloc_size)) {
-	can_append = false;
-	last_extent.length += length;
+      if (last_extent.end() == offset) {
+        uint64_t l64 = last_extent.length;
+        l64 += length;
+        if (l64 < 0x100000000 && l64 <= max_alloc_size) {
+	  can_append = false;
+	  last_extent.length += length;
+        }
       }
     }
     if (can_append) {
@@ -248,15 +258,16 @@ uint64_t StupidAllocator::get_free()
   return num_free;
 }
 
-double StupidAllocator::get_fragmentation(uint64_t alloc_unit)
+double StupidAllocator::get_fragmentation()
 {
-  ceph_assert(alloc_unit);
+  ceph_assert(get_block_size());
   double res;
   uint64_t max_intervals = 0;
   uint64_t intervals = 0;
   {
     std::lock_guard l(lock);
-    max_intervals = p2roundup<uint64_t>(num_free, alloc_unit) / alloc_unit;
+    max_intervals = p2roundup<uint64_t>(num_free,
+                                        get_block_size()) / get_block_size();
     for (unsigned bin = 0; bin < free.size(); ++bin) {
       intervals += free[bin].num_intervals();
     }
@@ -284,6 +295,16 @@ void StupidAllocator::dump()
 	 ++p) {
       ldout(cct, 0) << __func__ << "  0x" << std::hex << p.get_start() << "~"
 	      	    << p.get_len() << std::dec << dendl;
+    }
+  }
+}
+
+void StupidAllocator::dump(std::function<void(uint64_t offset, uint64_t length)> notify)
+{
+  std::lock_guard l(lock);
+  for (unsigned bin = 0; bin < free.size(); ++bin) {
+    for (auto p = free[bin].begin(); p != free[bin].end(); ++p) {
+      notify(p.get_start(), p.get_len());
     }
   }
 }

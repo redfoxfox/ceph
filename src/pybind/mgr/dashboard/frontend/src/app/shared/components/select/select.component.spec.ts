@@ -1,10 +1,9 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ReactiveFormsModule, Validators } from '@angular/forms';
 
-import { PopoverModule } from 'ngx-bootstrap/popover';
-import { TooltipModule } from 'ngx-bootstrap/tooltip';
+import { NgbPopoverModule, NgbTooltipModule } from '@ng-bootstrap/ng-bootstrap';
 
-import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
+import { configureTestBed } from '~/testing/unit-test-helper';
 import { SelectOption } from './select-option.model';
 import { SelectComponent } from './select.component';
 
@@ -20,8 +19,7 @@ describe('SelectComponent', () => {
 
   configureTestBed({
     declarations: [SelectComponent],
-    imports: [PopoverModule.forRoot(), TooltipModule, ReactiveFormsModule],
-    providers: i18nProviders
+    imports: [NgbPopoverModule, NgbTooltipModule, ReactiveFormsModule]
   });
 
   beforeEach(() => {
@@ -29,9 +27,9 @@ describe('SelectComponent', () => {
     component = fixture.componentInstance;
     fixture.detectChanges();
     component.options = [
-      { name: 'option1', description: '', selected: false },
-      { name: 'option2', description: '', selected: false },
-      { name: 'option3', description: '', selected: false }
+      { name: 'option1', description: '', selected: false, enabled: true },
+      { name: 'option2', description: '', selected: false, enabled: true },
+      { name: 'option3', description: '', selected: false, enabled: true }
     ];
   });
 
@@ -214,7 +212,8 @@ describe('SelectComponent', () => {
       expect(component.options[0]).toEqual({
         name: 'customOption',
         description: '',
-        selected: true
+        selected: true,
+        enabled: true
       });
       expect(component.options.length).toBe(4);
       expect(component.data).toEqual(['customOption']);
@@ -235,7 +234,8 @@ describe('SelectComponent', () => {
       expect(component.options[0]).toEqual({
         name: 'customOption',
         description: '',
-        selected: false
+        selected: false,
+        enabled: true
       });
     });
 
@@ -256,7 +256,7 @@ describe('SelectComponent', () => {
     });
   });
 
-  describe('if the selection limit is reached', function() {
+  describe('if the selection limit is reached', function () {
     beforeEach(() => {
       component.selectionLimit = 2;
       component.triggerSelection(component.options[0]);

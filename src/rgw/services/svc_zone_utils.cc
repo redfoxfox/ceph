@@ -1,10 +1,13 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab ft=cpp
+
 #include "svc_zone_utils.h"
 #include "svc_rados.h"
 #include "svc_zone.h"
 
 #include "rgw/rgw_zone.h"
 
-int RGWSI_ZoneUtils::do_start()
+int RGWSI_ZoneUtils::do_start(optional_yield, const DoutPrefixProvider *dpp)
 {
   init_unique_trans_id_deps();
 

@@ -5,9 +5,11 @@
 #include "include/rados/librados.hpp"
 #include "common/dout.h"
 #include "common/errno.h"
+#include "common/Cond.h"
 #include "common/Throttle.h"
 #include "cls/rbd/cls_rbd_client.h"
 #include "osd/osd_types.h"
+#include "librbd/AsioEngine.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Utils.h"
 #include "librbd/api/Config.h"
@@ -250,12 +252,11 @@ int Pool<I>::init(librados::IoCtx& io_ctx, bool force) {
     return 0;
   }
 
-  ThreadPool *thread_pool;
-  ContextWQ *op_work_queue;
-  ImageCtx::get_thread_pool_instance(cct, &thread_pool, &op_work_queue);
+  AsioEngine asio_engine(io_ctx);
 
   C_SaferCond ctx;
-  auto req = image::ValidatePoolRequest<I>::create(io_ctx, op_work_queue, &ctx);
+  auto req = image::ValidatePoolRequest<I>::create(
+    io_ctx, asio_engine.get_work_queue(), &ctx);
   req->send();
 
   return ctx.wait();

@@ -52,24 +52,31 @@ public:
   mempool::pgmap::unordered_map<uint64_t,int32_t> num_pg_by_state;
   struct pg_count {
     int32_t acting = 0;
-    int32_t up = 0;
+    int32_t up_not_acting = 0;
     int32_t primary = 0;
     void encode(ceph::buffer::list& bl) const {
       using ceph::encode;
       encode(acting, bl);
-      encode(up, bl);
+      encode(up_not_acting, bl);
       encode(primary, bl);
     }
     void decode(ceph::buffer::list::const_iterator& p) {
       using ceph::decode;
       decode(acting, p);
-      decode(up, p);
+      decode(up_not_acting, p);
       decode(primary, p);
     }
   };
   mempool::pgmap::unordered_map<int32_t,pg_count> num_pg_by_osd;
 
   mempool::pgmap::map<int64_t,interval_set<snapid_t>> purged_snaps;
+
+  bool use_per_pool_stats() const {
+    return osd_sum.num_osds == osd_sum.num_per_pool_osds;
+  }
+  bool use_per_pool_omap_stats() const {
+    return osd_sum.num_osds == osd_sum.num_per_pool_omap_osds;
+  }
 
   // recent deltas, and summation
   /**
@@ -169,7 +176,10 @@ public:
 				   const pool_stat_t &pool_stat,
 				   uint64_t avail,
 				   float raw_used_rate,
-				   bool verbose, const pg_pool_t *pool);
+				   bool verbose,
+				   bool per_pool,
+				   bool per_pool_omap,
+				   const pg_pool_t *pool);
 
   size_t get_num_pg_by_osd(int osd) const {
     auto p = num_pg_by_osd.find(osd);
@@ -429,11 +439,12 @@ public:
   int64_t get_rule_avail(const OSDMap& osdmap, int ruleno) const;
   void get_rules_avail(const OSDMap& osdmap,
 		       std::map<int,int64_t> *avail_map) const;
-  void dump(ceph::Formatter *f) const; 
+  void dump(ceph::Formatter *f, bool with_net = true) const;
   void dump_basic(ceph::Formatter *f) const;
   void dump_pg_stats(ceph::Formatter *f, bool brief) const;
   void dump_pool_stats(ceph::Formatter *f) const;
-  void dump_osd_stats(ceph::Formatter *f) const;
+  void dump_osd_stats(ceph::Formatter *f, bool with_net = true) const;
+  void dump_osd_ping_times(ceph::Formatter *f) const;
   void dump_delta(ceph::Formatter *f) const;
   void dump_filtered_pg_stats(ceph::Formatter *f, std::set<pg_t>& pgs) const;
   void dump_pool_stats_full(const OSDMap &osd_map, std::stringstream *ss,
@@ -481,10 +492,12 @@ public:
   void get_filtered_pg_stats(uint64_t state, int64_t poolid, int64_t osdid,
                              bool primary, std::set<pg_t>& pgs) const;
 
+  std::set<std::string> osd_parentage(const OSDMap& osdmap, int id) const;
   void get_health_checks(
     CephContext *cct,
     const OSDMap& osdmap,
     health_check_map_t *checks) const;
+  void print_summary(ceph::Formatter *f, std::ostream *out) const;
 
   static void generate_test_instances(std::list<PGMap*>& o);
 };

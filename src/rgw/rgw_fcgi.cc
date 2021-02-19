@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #include "rgw_fcgi.h"
 #include "acconfig.h"
@@ -54,8 +54,8 @@ size_t RGWFCGX::send_100_continue()
   return sent;
 }
 
-size_t RGWFCGX::send_header(const boost::string_ref& name,
-                            const boost::string_ref& value)
+size_t RGWFCGX::send_header(const std::string_view& name,
+                            const std::string_view& value)
 {
   static constexpr char HEADER_SEP[] = ": ";
   static constexpr char HEADER_END[] = "\r\n";

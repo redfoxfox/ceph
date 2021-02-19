@@ -30,10 +30,10 @@ struct ECSubWrite {
   eversion_t at_version;
   eversion_t trim_to;
   eversion_t roll_forward_to;
-  vector<pg_log_entry_t> log_entries;
+  std::vector<pg_log_entry_t> log_entries;
   std::set<hobject_t> temp_added;
   std::set<hobject_t> temp_removed;
-  boost::optional<pg_hit_set_history_t> updated_hit_set_history;
+  std::optional<pg_hit_set_history_t> updated_hit_set_history;
   bool backfill_or_async_recovery = false;
   ECSubWrite() : tid(0) {}
   ECSubWrite(
@@ -46,8 +46,8 @@ struct ECSubWrite {
     eversion_t at_version,
     eversion_t trim_to,
     eversion_t roll_forward_to,
-    vector<pg_log_entry_t> log_entries,
-    boost::optional<pg_hit_set_history_t> updated_hit_set_history,
+    std::vector<pg_log_entry_t> log_entries,
+    std::optional<pg_hit_set_history_t> updated_hit_set_history,
     const std::set<hobject_t> &temp_added,
     const std::set<hobject_t> &temp_removed,
     bool backfill_or_async_recovery)
@@ -119,7 +119,7 @@ struct ECSubReadReply {
   pg_shard_t from;
   ceph_tid_t tid;
   std::map<hobject_t, std::list<std::pair<uint64_t, ceph::buffer::list> >> buffers_read;
-  std::map<hobject_t, std::map<string, ceph::buffer::list>> attrs_read;
+  std::map<hobject_t, std::map<std::string, ceph::buffer::list>> attrs_read;
   std::map<hobject_t, int> errors;
   void encode(ceph::buffer::list &bl) const;
   void decode(ceph::buffer::list::const_iterator &bl);

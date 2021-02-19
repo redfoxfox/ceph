@@ -8,7 +8,6 @@ try:
 except ImportError:
     from urllib.parse import urlparse
 
-from .orchestrator import OrchClient
 from .. import mgr
 
 
@@ -42,12 +41,36 @@ _ISCSI_STORE_KEY = "_iscsi_config"
 
 class IscsiGatewaysConfig(object):
     @classmethod
-    def _load_config(cls):
-        if OrchClient.instance().available():
-            raise ManagedByOrchestratorException()
+    def _load_config_from_store(cls):
         json_db = mgr.get_store(_ISCSI_STORE_KEY,
                                 '{"gateways": {}}')
-        return json.loads(json_db)
+        config = json.loads(json_db)
+        cls.update_iscsi_config(config)
+        return config
+
+    @classmethod
+    def update_iscsi_config(cls, config):
+        """
+        Since `ceph-iscsi` config v10, gateway names were renamed from host short name to FQDN.
+        If Ceph Dashboard were configured before v10, we try to update our internal gateways
+        database automatically.
+        """
+        for gateway_name, gateway_config in config['gateways'].items():
+            if '.' not in gateway_name:
+                from ..rest_client import RequestException
+                from .iscsi_client import IscsiClient  # pylint: disable=cyclic-import
+                try:
+                    service_url = gateway_config['service_url']
+                    new_gateway_name = IscsiClient.instance(
+                        service_url=service_url).get_hostname()['data']
+                    if gateway_name != new_gateway_name:
+                        config['gateways'][new_gateway_name] = gateway_config
+                        del config['gateways'][gateway_name]
+                        cls._save_config(config)
+                except RequestException:
+                    # If gateway is not acessible, it should be removed manually
+                    # or we will try to update automatically next time
+                    continue
 
     @classmethod
     def _save_config(cls, config):
@@ -61,7 +84,7 @@ class IscsiGatewaysConfig(object):
 
     @classmethod
     def add_gateway(cls, name, service_url):
-        config = cls._load_config()
+        config = cls.get_gateways_config()
         if name in config:
             raise IscsiGatewayAlreadyExists(name)
         IscsiGatewaysConfig.validate_service_url(service_url)
@@ -70,7 +93,7 @@ class IscsiGatewaysConfig(object):
 
     @classmethod
     def remove_gateway(cls, name):
-        config = cls._load_config()
+        config = cls._load_config_from_store()
         if name not in config['gateways']:
             raise IscsiGatewayDoesNotExist(name)
 
@@ -79,16 +102,7 @@ class IscsiGatewaysConfig(object):
 
     @classmethod
     def get_gateways_config(cls):
-        try:
-            config = cls._load_config()
-        except ManagedByOrchestratorException:
-            config = {'gateways': {}}
-            instances = OrchClient.instance().list_service_info("iscsi")
-            for instance in instances:
-                config['gateways'][instance.nodename] = {
-                    'service_url': instance.service_url
-                }
-        return config
+        return cls._load_config_from_store()
 
     @classmethod
     def get_gateway_config(cls, name):

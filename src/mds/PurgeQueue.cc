@@ -19,8 +19,6 @@
 
 #include "PurgeQueue.h"
 
-#include <string.h>
-
 #define dout_context cct
 #define dout_subsys ceph_subsys_mds
 #undef dout_prefix
@@ -57,21 +55,49 @@ void PurgeItem::encode(bufferlist &bl) const
 void PurgeItem::decode(bufferlist::const_iterator &p)
 {
   DECODE_START(2, p);
-  decode((uint8_t&)action, p);
-  decode(ino, p);
-  decode(size, p);
-  decode(layout, p);
-  decode(old_pools, p);
-  decode(snapc, p);
-  decode(fragtree, p);
-  if (struct_v >= 2) {
-    decode(stamp, p);
+  bool done = false;
+  if (struct_v == 1) {
+    auto p_start = p;
+    try {
+      // bad encoding introduced by v13.2.2
+      decode(stamp, p);
+      decode(pad_size, p);
+      p += pad_size;
+      uint8_t raw_action;
+      decode(raw_action, p);
+      action = (Action)raw_action;
+      decode(ino, p);
+      decode(size, p);
+      decode(layout, p);
+      decode(old_pools, p);
+      decode(snapc, p);
+      decode(fragtree, p);
+      if (p.get_off() > struct_end)
+	throw buffer::end_of_buffer();
+      done = true;
+    } catch (const buffer::error &e) {
+      p = p_start;
+    }
+  }
+  if (!done) {
+    uint8_t raw_action;
+    decode(raw_action, p);
+    action = (Action)raw_action;
+    decode(ino, p);
+    decode(size, p);
+    decode(layout, p);
+    decode(old_pools, p);
+    decode(snapc, p);
+    decode(fragtree, p);
+    if (struct_v >= 2) {
+      decode(stamp, p);
+    }
   }
   DECODE_FINISH(p);
 }
 
-// TODO: if Objecter has any slow requests, take that as a hint and
-// slow down our rate of purging (keep accepting pushes though)
+// if Objecter has any slow requests, take that as a hint and
+// slow down our rate of purging
 PurgeQueue::PurgeQueue(
       CephContext *cct_,
       mds_rank_t rank_,
@@ -81,7 +107,6 @@ PurgeQueue::PurgeQueue(
   :
     cct(cct_),
     rank(rank_),
-    lock("PurgeQueue"),
     metadata_pool(metadata_pool_),
     finisher(cct, "PurgeQueue", "PQ_Finisher"),
     timer(cct, lock),
@@ -90,13 +115,7 @@ PurgeQueue::PurgeQueue(
     journaler("pq", MDS_INO_PURGE_QUEUE + rank, metadata_pool,
       CEPH_FS_ONDISK_MAGIC, objecter_, nullptr, 0,
       &finisher),
-    on_error(on_error_),
-    ops_in_flight(0),
-    max_purge_ops(0),
-    drain_initial(0),
-    draining(false),
-    delayed_flush(nullptr),
-    recovered(false)
+    on_error(on_error_)
 {
   ceph_assert(cct != nullptr);
   ceph_assert(on_error != nullptr);
@@ -121,7 +140,10 @@ void PurgeQueue::create_logger()
 
   pcb.set_prio_default(PerfCountersBuilder::PRIO_USEFUL);
   pcb.add_u64(l_pq_executing_ops, "pq_executing_ops", "Purge queue ops in flight");
+  pcb.add_u64(l_pq_executing_ops_high_water, "pq_executing_ops_high_water", "Maximum number of executing file purge ops");
   pcb.add_u64(l_pq_executing, "pq_executing", "Purge queue tasks in flight");
+  pcb.add_u64(l_pq_executing_high_water, "pq_executing_high_water", "Maximum number of executing file purges");
+  pcb.add_u64(l_pq_item_in_journal, "pq_item_in_journal", "Purge item left in journal");
 
   logger.reset(pcb.create_perf_counters());
   g_ceph_context->get_perfcounters_collection()->add(logger.get());
@@ -141,6 +163,16 @@ void PurgeQueue::activate()
 {
   std::lock_guard l(lock);
 
+  {
+    PurgeItem item;
+    bufferlist bl;
+
+    // calculate purge item serialized size stored in journal
+    // used to count how many items still left in journal later
+    ::encode(item, bl);
+    purge_item_journal_size = bl.length() + journaler.get_journal_envelope_size(); 
+  }
+
   if (readonly) {
     dout(10) << "skipping activate: PurgeQueue is readonly" << dendl;
     return;
@@ -151,7 +183,7 @@ void PurgeQueue::activate()
 
   if (in_flight.empty()) {
     dout(4) << "start work (by drain)" << dendl;
-    finisher.queue(new FunctionContext([this](int r) {
+    finisher.queue(new LambdaContext([this](int r) {
 	  std::lock_guard l(lock);
 	  _consume();
 	  }));
@@ -176,7 +208,7 @@ void PurgeQueue::open(Context *completion)
   if (completion)
     waiting_for_recovery.push_back(completion);
 
-  journaler.recover(new FunctionContext([this](int r){
+  journaler.recover(new LambdaContext([this](int r){
     if (r == -ENOENT) {
       dout(1) << "Purge Queue not found, assuming this is an upgrade and "
                  "creating it." << dendl;
@@ -220,14 +252,14 @@ void PurgeQueue::wait_for_recovery(Context* c)
 
 void PurgeQueue::_recover()
 {
-  ceph_assert(lock.is_locked_by_me());
+  ceph_assert(ceph_mutex_is_locked_by_me(lock));
 
   // Journaler::is_readable() adjusts write_pos if partial entry is encountered
   while (1) {
     if (!journaler.is_readable() &&
 	!journaler.get_error() &&
 	journaler.get_read_pos() < journaler.get_write_pos()) {
-      journaler.wait_for_readable(new FunctionContext([this](int r) {
+      journaler.wait_for_readable(new LambdaContext([this](int r) {
         std::lock_guard l(lock);
 	_recover();
       }));
@@ -269,7 +301,7 @@ void PurgeQueue::create(Context *fin)
   layout.pool_id = metadata_pool;
   journaler.set_writeable();
   journaler.create(&layout, JOURNAL_FORMAT_RESILIENT);
-  journaler.write_head(new FunctionContext([this](int r) {
+  journaler.write_head(new LambdaContext([this](int r) {
     std::lock_guard l(lock);
     if (r) {
       _go_readonly(r);
@@ -312,7 +344,7 @@ void PurgeQueue::push(const PurgeItem &pi, Context *completion)
     // we should flush in order to allow MDCache to drop its strays rather
     // than having them wait for purgequeue to progress.
     if (!delayed_flush) {
-      delayed_flush = new FunctionContext([this](int r){
+      delayed_flush = new LambdaContext([this](int r){
             delayed_flush = nullptr;
             journaler.flush();
           });
@@ -337,13 +369,11 @@ uint32_t PurgeQueue::_calculate_ops(const PurgeItem &item) const
     ops_required = 1 + leaves.size();
   } else {
     // File, work out concurrent Filer::purge deletes
+    // Account for removing (or zeroing) backtrace
     const uint64_t num = (item.size > 0) ?
       Striper::get_num_objects(item.layout, item.size) : 1;
 
     ops_required = std::min(num, g_conf()->filer_max_purge_ops);
-
-    // Account for removing (or zeroing) backtrace
-    ops_required += 1;
 
     // Account for deletions for old pools
     if (item.action != PurgeItem::TRUNCATE_FILE) {
@@ -393,7 +423,7 @@ void PurgeQueue::_go_readonly(int r)
   if (readonly) return;
   dout(1) << "going readonly because internal IO failed: " << strerror(-r) << dendl;
   readonly = true;
-  on_error->complete(r);
+  finisher.queue(on_error, r);
   on_error = nullptr;
   journaler.set_readonly();
   finish_contexts(g_ceph_context, waiting_for_recovery, r);
@@ -401,7 +431,7 @@ void PurgeQueue::_go_readonly(int r)
 
 bool PurgeQueue::_consume()
 {
-  ceph_assert(lock.is_locked_by_me());
+  ceph_assert(ceph_mutex_is_locked_by_me(lock));
 
   bool could_consume = false;
   while(_can_consume()) {
@@ -425,7 +455,7 @@ bool PurgeQueue::_consume()
       // Because we are the writer and the reader of the journal
       // via the same Journaler instance, we never need to reread_head
       if (!journaler.have_waiter()) {
-        journaler.wait_for_readable(new FunctionContext([this](int r) {
+        journaler.wait_for_readable(new LambdaContext([this](int r) {
           std::lock_guard l(lock);
           if (r == 0) {
             _consume();
@@ -463,40 +493,136 @@ bool PurgeQueue::_consume()
   return could_consume;
 }
 
+class C_IO_PurgeItem_Commit : public Context {
+public:
+  C_IO_PurgeItem_Commit(PurgeQueue *pq, std::vector<PurgeItemCommitOp> ops, uint64_t expire_to)
+    : purge_queue(pq), ops_vec(std::move(ops)), expire_to(expire_to) {
+  }
+
+  void finish(int r) override {
+    purge_queue->_commit_ops(r, ops_vec, expire_to);
+  }
+
+private:
+  PurgeQueue *purge_queue;
+  std::vector<PurgeItemCommitOp> ops_vec;
+  uint64_t expire_to;
+};
+
+void PurgeQueue::_commit_ops(int r, const std::vector<PurgeItemCommitOp>& ops_vec, uint64_t expire_to)
+{
+  if (r < 0) {
+    derr << " r = " << r << dendl;
+    return;
+  }
+
+  SnapContext nullsnapc;
+  C_GatherBuilder gather(cct);
+
+  for (auto &op : ops_vec) {
+    dout(10) << op.item.get_type_str() << dendl;
+    if (op.type == PurgeItemCommitOp::PURGE_OP_RANGE) {
+      uint64_t first_obj = 0, num_obj = 0;
+      uint64_t num = Striper::get_num_objects(op.item.layout, op.item.size);
+      num_obj = num;
+
+      if (op.item.action == PurgeItem::TRUNCATE_FILE) {
+        first_obj = 1;
+        if (num > 1)
+          num_obj = num - 1;
+        else
+          continue;
+      }
+
+      filer.purge_range(op.item.ino, &op.item.layout, op.item.snapc,
+                        first_obj, num_obj, ceph::real_clock::now(), op.flags,
+                        gather.new_sub());
+    } else if (op.type == PurgeItemCommitOp::PURGE_OP_REMOVE) {
+      if (op.item.action == PurgeItem::PURGE_DIR) {
+        objecter->remove(op.oid, op.oloc, nullsnapc,
+                         ceph::real_clock::now(), op.flags,
+                         gather.new_sub());
+      } else {
+        objecter->remove(op.oid, op.oloc, op.item.snapc,
+                         ceph::real_clock::now(), op.flags,
+                         gather.new_sub());
+      }
+    } else if (op.type == PurgeItemCommitOp::PURGE_OP_ZERO) {
+      filer.zero(op.item.ino, &op.item.layout, op.item.snapc,
+                 0, op.item.layout.object_size, ceph::real_clock::now(), 0, true,
+                 gather.new_sub());
+    } else {
+      derr << "Invalid purge op: " << op.type << dendl;
+      ceph_abort();
+    }
+  }
+
+  ceph_assert(gather.has_subs());
+
+  gather.set_finisher(new C_OnFinisher(
+	              new LambdaContext([this, expire_to](int r) {
+    std::lock_guard l(lock);
+
+    if (r == -EBLOCKLISTED) {
+      finisher.queue(on_error, r);
+      on_error = nullptr;
+      return;
+    }
+
+    _execute_item_complete(expire_to);
+    _consume();
+
+    // Have we gone idle?  If so, do an extra write_head now instead of
+    // waiting for next flush after journaler_write_head_interval.
+    // Also do this periodically even if not idle, so that the persisted
+    // expire_pos doesn't fall too far behind our progress when consuming
+    // a very long queue.
+    if (!readonly &&
+        (in_flight.empty() || journaler.write_head_needed())) {
+      journaler.write_head(nullptr);
+    }
+  }), &finisher));
+
+  gather.activate();
+}
+
 void PurgeQueue::_execute_item(
     const PurgeItem &item,
     uint64_t expire_to)
 {
-  ceph_assert(lock.is_locked_by_me());
+  ceph_assert(ceph_mutex_is_locked_by_me(lock));
 
   in_flight[expire_to] = item;
   logger->set(l_pq_executing, in_flight.size());
+  files_high_water = std::max(files_high_water,
+                              static_cast<uint64_t>(in_flight.size()));
+  logger->set(l_pq_executing_high_water, files_high_water);
   auto ops = _calculate_ops(item);
   ops_in_flight += ops;
   logger->set(l_pq_executing_ops, ops_in_flight);
+  ops_high_water = std::max(ops_high_water, ops_in_flight);
+  logger->set(l_pq_executing_ops_high_water, ops_high_water);
 
-  SnapContext nullsnapc;
+  std::vector<PurgeItemCommitOp> ops_vec;
+  auto submit_ops = [&]() {
+    finisher.queue(new C_IO_PurgeItem_Commit(this, std::move(ops_vec), expire_to));
+  };
 
-  C_GatherBuilder gather(cct);
   if (item.action == PurgeItem::PURGE_FILE) {
     if (item.size > 0) {
       uint64_t num = Striper::get_num_objects(item.layout, item.size);
       dout(10) << " 0~" << item.size << " objects 0~" << num
                << " snapc " << item.snapc << " on " << item.ino << dendl;
-      filer.purge_range(item.ino, &item.layout, item.snapc,
-                        0, num, ceph::real_clock::now(), 0,
-                        gather.new_sub());
+      ops_vec.emplace_back(item, PurgeItemCommitOp::PURGE_OP_RANGE, 0);
     }
 
     // remove the backtrace object if it was not purged
     object_t oid = CInode::get_object_name(item.ino, frag_t(), "");
-    if (!gather.has_subs() || !item.layout.pool_ns.empty()) {
+    if (ops_vec.empty() || !item.layout.pool_ns.empty()) {
       object_locator_t oloc(item.layout.pool_id);
       dout(10) << " remove backtrace object " << oid
                << " pool " << oloc.pool << " snapc " << item.snapc << dendl;
-      objecter->remove(oid, oloc, item.snapc,
-                            ceph::real_clock::now(), 0,
-                            gather.new_sub());
+      ops_vec.emplace_back(item, PurgeItemCommitOp::PURGE_OP_REMOVE, 0, oid, oloc);
     }
 
     // remove old backtrace objects
@@ -504,9 +630,7 @@ void PurgeQueue::_execute_item(
       object_locator_t oloc(p);
       dout(10) << " remove backtrace object " << oid
                << " old pool " << p << " snapc " << item.snapc << dendl;
-      objecter->remove(oid, oloc, item.snapc,
-                            ceph::real_clock::now(), 0,
-                            gather.new_sub());
+      ops_vec.emplace_back(item, PurgeItemCommitOp::PURGE_OP_REMOVE, 0, oid, oloc);
     }
   } else if (item.action == PurgeItem::PURGE_DIR) {
     object_locator_t oloc(metadata_pool);
@@ -517,9 +641,7 @@ void PurgeQueue::_execute_item(
     for (const auto &leaf : leaves) {
       object_t oid = CInode::get_object_name(item.ino, leaf, "");
       dout(10) << " remove dirfrag " << oid << dendl;
-      objecter->remove(oid, oloc, nullsnapc,
-                       ceph::real_clock::now(),
-                       0, gather.new_sub());
+      ops_vec.emplace_back(item, PurgeItemCommitOp::PURGE_OP_REMOVE, 0, oid, oloc);
     }
   } else if (item.action == PurgeItem::TRUNCATE_FILE) {
     const uint64_t num = Striper::get_num_objects(item.layout, item.size);
@@ -528,49 +650,31 @@ void PurgeQueue::_execute_item(
 
     // keep backtrace object
     if (num > 1) {
-      filer.purge_range(item.ino, &item.layout, item.snapc,
-			1, num - 1, ceph::real_clock::now(),
-			0, gather.new_sub());
+      ops_vec.emplace_back(item, PurgeItemCommitOp::PURGE_OP_RANGE, 0);
     }
-    filer.zero(item.ino, &item.layout, item.snapc,
-	       0, item.layout.object_size,
-	       ceph::real_clock::now(),
-	       0, true, gather.new_sub());
+    ops_vec.emplace_back(item, PurgeItemCommitOp::PURGE_OP_ZERO, 0);
   } else {
     derr << "Invalid item (action=" << item.action << ") in purge queue, "
             "dropping it" << dendl;
     ops_in_flight -= ops;
     logger->set(l_pq_executing_ops, ops_in_flight);
+    ops_high_water = std::max(ops_high_water, ops_in_flight);
+    logger->set(l_pq_executing_ops_high_water, ops_high_water);
     in_flight.erase(expire_to);
     logger->set(l_pq_executing, in_flight.size());
+    files_high_water = std::max(files_high_water,
+                                static_cast<uint64_t>(in_flight.size()));
+    logger->set(l_pq_executing_high_water, files_high_water);
     return;
   }
-  ceph_assert(gather.has_subs());
 
-  gather.set_finisher(new C_OnFinisher(
-                      new FunctionContext([this, expire_to](int r){
-    std::lock_guard l(lock);
-    _execute_item_complete(expire_to);
-
-    _consume();
-
-    // Have we gone idle?  If so, do an extra write_head now instead of
-    // waiting for next flush after journaler_write_head_interval.
-    // Also do this periodically even if not idle, so that the persisted
-    // expire_pos doesn't fall too far behind our progress when consuming
-    // a very long queue.
-    if (in_flight.empty() || journaler.write_head_needed()) {
-      journaler.write_head(nullptr);
-    }
-  }), &finisher));
-
-  gather.activate();
+  submit_ops();
 }
 
 void PurgeQueue::_execute_item_complete(
     uint64_t expire_to)
 {
-  ceph_assert(lock.is_locked_by_me());
+  ceph_assert(ceph_mutex_is_locked_by_me(lock));
   dout(10) << "complete at 0x" << std::hex << expire_to << std::dec << dendl;
   ceph_assert(in_flight.count(expire_to) == 1);
 
@@ -605,13 +709,29 @@ void PurgeQueue::_execute_item_complete(
 
   ops_in_flight -= _calculate_ops(iter->second);
   logger->set(l_pq_executing_ops, ops_in_flight);
+  ops_high_water = std::max(ops_high_water, ops_in_flight);
+  logger->set(l_pq_executing_ops_high_water, ops_high_water);
 
   dout(10) << "completed item for ino " << iter->second.ino << dendl;
 
   in_flight.erase(iter);
   logger->set(l_pq_executing, in_flight.size());
+  files_high_water = std::max(files_high_water,
+                              static_cast<uint64_t>(in_flight.size()));
+  logger->set(l_pq_executing_high_water, files_high_water);
   dout(10) << "in_flight.size() now " << in_flight.size() << dendl;
 
+  uint64_t write_pos = journaler.get_write_pos(); 
+  uint64_t read_pos = journaler.get_read_pos(); 
+  uint64_t expire_pos = journaler.get_expire_pos(); 
+  uint64_t item_num = (write_pos - (in_flight.size() ? expire_pos : read_pos)) 
+		      / purge_item_journal_size;
+  dout(10) << "left purge items in journal: " << item_num 
+    << " (purge_item_journal_size/write_pos/read_pos/expire_pos) now at " 
+    << "(" << purge_item_journal_size << "/" << write_pos << "/" << read_pos 
+    << "/" << expire_pos << ")" << dendl;
+
+  logger->set(l_pq_item_in_journal, item_num);
   logger->inc(l_pq_executed);
 }
 
@@ -651,9 +771,7 @@ void PurgeQueue::update_op_limit(const MDSMap &mds_map)
   }
 }
 
-void PurgeQueue::handle_conf_change(const ConfigProxy& conf,
-			     const std::set <std::string> &changed,
-                             const MDSMap &mds_map)
+void PurgeQueue::handle_conf_change(const std::set<std::string>& changed, const MDSMap& mds_map)
 {
   if (changed.count("mds_max_purge_ops")
       || changed.count("mds_max_purge_ops_per_pg")) {
@@ -664,8 +782,8 @@ void PurgeQueue::handle_conf_change(const ConfigProxy& conf,
       // We might have gone from zero to a finite limit, so
       // might need to kick off consume.
       dout(4) << "maybe start work again (max_purge_files="
-              << conf->mds_max_purge_files << dendl;
-      finisher.queue(new FunctionContext([this](int r){
+              << g_conf()->mds_max_purge_files << dendl;
+      finisher.queue(new LambdaContext([this](int r){
         std::lock_guard l(lock);
         _consume();
       }));

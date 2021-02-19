@@ -20,7 +20,6 @@
 
 #include "common/cmdparse.h"
 #include "common/LogEntry.h"
-#include "common/Mutex.h"
 #include "common/Thread.h"
 #include "mon/health_check.h"
 #include "mgr/Gil.h"
@@ -33,6 +32,8 @@
 
 class ActivePyModule;
 class ActivePyModules;
+class MgrSession;
+class ModuleCommand;
 
 class ActivePyModule : public PyModuleRunner
 {
@@ -41,6 +42,9 @@ private:
 
   // Optional, URI exposed by plugins that implement serve()
   std::string uri;
+
+  std::string m_command_perms;
+  const MgrSession* m_session = nullptr;
 
 public:
   ActivePyModule(const PyModuleRef &py_module_,
@@ -61,6 +65,8 @@ public:
       std::string *err);
 
   int handle_command(
+    const ModuleCommand& module_command,
+    const MgrSession& session,
     const cmdmap_t &cmdmap,
     const bufferlist &inbuf,
     std::stringstream *ds,
@@ -87,6 +93,9 @@ public:
   {
     return uri;
   }
+
+  bool is_authorized(const std::map<std::string, std::string>& arguments) const;
+
 };
 
 std::string handle_pyerror();

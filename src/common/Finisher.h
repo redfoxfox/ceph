@@ -16,12 +16,12 @@
 #define CEPH_FINISHER_H
 
 #include "include/Context.h"
+#include "include/common_fwd.h"
 #include "common/Thread.h"
 #include "common/ceph_mutex.h"
 #include "common/perf_counters.h"
 #include "common/Cond.h"
 
-class CephContext;
 
 /// Finisher queue length performance counter ID.
 enum {
@@ -47,6 +47,7 @@ class Finisher {
 
   /// Queue for contexts for which complete(0) will be called.
   std::vector<std::pair<Context*,int>> finisher_queue;
+  std::vector<std::pair<Context*,int>> in_progress_queue;
 
   std::string thread_name;
 
@@ -66,10 +67,11 @@ class Finisher {
   /// Add a context to complete, optionally specifying a parameter for the complete function.
   void queue(Context *c, int r = 0) {
     std::unique_lock ul(finisher_lock);
-    if (finisher_queue.empty()) {
-      finisher_cond.notify_all();
-    }
+    bool was_empty = finisher_queue.empty();
     finisher_queue.push_back(std::make_pair(c, r));
+    if (was_empty) {
+      finisher_cond.notify_one();
+    }
     if (logger)
       logger->inc(l_finisher_queue_len);
   }
@@ -193,24 +195,26 @@ class ContextQueue {
   std::mutex q_mutex;
   ceph::mutex& mutex;
   ceph::condition_variable& cond;
+  std::atomic_bool q_empty = true;
 public:
   ContextQueue(ceph::mutex& mut,
 	       ceph::condition_variable& con)
     : mutex(mut), cond(con) {}
 
   void queue(std::list<Context *>& ls) {
-    bool empty = false;
+    bool was_empty = false;
     {
       std::scoped_lock l(q_mutex);
       if (q.empty()) {
 	q.swap(ls);
-	empty = true;
+	was_empty = true;
       } else {
 	q.insert(q.end(), ls.begin(), ls.end());
       }
+      q_empty = q.empty();
     }
 
-    if (empty) {
+    if (was_empty) {
       std::scoped_lock l{mutex};
       cond.notify_all();
     }
@@ -218,17 +222,17 @@ public:
     ls.clear();
   }
 
-  void swap(std::list<Context *>& ls) {
+  void move_to(std::list<Context *>& ls) {
     ls.clear();
     std::scoped_lock l(q_mutex);
     if (!q.empty()) {
       q.swap(ls);
     }
+    q_empty = true;
   }
 
   bool empty() {
-    std::scoped_lock l(q_mutex);
-    return q.empty();
+    return q_empty;
   }
 };
 

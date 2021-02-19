@@ -1,14 +1,13 @@
 import { Component, EventEmitter, Output } from '@angular/core';
 import { Validators } from '@angular/forms';
 
-import { I18n } from '@ngx-translate/i18n-polyfill';
-import * as _ from 'lodash';
-import { BsModalRef } from 'ngx-bootstrap/modal';
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
+import _ from 'lodash';
 
-import { ActionLabelsI18n } from '../../../shared/constants/app.constants';
-import { CdFormBuilder } from '../../../shared/forms/cd-form-builder';
-import { CdFormGroup } from '../../../shared/forms/cd-form-group';
-import { CdValidators } from '../../../shared/forms/cd-validators';
+import { ActionLabelsI18n } from '~/app/shared/constants/app.constants';
+import { CdFormBuilder } from '~/app/shared/forms/cd-form-builder';
+import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
+import { CdValidators } from '~/app/shared/forms/cd-validators';
 import { RgwUserS3Key } from '../models/rgw-user-s3-key';
 
 @Component({
@@ -31,13 +30,11 @@ export class RgwUserS3KeyModalComponent {
 
   constructor(
     private formBuilder: CdFormBuilder,
-    public bsModalRef: BsModalRef,
-    private i18n: I18n,
+    public activeModal: NgbActiveModal,
     public actionLabels: ActionLabelsI18n
   ) {
-    this.resource = this.i18n('S3 Key');
+    this.resource = $localize`S3 Key`;
     this.createForm();
-    this.listenToChanges();
   }
 
   createForm() {
@@ -49,17 +46,6 @@ export class RgwUserS3KeyModalComponent {
     });
   }
 
-  listenToChanges() {
-    // Reset the validation status of various controls, especially those that are using
-    // the 'requiredIf' validator. This is necessary because the controls itself are not
-    // validated again if the status of their prerequisites have been changed.
-    this.formGroup.get('generate_key').valueChanges.subscribe(() => {
-      ['access_key', 'secret_key'].forEach((path) => {
-        this.formGroup.get(path).updateValueAndValidity({ onlySelf: true });
-      });
-    });
-  }
-
   /**
    * Set the 'viewing' flag. If set to TRUE, the modal dialog is in 'View' mode,
    * otherwise in 'Add' mode. According to the mode the dialog and its controls
@@ -67,8 +53,8 @@ export class RgwUserS3KeyModalComponent {
    * @param {boolean} viewing
    */
   setViewing(viewing: boolean = true) {
-    this.action = this.actionLabels.SHOW;
     this.viewing = viewing;
+    this.action = this.viewing ? this.actionLabels.SHOW : this.actionLabels.CREATE;
   }
 
   /**
@@ -93,6 +79,6 @@ export class RgwUserS3KeyModalComponent {
   onSubmit() {
     const key: RgwUserS3Key = this.formGroup.value;
     this.submitAction.emit(key);
-    this.bsModalRef.hide();
+    this.activeModal.close();
   }
 }

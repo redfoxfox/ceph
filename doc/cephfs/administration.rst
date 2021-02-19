@@ -3,16 +3,19 @@
 CephFS Administrative commands
 ==============================
 
-Filesystems
------------
+File Systems
+------------
 
-These commands operate on the CephFS filesystems in your Ceph cluster.
-Note that by default only one filesystem is permitted: to enable
-creation of multiple filesystems use ``ceph fs flag set enable_multiple true``.
+.. note:: The names of the file systems, metadata pools, and data pools can
+          only have characters in the set [a-zA-Z0-9\_-.].
+
+These commands operate on the CephFS file systems in your Ceph cluster.
+Note that by default only one file system is permitted: to enable
+creation of multiple file systems use ``ceph fs flag set enable_multiple true``.
 
 ::
 
-    fs new <filesystem name> <metadata pool name> <data pool name>
+    fs new <file system name> <metadata pool name> <data pool name>
 
 This command creates a new file system. The file system name and metadata pool
 name are self-explanatory. The specified data pool is the default data pool and
@@ -37,7 +40,7 @@ standby MDS daemons.
 
 ::
 
-    fs rm <filesystem name> [--yes-i-really-mean-it]
+    fs rm <file system name> [--yes-i-really-mean-it]
 
 Destroy a CephFS file system. This wipes information about the state of the
 file system from the FSMap. The metadata pool and data pools are untouched and
@@ -45,28 +48,28 @@ must be destroyed separately.
 
 ::
 
-    fs get <filesystem name>
+    fs get <file system name>
 
 Get information about the named file system, including settings and ranks. This
 is a subset of the same information from the ``fs dump`` command.
 
 ::
 
-    fs set <filesystem name> <var> <val>
+    fs set <file system name> <var> <val>
 
 Change a setting on a file system. These settings are specific to the named
 file system and do not affect other file systems.
 
 ::
 
-    fs add_data_pool <filesystem name> <pool name/id>
+    fs add_data_pool <file system name> <pool name/id>
 
 Add a data pool to the file system. This pool can be used for file layouts
 as an alternate location to store file data.
 
 ::
 
-    fs rm_data_pool <filesystem name> <pool name/id>
+    fs rm_data_pool <file system name> <pool name/id>
 
 This command removes the specified pool from the list of data pools for the
 file system.  If any files have layouts for the removed data pool, the file
@@ -213,6 +216,119 @@ does not change a MDS; it manipulates the file system rank which has been
 marked damaged.
 
 
+Minimum Client Version
+----------------------
+
+It is sometimes desirable to set the minimum version of Ceph that a client must be
+running to connect to a CephFS cluster. Older clients may sometimes still be
+running with bugs that can cause locking issues between clients (due to
+capability release). CephFS provides a mechanism to set the minimum
+client version:
+
+::
+
+    fs set <fs name> min_compat_client <release>
+
+For example, to only allow Nautilus clients, use:
+
+::
+
+    fs set cephfs min_compat_client nautilus
+
+Clients running an older version will be automatically evicted.
+
+Enforcing minimum version of CephFS client is achieved by setting required
+client features. Commands to manipulate required client features of a file
+system:
+
+::
+
+    fs required_client_features <fs name> add reply_encoding
+    fs required_client_features <fs name> rm reply_encoding
+
+To list all CephFS features
+
+::
+
+    fs feature ls
+
+
+CephFS features and first release they came out.
+
++------------------+--------------+-----------------+
+| Feature          | Ceph release | Upstream Kernel |
++==================+==============+=================+
+| jewel            | jewel        | 4.5             |
++------------------+--------------+-----------------+
+| kraken           | kraken       | 4.13            |
++------------------+--------------+-----------------+
+| luminous         | luminous     | 4.13            |
++------------------+--------------+-----------------+
+| mimic            | mimic        | 4.19            |
++------------------+--------------+-----------------+
+| reply_encoding   | nautilus     | 5.1             |
++------------------+--------------+-----------------+
+| reclaim_client   | nautilus     | N/A             |
++------------------+--------------+-----------------+
+| lazy_caps_wanted | nautilus     | 5.1             |
++------------------+--------------+-----------------+
+| multi_reconnect  | nautilus     | 5.1             |
++------------------+--------------+-----------------+
+| deleg_ino        | octopus      | 5.6             |
++------------------+--------------+-----------------+
+| metric_collect   | pacific      | N/A             |
++------------------+--------------+-----------------+
+
+CephFS Feature Descriptions
+
+
+::
+
+    reply_encoding
+
+MDS encodes request reply in extensible format if client supports this feature.
+
+
+::
+
+    reclaim_client
+
+MDS allows new client to reclaim another (dead) client's states. This feature
+is used by NFS-Ganesha.
+
+
+::
+
+    lazy_caps_wanted
+
+When a stale client resumes, if the client supports this feature, mds only needs
+to re-issue caps that are explicitly wanted.
+
+
+::
+
+    multi_reconnect
+
+When mds failover, client sends reconnect messages to mds, to reestablish cache
+states. If MDS supports this feature, client can split large reconnect message
+into multiple ones.
+
+
+::
+
+    deleg_ino
+
+MDS delegate inode numbers to client if client supports this feature. Having
+delegated inode numbers is a prerequisite for client to do async file creation.
+
+
+::
+
+    metric_collect
+
+Clients can send performance metric to MDS if MDS support this feature.
+
+
 Global settings
 ---------------
 
@@ -236,7 +352,7 @@ Advanced
 These commands are not required in normal operation, and exist
 for use in exceptional circumstances.  Incorrect use of these
 commands may cause serious problems, such as an inaccessible
-filesystem.
+file system.
 
 ::
 
@@ -264,7 +380,7 @@ This removes a rank from the failed set.
 
 ::
 
-    fs reset <filesystem name>
+    fs reset <file system name>
 
 This command resets the file system state to defaults, except for the name and
 pools. Non-zero ranks are saved in the stopped set.

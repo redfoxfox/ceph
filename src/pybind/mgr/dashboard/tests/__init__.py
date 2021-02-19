@@ -3,19 +3,28 @@
 from __future__ import absolute_import
 
 import json
+import logging
 import threading
 import time
 
 import cherrypy
 from cherrypy._cptools import HandlerWrapperTool
 from cherrypy.test import helper
+from mgr_module import CLICommand
+from pyfakefs import fake_filesystem
 
-from mgr_module import CLICommand, MgrModule
-
-from .. import logger, mgr
-from ..controllers import json_error_page, generate_controller_routes
+from .. import DEFAULT_VERSION, mgr
+from ..controllers import generate_controller_routes, json_error_page
+from ..plugins import PLUGIN_MANAGER, debug, feature_toggles  # noqa
 from ..services.auth import AuthManagerTool
 from ..services.exception import dashboard_exception_handler
+from ..tools import RequestLoggingTool
+
+PLUGIN_MANAGER.hook.init()
+PLUGIN_MANAGER.hook.register_commands()
+
+
+logger = logging.getLogger('tests')
 
 
 class CmdException(Exception):
@@ -25,6 +34,7 @@ class CmdException(Exception):
 
 
 def exec_dashboard_cmd(command_handler, cmd, **kwargs):
+    inbuf = kwargs['inbuf'] if 'inbuf' in kwargs else None
     cmd_dict = {'prefix': 'dashboard {}'.format(cmd)}
     cmd_dict.update(kwargs)
     if cmd_dict['prefix'] not in CLICommand.COMMANDS:
@@ -36,8 +46,7 @@ def exec_dashboard_cmd(command_handler, cmd, **kwargs):
         except ValueError:
             return out
 
-    ret, out, err = CLICommand.COMMANDS[cmd_dict['prefix']].call(mgr, cmd_dict,
-                                                                 None)
+    ret, out, err = CLICommand.COMMANDS[cmd_dict['prefix']].call(mgr, cmd_dict, inbuf)
     if ret < 0:
         raise CmdException(ret, err)
     try:
@@ -77,7 +86,16 @@ class CLICommandTestMixin(KVStoreMockMixin):
         return exec_dashboard_cmd(None, cmd, **kwargs)
 
 
+class FakeFsMixin(object):
+    fs = fake_filesystem.FakeFilesystem()
+    f_open = fake_filesystem.FakeFileOpen(fs)
+    f_os = fake_filesystem.FakeOsModule(fs)
+    builtins_open = 'builtins.open'
+
+
 class ControllerTestCase(helper.CPWebCase):
+    _endpoints_cache = {}
+
     @classmethod
     def setup_controllers(cls, ctrl_classes, base_url=''):
         if not isinstance(ctrl_classes, list):
@@ -86,7 +104,17 @@ class ControllerTestCase(helper.CPWebCase):
         endpoint_list = []
         for ctrl in ctrl_classes:
             inst = ctrl()
-            for endpoint in ctrl.endpoints():
+
+            # We need to cache the controller endpoints because
+            # BaseController#endpoints method is not idempontent
+            # and a controller might be needed by more than one
+            # unit test.
+            if ctrl not in cls._endpoints_cache:
+                ctrl_endpoints = ctrl.endpoints()
+                cls._endpoints_cache[ctrl] = ctrl_endpoints
+
+            ctrl_endpoints = cls._endpoints_cache[ctrl]
+            for endpoint in ctrl_endpoints:
                 endpoint.inst = inst
                 endpoint_list.append(endpoint)
         endpoint_list = sorted(endpoint_list, key=lambda e: e.url)
@@ -97,7 +125,11 @@ class ControllerTestCase(helper.CPWebCase):
         cherrypy.tree.mount(None, config={
             base_url: {'request.dispatch': mapper}})
 
-    def __init__(self, *args, **kwargs):
+    _request_logging = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
         cherrypy.tools.authenticate = AuthManagerTool()
         cherrypy.tools.dashboard_exception_handler = HandlerWrapperTool(dashboard_exception_handler,
                                                                         priority=31)
@@ -106,37 +138,59 @@ class ControllerTestCase(helper.CPWebCase):
             'tools.json_in.on': True,
             'tools.json_in.force': False
         })
-        super(ControllerTestCase, self).__init__(*args, **kwargs)
+        PLUGIN_MANAGER.hook.configure_cherrypy(config=cherrypy.config)
 
-    def _request(self, url, method, data=None):
+        if cls._request_logging:
+            cherrypy.tools.request_logging = RequestLoggingTool()
+            cherrypy.config.update({'tools.request_logging.on': True})
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._request_logging:
+            cherrypy.config.update({'tools.request_logging.on': False})
+
+    def _request(self, url, method, data=None, headers=None, version=DEFAULT_VERSION):
         if not data:
             b = None
-            h = None
+            if version:
+                h = [('Accept', 'application/vnd.ceph.api.v{}+json'.format(version)),
+                     ('Content-Length', '0')]
+            else:
+                h = None
         else:
             b = json.dumps(data)
-            h = [('Content-Type', 'application/json'),
-                 ('Content-Length', str(len(b)))]
+            if version is not None:
+                h = [('Accept', 'application/vnd.ceph.api.v{}+json'.format(version)),
+                     ('Content-Type', 'application/json'),
+                     ('Content-Length', str(len(b)))]
+
+            else:
+                h = [('Content-Type', 'application/json'),
+                     ('Content-Length', str(len(b)))]
+
+        if headers:
+            h = headers
         self.getPage(url, method=method, body=b, headers=h)
 
-    def _get(self, url):
-        self._request(url, 'GET')
+    def _get(self, url, headers=None, version=DEFAULT_VERSION):
+        self._request(url, 'GET', headers=headers, version=version)
 
-    def _post(self, url, data=None):
-        self._request(url, 'POST', data)
+    def _post(self, url, data=None, version=DEFAULT_VERSION):
+        self._request(url, 'POST', data, version=version)
 
-    def _delete(self, url, data=None):
-        self._request(url, 'DELETE', data)
+    def _delete(self, url, data=None, version=DEFAULT_VERSION):
+        self._request(url, 'DELETE', data, version=version)
 
-    def _put(self, url, data=None):
-        self._request(url, 'PUT', data)
+    def _put(self, url, data=None, version=DEFAULT_VERSION):
+        self._request(url, 'PUT', data, version=version)
 
-    def _task_request(self, method, url, data, timeout):
-        self._request(url, method, data)
+    def _task_request(self, method, url, data, timeout, version=DEFAULT_VERSION):
+        self._request(url, method, data, version=version)
         if self.status != '202 Accepted':
             logger.info("task finished immediately")
             return
 
-        res = self.jsonBody()
+        res = self.json_body()
         self.assertIsInstance(res, dict)
         self.assertIn('name', res)
         self.assertIn('metadata', res)
@@ -161,8 +215,8 @@ class ControllerTestCase(helper.CPWebCase):
                     logger.info("task (%s, %s) is still executing", self.task_name,
                                 self.task_metadata)
                     time.sleep(1)
-                    self.tc._get('/api/task?name={}'.format(self.task_name))
-                    res = self.tc.jsonBody()
+                    self.tc._get('/api/task?name={}'.format(self.task_name), version=version)
+                    res = self.tc.json_body()
                     for task in res['finished_tasks']:
                         if task['metadata'] == self.task_metadata:
                             # task finished
@@ -189,38 +243,37 @@ class ControllerTestCase(helper.CPWebCase):
             elif method == 'DELETE':
                 self.status = '204 No Content'
             return
+
+        if 'status' in thread.res_task['exception']:
+            self.status = thread.res_task['exception']['status']
         else:
-            if 'status' in thread.res_task['exception']:
-                self.status = thread.res_task['exception']['status']
-            else:
-                self.status = 500
-            self.body = json.dumps(thread.res_task['exception'])
-            return
+            self.status = 500
+        self.body = json.dumps(thread.res_task['exception'])
 
-    def _task_post(self, url, data=None, timeout=60):
-        self._task_request('POST', url, data, timeout)
+    def _task_post(self, url, data=None, timeout=60, version=DEFAULT_VERSION):
+        self._task_request('POST', url, data, timeout, version=version)
 
-    def _task_delete(self, url, timeout=60):
-        self._task_request('DELETE', url, None, timeout)
+    def _task_delete(self, url, timeout=60, version=DEFAULT_VERSION):
+        self._task_request('DELETE', url, None, timeout, version=version)
 
-    def _task_put(self, url, data=None, timeout=60):
-        self._task_request('PUT', url, data, timeout)
+    def _task_put(self, url, data=None, timeout=60, version=DEFAULT_VERSION):
+        self._task_request('PUT', url, data, timeout, version=version)
 
-    def jsonBody(self):
+    def json_body(self):
         body_str = self.body.decode('utf-8') if isinstance(self.body, bytes) else self.body
         return json.loads(body_str)
 
-    def assertJsonBody(self, data, msg=None):
+    def assertJsonBody(self, data, msg=None):  # noqa: N802
         """Fail if value != self.body."""
-        json_body = self.jsonBody()
+        json_body = self.json_body()
         if data != json_body:
             if msg is None:
                 msg = 'expected body:\n%r\n\nactual body:\n%r' % (
                     data, json_body)
             self._handlewebError(msg)
 
-    def assertInJsonBody(self, data, msg=None):
-        json_body = self.jsonBody()
+    def assertInJsonBody(self, data, msg=None):  # noqa: N802
+        json_body = self.json_body()
         if data not in json_body:
             if msg is None:
                 msg = 'expected %r to be in %r' % (data, json_body)

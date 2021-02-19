@@ -1,7 +1,8 @@
 import { Component, OnInit } from '@angular/core';
 
-import { AuthService } from '../../../shared/api/auth.service';
-import { AuthStorageService } from '../../../shared/services/auth-storage.service';
+import { AuthService } from '~/app/shared/api/auth.service';
+import { Icons } from '~/app/shared/enum/icons.enum';
+import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
 
 @Component({
   selector: 'cd-identity',
@@ -9,12 +10,15 @@ import { AuthStorageService } from '../../../shared/services/auth-storage.servic
   styleUrls: ['./identity.component.scss']
 })
 export class IdentityComponent implements OnInit {
+  sso: boolean;
   username: string;
+  icons = Icons;
 
   constructor(private authStorageService: AuthStorageService, private authService: AuthService) {}
 
   ngOnInit() {
     this.username = this.authStorageService.getUsername();
+    this.sso = this.authStorageService.isSSO();
   }
 
   logout() {

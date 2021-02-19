@@ -6,6 +6,7 @@
 
 #include <numeric>
 
+#include "include/compat.h"
 #include "include/ceph_assert.h"
 #include "include/types.h"
 #include "include/xlist.h"
@@ -109,10 +110,12 @@ struct CapSnap {
 };
 
 // inode flags
-#define I_COMPLETE	1
-#define I_DIR_ORDERED	2
-#define I_CAP_DROPPED	4
-#define I_SNAPDIR_OPEN	8
+#define I_COMPLETE		(1 << 0)
+#define I_DIR_ORDERED		(1 << 1)
+#define I_SNAPDIR_OPEN		(1 << 2)
+#define I_KICK_FLUSH		(1 << 3)
+#define I_CAP_DROPPED		(1 << 4)
+#define I_ERROR_FILELOCK	(1 << 5)
 
 struct Inode {
   Client *client;
@@ -156,10 +159,14 @@ struct Inode {
   // special stuff
   version_t version;           // auth only
   version_t xattr_version;
+  utime_t   snap_btime;        // snapshot creation (birth) time
+  std::map<std::string, std::string> snap_metadata;
 
   // inline data
   version_t  inline_version;
   bufferlist inline_data;
+
+  bool fscrypt = false; // fscrypt enabled ?
 
   bool is_root()    const { return ino == MDS_INO_ROOT; }
   bool is_symlink() const { return (mode & S_IFMT) == S_IFLNK; }
@@ -190,7 +197,6 @@ struct Inode {
   // about the dir (if this is one!)
   Dir       *dir;     // if i'm a dir.
   fragtree_t dirfragtree;
-  set<int>  dir_contacts;
   uint64_t dir_release_count, dir_ordered_count;
   bool dir_hashed, dir_replicated;
 
@@ -220,15 +226,16 @@ struct Inode {
   uint64_t     reported_size, wanted_max_size, requested_max_size;
 
   int       _ref;      // ref count. 1 for each dentry, fh that links to me.
-  int       ll_ref;   // separate ref count for ll client
+  uint64_t  ll_ref;   // separate ref count for ll client
   xlist<Dentry *> dentries; // if i'm linked to a dentry.
   string    symlink;  // symlink content, if it's a symlink
   map<string,bufferptr> xattrs;
   map<frag_t,int> fragmap;  // known frag -> mds mappings
+  map<frag_t, std::vector<mds_rank_t>> frag_repmap; // non-auth mds mappings
 
-  list<Cond*>       waitfor_caps;
-  list<Cond*>       waitfor_commit;
-  list<Cond*>	    waitfor_deleg;
+  std::list<ceph::condition_variable*> waitfor_caps;
+  std::list<ceph::condition_variable*> waitfor_commit;
+  std::list<ceph::condition_variable*> waitfor_deleg;
 
   Dentry *get_first_parent() {
     ceph_assert(!dentries.empty());
@@ -236,6 +243,7 @@ struct Inode {
   }
 
   void make_long_path(filepath& p);
+  void make_short_path(filepath& p);
   void make_nosnap_relative_path(filepath& p);
 
   void get();
@@ -248,7 +256,7 @@ struct Inode {
   void ll_get() {
     ll_ref++;
   }
-  void ll_put(int n=1) {
+  void ll_put(uint64_t n=1) {
     ceph_assert(ll_ref >= n);
     ll_ref -= n;
   }
@@ -256,6 +264,12 @@ struct Inode {
   // file locks
   std::unique_ptr<ceph_lock_state_t> fcntl_locks;
   std::unique_ptr<ceph_lock_state_t> flock_locks;
+
+  bool has_any_filelocks() {
+    return
+      (fcntl_locks && !fcntl_locks->empty()) ||
+      (flock_locks && !flock_locks->empty());
+  }
 
   list<Delegation> delegations;
 

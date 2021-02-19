@@ -4,7 +4,8 @@ import { RouterTestingModule } from '@angular/router/testing';
 
 import { of } from 'rxjs';
 
-import { configureTestBed, i18nProviders } from '../../../testing/unit-test-helper';
+import { configureTestBed, expectItemTasks } from '~/testing/unit-test-helper';
+import { RbdService } from '../api/rbd.service';
 import { ExecutingTask } from '../models/executing-task';
 import { SummaryService } from './summary.service';
 import { TaskListService } from './task-list.service';
@@ -19,19 +20,19 @@ describe('TaskListService', () => {
   let apiResp: any;
   let tasks: any[];
 
-  const addItem = (name) => {
+  const addItem = (name: string) => {
     apiResp.push({ name: name });
   };
 
   configureTestBed({
-    providers: [TaskListService, TaskMessageService, SummaryService, i18nProviders],
+    providers: [TaskListService, TaskMessageService, SummaryService, RbdService],
     imports: [HttpClientTestingModule, RouterTestingModule]
   });
 
   beforeEach(() => {
-    service = TestBed.get(TaskListService);
-    summaryService = TestBed.get(SummaryService);
-    taskMessageService = TestBed.get(TaskMessageService);
+    service = TestBed.inject(TaskListService);
+    summaryService = TestBed.inject(SummaryService);
+    taskMessageService = TestBed.inject(TaskMessageService);
     summaryService['summaryDataSource'].next({ executing_tasks: [] });
 
     taskMessageService.messages['test/create'] = taskMessageService.messages['rbd/create'];
@@ -53,7 +54,7 @@ describe('TaskListService', () => {
       (task) => task.name.startsWith('test'),
       (item, task) => item.name === task.metadata['name'],
       {
-        default: (task) => ({ name: task.metadata['name'] })
+        default: (metadata: object) => ({ name: metadata['name'] })
       }
     );
   });
@@ -62,16 +63,13 @@ describe('TaskListService', () => {
     expect(service).toBeTruthy();
   });
 
-  const addTask = (name: string, itemName: string) => {
+  const addTask = (name: string, itemName: string, progress?: number) => {
     const task = new ExecutingTask();
     task.name = name;
+    task.progress = progress;
     task.metadata = { name: itemName };
     tasks.push(task);
     summaryService.addRunningTask(task);
-  };
-
-  const expectItemTasks = (item: any, executing: string) => {
-    expect(item.cdExecuting).toBe(executing);
   };
 
   it('gets all items without any executing items', () => {
@@ -83,6 +81,14 @@ describe('TaskListService', () => {
     addTask('test/create', 'd');
     expect(list.length).toBe(4);
     expectItemTasks(list[3], 'Creating');
+  });
+
+  it('shows progress of current task if any above 0', () => {
+    addTask('test/edit', 'd', 97);
+    addTask('test/edit', 'e', 0);
+    expect(list.length).toBe(5);
+    expectItemTasks(list[3], 'Updating', 97);
+    expectItemTasks(list[4], 'Updating');
   });
 
   it('gets all items with one executing items', () => {
@@ -101,8 +107,8 @@ describe('TaskListService', () => {
     addTask('test/delete', 'b');
     addTask('test/delete', 'c');
     expect(list.length).toBe(3);
-    expectItemTasks(list[0], 'Creating, Updating, Deleting');
-    expectItemTasks(list[1], 'Updating, Deleting');
+    expectItemTasks(list[0], 'Creating..., Updating..., Deleting');
+    expectItemTasks(list[1], 'Updating..., Deleting');
     expectItemTasks(list[2], 'Deleting');
   });
 

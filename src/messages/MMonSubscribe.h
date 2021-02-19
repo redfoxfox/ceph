@@ -22,26 +22,24 @@
  * compatibility with old crap
  */
 struct ceph_mon_subscribe_item_old {
-	__le64 unused;
-	__le64 have;
+	ceph_le64 unused;
+	ceph_le64 have;
 	__u8 onetime;
 } __attribute__ ((packed));
 WRITE_RAW_ENCODER(ceph_mon_subscribe_item_old)
 
 
-class MMonSubscribe : public MessageInstance<MMonSubscribe> {
+class MMonSubscribe final : public Message {
 public:
-  friend factory;
-
   static constexpr int HEAD_VERSION = 3;
   static constexpr int COMPAT_VERSION = 1;
 
   std::string hostname;
   std::map<std::string, ceph_mon_subscribe_item> what;
 
-  MMonSubscribe() : MessageInstance(CEPH_MSG_MON_SUBSCRIBE, HEAD_VERSION, COMPAT_VERSION) { }
+  MMonSubscribe() : Message{CEPH_MSG_MON_SUBSCRIBE, HEAD_VERSION, COMPAT_VERSION} { }
 private:
-  ~MMonSubscribe() override {}
+  ~MMonSubscribe() final {}
 
 public:
   void sub_want(const char *w, version_t start, unsigned flags) {
@@ -97,6 +95,9 @@ public:
     encode(what, payload);
     encode(hostname, payload);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

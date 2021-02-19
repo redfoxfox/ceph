@@ -20,11 +20,11 @@
 #include "common/Formatter.h"
 #include "common/hobject.h"
 #include "include/interval_set.h"
+#include "include/common_fwd.h"
 #include "FDCache.h"
 #include "common/Thread.h"
 #include "common/ceph_context.h"
 
-class PerfCounters;
 enum {
   l_wbthrottle_first = 999090,
   l_wbthrottle_bytes_dirtied,
@@ -48,13 +48,13 @@ class WBThrottle : Thread, public md_config_obs_t {
    */
 
   /// Limits on unflushed bytes
-  pair<uint64_t, uint64_t> size_limits;
+  std::pair<uint64_t, uint64_t> size_limits;
 
   /// Limits on unflushed ios
-  pair<uint64_t, uint64_t> io_limits;
+  std::pair<uint64_t, uint64_t> io_limits;
 
   /// Limits on unflushed objects
-  pair<uint64_t, uint64_t> fd_limits;
+  std::pair<uint64_t, uint64_t> fd_limits;
 
   uint64_t cur_ios;  /// Currently unflushed IOs
   uint64_t cur_size; /// Currently unflushed bytes
@@ -79,18 +79,18 @@ class WBThrottle : Thread, public md_config_obs_t {
   CephContext *cct;
   PerfCounters *logger;
   bool stopping;
-  Mutex lock;
-  Cond cond;
+  ceph::mutex lock = ceph::make_mutex("WBThrottle::lock");
+  ceph::condition_variable cond;
 
 
   /**
    * Flush objects in lru order
    */
-  list<ghobject_t> lru;
-  ceph::unordered_map<ghobject_t, list<ghobject_t>::iterator> rev_lru;
+  std::list<ghobject_t> lru;
+  ceph::unordered_map<ghobject_t, std::list<ghobject_t>::iterator> rev_lru;
   void remove_object(const ghobject_t &oid) {
-    ceph_assert(lock.is_locked());
-    ceph::unordered_map<ghobject_t, list<ghobject_t>::iterator>::iterator iter =
+    ceph_assert(ceph_mutex_is_locked(lock));
+    ceph::unordered_map<ghobject_t, std::list<ghobject_t>::iterator>::iterator iter =
       rev_lru.find(oid);
     if (iter == rev_lru.end())
       return;
@@ -111,10 +111,11 @@ class WBThrottle : Thread, public md_config_obs_t {
     rev_lru.insert(make_pair(oid, --lru.end()));
   }
 
-  ceph::unordered_map<ghobject_t, pair<PendingWB, FDRef> > pending_wbs;
+  ceph::unordered_map<ghobject_t, std::pair<PendingWB, FDRef> > pending_wbs;
 
   /// get next flush to perform
   bool get_next_should_flush(
+    std::unique_lock<ceph::mutex>& locker,
     boost::tuple<ghobject_t, FDRef, PendingWB> *next ///< [out] next to flush
     ); ///< @return false if we are shutting down
 public:
@@ -152,7 +153,7 @@ public:
   void stop();
   /// Set fs as XFS or BTRFS
   void set_fs(FS new_fs) {
-    Mutex::Locker l(lock);
+    std::lock_guard l{lock};
     fs = new_fs;
     set_from_conf();
   }

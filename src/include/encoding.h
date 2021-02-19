@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <optional>
 #include <boost/container/small_vector.hpp>
 #include <boost/optional/optional_io.hpp>
 #include <boost/tuple/tuple.hpp>
@@ -91,10 +92,6 @@ WRITE_RAW_ENCODER(ceph_le64)
 WRITE_RAW_ENCODER(ceph_le32)
 WRITE_RAW_ENCODER(ceph_le16)
 
-// FIXME: we need to choose some portable floating point encoding here
-WRITE_RAW_ENCODER(float)
-WRITE_RAW_ENCODER(double)
-
 inline void encode(const bool &v, bufferlist& bl) {
   __u8 vv = v;
   encode_raw(vv, bl);
@@ -128,6 +125,37 @@ WRITE_INTTYPE_ENCODER(int32_t, le32)
 WRITE_INTTYPE_ENCODER(uint16_t, le16)
 WRITE_INTTYPE_ENCODER(int16_t, le16)
 
+// -----------------------------------
+// float types
+//
+// NOTE: The following code assumes all supported platforms use IEEE binary32
+// as float and IEEE binary64 as double floating-point format.  The assumption
+// is verified by the assertions below.
+//
+// Under this assumption, we can use raw encoding of floating-point types
+// on little-endian machines, but we still need to perform a byte swap
+// on big-endian machines to ensure cross-architecture compatibility.
+// To achive that, we reinterpret the values as integers first, which are
+// byte-swapped via the ceph_le types as above.  The extra conversions
+// are optimized away on little-endian machines by the compiler.
+#define WRITE_FLTTYPE_ENCODER(type, itype, etype)			\
+  static_assert(sizeof(type) == sizeof(itype));				\
+  static_assert(std::numeric_limits<type>::is_iec559,			\
+	      "floating-point type not using IEEE754 format");		\
+  inline void encode(type v, ::ceph::bufferlist& bl, uint64_t features=0) { \
+    ceph_##etype e;							\
+    e = *reinterpret_cast<itype *>(&v);					\
+    ::ceph::encode_raw(e, bl);						\
+  }									\
+  inline void decode(type &v, ::ceph::bufferlist::const_iterator& p) {	\
+    ceph_##etype e;							\
+    ::ceph::decode_raw(e, p);						\
+    *reinterpret_cast<itype *>(&v) = e;					\
+  }
+
+WRITE_FLTTYPE_ENCODER(float, uint32_t, le32)
+WRITE_FLTTYPE_ENCODER(double, uint64_t, le64)
+
 // see denc.h for ENCODE_DUMP_PATH discussion and definition.
 #ifdef ENCODE_DUMP_PATH
 # define ENCODE_DUMP_PRE()			\
@@ -143,7 +171,7 @@ WRITE_INTTYPE_ENCODER(int16_t, le16)
       break;								\
     char fn[PATH_MAX];							\
     snprintf(fn, sizeof(fn), ENCODE_STRINGIFY(ENCODE_DUMP_PATH) "/%s__%d.%x", #cl, getpid(), i++); \
-    int fd = ::open(fn, O_WRONLY|O_TRUNC|O_CREAT|O_CLOEXEC, 0644);		\
+    int fd = ::open(fn, O_WRONLY|O_TRUNC|O_CREAT|O_CLOEXEC|O_BINARY, 0644);		\
     if (fd >= 0) {							\
       ::ceph::bufferlist sub;						\
       sub.substr_of(bl, pre_off, bl.length() - pre_off);		\
@@ -311,8 +339,8 @@ template<typename Rep, typename Period,
 void encode(const std::chrono::duration<Rep, Period>& d,
 	    ceph::bufferlist &bl) {
   using namespace std::chrono;
-  uint32_t s = duration_cast<seconds>(d).count();
-  uint32_t ns = (duration_cast<nanoseconds>(d) % seconds(1)).count();
+  int32_t s = duration_cast<seconds>(d).count();
+  int32_t ns = (duration_cast<nanoseconds>(d) % seconds(1)).count();
   encode(s, bl);
   encode(ns, bl);
 }
@@ -321,8 +349,8 @@ template<typename Rep, typename Period,
          typename std::enable_if_t<std::is_integral_v<Rep>>* = nullptr>
 void decode(std::chrono::duration<Rep, Period>& d,
 	    bufferlist::const_iterator& p) {
-  uint32_t s;
-  uint32_t ns;
+  int32_t s;
+  int32_t ns;
   decode(s, p);
   decode(ns, p);
   d = std::chrono::seconds(s) + std::chrono::nanoseconds(ns);
@@ -335,6 +363,10 @@ template<typename T>
 inline void encode(const boost::optional<T> &p, bufferlist &bl);
 template<typename T>
 inline void decode(boost::optional<T> &p, bufferlist::const_iterator &bp);
+template<typename T>
+inline void encode(const std::optional<T> &p, bufferlist &bl);
+template<typename T>
+inline void decode(std::optional<T> &p, bufferlist::const_iterator &bp);
 template<class A, class B, class C>
 inline void encode(const boost::tuple<A, B, C> &t, bufferlist& bl);
 template<class A, class B, class C>
@@ -569,6 +601,32 @@ inline void decode(boost::optional<T> &p, bufferlist::const_iterator &bp)
 #pragma GCC diagnostic pop
 #pragma GCC diagnostic warning "-Wpragmas"
 
+// std optional
+template<typename T>
+inline void encode(const std::optional<T> &p, bufferlist &bl)
+{
+  __u8 present = static_cast<bool>(p);
+  encode(present, bl);
+  if (p)
+    encode(*p, bl);
+}
+
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wuninitialized"
+template<typename T>
+inline void decode(std::optional<T> &p, bufferlist::const_iterator &bp)
+{
+  __u8 present;
+  decode(present, bp);
+  if (present) {
+    p = T{};
+    decode(*p, bp);
+  } else {
+    p = std::nullopt;
+  }
+}
+
 // std::tuple
 template<typename... Ts>
 inline void encode(const std::tuple<Ts...> &t, bufferlist& bl)
@@ -642,25 +700,20 @@ template<class T, class Alloc, typename traits>
 inline std::enable_if_t<!traits::supported>
   encode(const std::list<T,Alloc>& ls, bufferlist& bl, uint64_t features)
 {
-  // should i pre- or post- count?
-  if (!ls.empty()) {
-    unsigned pos = bl.length();
-    unsigned n = 0;
-    encode(n, bl);
-    for (auto p = ls.begin(); p != ls.end(); ++p) {
-      n++;
-      encode(*p, bl, features);
-    }
-    ceph_le32 en;
-    en = n;
-    bl.copy_in(pos, sizeof(en), (char*)&en);
-  } else {
-    __u32 n = (__u32)(ls.size());    // FIXME: this is slow on a list.
-    encode(n, bl);
-    for (auto p = ls.begin(); p != ls.end(); ++p)
-      encode(*p, bl, features);
+  using counter_encode_t = ceph_le32;
+  unsigned n = 0;
+  auto filler = bl.append_hole(sizeof(counter_encode_t));
+  for (const auto& item : ls) {
+    // we count on our own because of buggy std::list::size() implementation
+    // which doesn't follow the O(1) complexity constraint C++11 has brought.
+    ++n;
+    encode(item, bl, features);
   }
+  counter_encode_t en;
+  en = n;
+  filler.copy_in(sizeof(en), reinterpret_cast<char*>(&en));
 }
+
 template<class T, class Alloc, typename traits>
 inline std::enable_if_t<!traits::supported>
   decode(std::list<T,Alloc>& ls, bufferlist::const_iterator& p)
@@ -1356,7 +1409,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
   } else if (skip_v) {							\
     if (bl.get_remaining() < skip_v)					\
       throw ::ceph::buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
-    bl.advance(skip_v);							\
+    bl +=  skip_v;							\
   }									\
   unsigned struct_end = 0;						\
   if (struct_v >= lenv) {						\
@@ -1441,7 +1494,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
     if (bl.get_off() > struct_end)					\
       throw ::ceph::buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
     if (bl.get_off() < struct_end)					\
-      bl.advance(struct_end - bl.get_off());				\
+      bl += struct_end - bl.get_off();					\
   }
 
 namespace ceph {

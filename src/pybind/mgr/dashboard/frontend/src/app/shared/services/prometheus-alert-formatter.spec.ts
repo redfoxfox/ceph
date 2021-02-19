@@ -1,12 +1,9 @@
+import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 
-import { ToastModule } from 'ng2-toastr';
+import { ToastrModule } from 'ngx-toastr';
 
-import {
-  configureTestBed,
-  i18nProviders,
-  PrometheusHelper
-} from '../../../testing/unit-test-helper';
+import { configureTestBed, PrometheusHelper } from '~/testing/unit-test-helper';
 import { NotificationType } from '../enum/notification-type.enum';
 import { CdNotificationConfig } from '../models/cd-notification';
 import { PrometheusCustomAlert } from '../models/prometheus-alerts';
@@ -20,15 +17,15 @@ describe('PrometheusAlertFormatter', () => {
   let prometheus: PrometheusHelper;
 
   configureTestBed({
-    imports: [ToastModule.forRoot(), SharedModule],
-    providers: [PrometheusAlertFormatter, i18nProviders]
+    imports: [ToastrModule.forRoot(), SharedModule, HttpClientTestingModule],
+    providers: [PrometheusAlertFormatter]
   });
 
   beforeEach(() => {
     prometheus = new PrometheusHelper();
-    service = TestBed.get(PrometheusAlertFormatter);
-    notificationService = TestBed.get(NotificationService);
-    spyOn(notificationService, 'queueNotifications').and.stub();
+    service = TestBed.inject(PrometheusAlertFormatter);
+    notificationService = TestBed.inject(NotificationService);
+    spyOn(notificationService, 'show').and.stub();
   });
 
   it('should create', () => {
@@ -38,13 +35,13 @@ describe('PrometheusAlertFormatter', () => {
   describe('sendNotifications', () => {
     it('should not call queue notifications with no notification', () => {
       service.sendNotifications([]);
-      expect(notificationService.queueNotifications).not.toHaveBeenCalled();
+      expect(notificationService.show).not.toHaveBeenCalled();
     });
 
     it('should call queue notifications with notifications', () => {
       const notifications = [new CdNotificationConfig(NotificationType.success, 'test')];
       service.sendNotifications(notifications);
-      expect(notificationService.queueNotifications).toHaveBeenCalledWith(notifications);
+      expect(notificationService.show).toHaveBeenCalledWith(notifications[0]);
     });
   });
 

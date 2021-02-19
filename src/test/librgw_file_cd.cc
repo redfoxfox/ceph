@@ -22,7 +22,6 @@
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
 #include "common/debug.h"
-#include "global/global_init.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -42,7 +41,7 @@ namespace {
   bool do_multi = false;
   int multi_cnt = 10;
 
-  string bucket_name = "sorry_dave";
+  string bucket_name = "sorrydave";
 
   struct {
     int argc;

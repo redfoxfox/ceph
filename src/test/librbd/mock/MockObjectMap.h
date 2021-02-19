@@ -11,6 +11,11 @@
 namespace librbd {
 
 struct MockObjectMap {
+  MOCK_METHOD1(at, uint8_t(uint64_t));
+  uint8_t operator[](uint64_t object_no) {
+    return at(object_no);
+  }
+
   MOCK_CONST_METHOD1(enabled, bool(const RWLock &object_map_lock));
 
   MOCK_CONST_METHOD0(size, uint64_t());
@@ -20,6 +25,9 @@ struct MockObjectMap {
 
   MOCK_METHOD3(aio_resize, void(uint64_t new_size, uint8_t default_object_state,
                                 Context *on_finish));
+
+  void get() {}
+  void put() {}
 
   template <typename T, void(T::*MF)(int) = &T::complete>
   bool aio_update(uint64_t snap_id, uint64_t start_object_no, uint8_t new_state,

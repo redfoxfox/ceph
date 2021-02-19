@@ -8,12 +8,14 @@
 #include "include/fs_types.h"
 #include "include/rados/librados_fwd.hpp"
 #include "include/rbd/object_map_types.h"
+#include "common/AsyncOpTracker.h"
 #include "common/bit_vector.hpp"
+#include "common/RWLock.h"
+#include "common/RefCountedObj.h"
 #include "librbd/Utils.h"
 #include <boost/optional.hpp>
 
 class Context;
-class RWLock;
 namespace ZTracer { struct Trace; }
 
 namespace librbd {
@@ -23,7 +25,7 @@ struct BlockGuardCell;
 class ImageCtx;
 
 template <typename ImageCtxT = ImageCtx>
-class ObjectMap {
+class ObjectMap : public RefCountedObject {
 public:
   static ObjectMap *create(ImageCtxT &image_ctx, uint64_t snap_id) {
     return new ObjectMap(image_ctx, snap_id);
@@ -38,10 +40,20 @@ public:
 
   static bool is_compatible(const file_layout_t& layout, uint64_t size);
 
-  ceph::BitVector<2u>::Reference operator[](uint64_t object_no);
   uint8_t operator[](uint64_t object_no) const;
   inline uint64_t size() const {
+    std::shared_lock locker{m_lock};
     return m_object_map.size();
+  }
+
+  inline void set_state(uint64_t object_no, uint8_t new_state,
+                        const boost::optional<uint8_t> &current_state) {
+    std::unique_lock locker{m_lock};
+    ceph_assert(object_no < m_object_map.size());
+    if (current_state && m_object_map[object_no] != *current_state) {
+      return;
+    }
+    m_object_map[object_no] = new_state;
   }
 
   void open(Context *on_finish);
@@ -71,6 +83,8 @@ public:
                   const ZTracer::Trace &parent_trace, bool ignore_enoent,
                   T *callback_object) {
     ceph_assert(start_object_no < end_object_no);
+    std::unique_lock locker{m_lock};
+
     if (snap_id == CEPH_NOSNAP) {
       end_object_no = std::min(end_object_no, m_object_map.size());
       if (start_object_no >= end_object_no) {
@@ -89,6 +103,7 @@ public:
         return false;
       }
 
+      m_async_op_tracker.start_op();
       UpdateOperation update_operation(start_object_no, end_object_no,
                                        new_state, current_state, parent_trace,
                                        ignore_enoent,
@@ -132,9 +147,12 @@ private:
   typedef BlockGuard<UpdateOperation> UpdateGuard;
 
   ImageCtxT &m_image_ctx;
-  ceph::BitVector<2> m_object_map;
   uint64_t m_snap_id;
 
+  mutable ceph::shared_mutex m_lock;
+  ceph::BitVector<2> m_object_map;
+
+  AsyncOpTracker m_async_op_tracker;
   UpdateGuard *m_update_guard = nullptr;
 
   void detained_aio_update(UpdateOperation &&update_operation);

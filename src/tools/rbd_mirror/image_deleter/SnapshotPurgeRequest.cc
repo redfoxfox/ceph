@@ -34,8 +34,11 @@ void SnapshotPurgeRequest<I>::open_image() {
   dout(10) << dendl;
   m_image_ctx = I::create("", m_image_id, nullptr, m_io_ctx, false);
 
+  // ensure non-primary images can be modified
+  m_image_ctx->read_only_mask &= ~librbd::IMAGE_READ_ONLY_FLAG_NON_PRIMARY;
+
   {
-    RWLock::WLocker snap_locker(m_image_ctx->snap_lock);
+    std::unique_lock image_locker{m_image_ctx->image_lock};
     m_image_ctx->set_journal_policy(new JournalPolicy());
   }
 
@@ -52,7 +55,6 @@ void SnapshotPurgeRequest<I>::handle_open_image(int r) {
   if (r < 0) {
     derr << "failed to open image '" << m_image_id << "': " << cpp_strerror(r)
          << dendl;
-    m_image_ctx->destroy();
     m_image_ctx = nullptr;
 
     finish(r);
@@ -66,20 +68,18 @@ template <typename I>
 void SnapshotPurgeRequest<I>::acquire_lock() {
   dout(10) << dendl;
 
-  m_image_ctx->owner_lock.get_read();
+  m_image_ctx->owner_lock.lock_shared();
   if (m_image_ctx->exclusive_lock == nullptr) {
-    m_image_ctx->owner_lock.put_read();
+    m_image_ctx->owner_lock.unlock_shared();
 
-    derr << "exclusive lock not enabled" << dendl;
-    m_ret_val = -EINVAL;
-    close_image();
+    start_snap_unprotect();
     return;
   }
 
   m_image_ctx->exclusive_lock->acquire_lock(create_context_callback<
     SnapshotPurgeRequest<I>, &SnapshotPurgeRequest<I>::handle_acquire_lock>(
       this));
-  m_image_ctx->owner_lock.put_read();
+  m_image_ctx->owner_lock.unlock_shared();
 }
 
 template <typename I>
@@ -93,8 +93,15 @@ void SnapshotPurgeRequest<I>::handle_acquire_lock(int r) {
     return;
   }
 
+  start_snap_unprotect();
+}
+
+template <typename I>
+void SnapshotPurgeRequest<I>::start_snap_unprotect() {
+  dout(10) << dendl;
+
   {
-    RWLock::RLocker snap_locker(m_image_ctx->snap_lock);
+    std::shared_lock image_locker{m_image_ctx->image_lock};
     m_snaps = m_image_ctx->snaps;
   }
   snap_unprotect();
@@ -108,10 +115,10 @@ void SnapshotPurgeRequest<I>::snap_unprotect() {
   }
 
   librados::snap_t snap_id = m_snaps.back();
-  m_image_ctx->snap_lock.get_read();
+  m_image_ctx->image_lock.lock_shared();
   int r = m_image_ctx->get_snap_namespace(snap_id, &m_snap_namespace);
   if (r < 0) {
-    m_image_ctx->snap_lock.put_read();
+    m_image_ctx->image_lock.unlock_shared();
 
     derr << "failed to get snap namespace: " << cpp_strerror(r) << dendl;
     m_ret_val = r;
@@ -121,7 +128,7 @@ void SnapshotPurgeRequest<I>::snap_unprotect() {
 
   r = m_image_ctx->get_snap_name(snap_id, &m_snap_name);
   if (r < 0) {
-    m_image_ctx->snap_lock.put_read();
+    m_image_ctx->image_lock.unlock_shared();
 
     derr << "failed to get snap name: " << cpp_strerror(r) << dendl;
     m_ret_val = r;
@@ -132,7 +139,7 @@ void SnapshotPurgeRequest<I>::snap_unprotect() {
   bool is_protected;
   r = m_image_ctx->is_snap_protected(snap_id, &is_protected);
   if (r < 0) {
-    m_image_ctx->snap_lock.put_read();
+    m_image_ctx->image_lock.unlock_shared();
 
     derr << "failed to get snap protection status: " << cpp_strerror(r)
          << dendl;
@@ -140,7 +147,7 @@ void SnapshotPurgeRequest<I>::snap_unprotect() {
     close_image();
     return;
   }
-  m_image_ctx->snap_lock.put_read();
+  m_image_ctx->image_lock.unlock_shared();
 
   if (!is_protected) {
     snap_remove();
@@ -159,11 +166,11 @@ void SnapshotPurgeRequest<I>::snap_unprotect() {
     return;
   }
 
-  auto ctx = new FunctionContext([this, finish_op_ctx](int r) {
+  auto ctx = new LambdaContext([this, finish_op_ctx](int r) {
       handle_snap_unprotect(r);
       finish_op_ctx->complete(0);
     });
-  RWLock::RLocker owner_locker(m_image_ctx->owner_lock);
+  std::shared_lock owner_locker{m_image_ctx->owner_lock};
   m_image_ctx->operations->execute_snap_unprotect(
     m_snap_namespace, m_snap_name.c_str(), ctx);
 }
@@ -186,7 +193,7 @@ void SnapshotPurgeRequest<I>::handle_snap_unprotect(int r) {
 
   {
     // avoid the need to refresh to delete the newly unprotected snapshot
-    RWLock::RLocker snap_locker(m_image_ctx->snap_lock);
+    std::shared_lock image_locker{m_image_ctx->image_lock};
     librados::snap_t snap_id = m_snaps.back();
     auto snap_info_it = m_image_ctx->snap_info.find(snap_id);
     if (snap_info_it != m_image_ctx->snap_info.end()) {
@@ -214,11 +221,11 @@ void SnapshotPurgeRequest<I>::snap_remove() {
     return;
   }
 
-  auto ctx = new FunctionContext([this, finish_op_ctx](int r) {
+  auto ctx = new LambdaContext([this, finish_op_ctx](int r) {
       handle_snap_remove(r);
       finish_op_ctx->complete(0);
     });
-  RWLock::RLocker owner_locker(m_image_ctx->owner_lock);
+  std::shared_lock owner_locker{m_image_ctx->owner_lock};
   m_image_ctx->operations->execute_snap_remove(
     m_snap_namespace, m_snap_name.c_str(), ctx);
 }
@@ -256,7 +263,6 @@ template <typename I>
 void SnapshotPurgeRequest<I>::handle_close_image(int r) {
   dout(10) << "r=" << r << dendl;
 
-  m_image_ctx->destroy();
   m_image_ctx = nullptr;
 
   if (r < 0) {
@@ -279,7 +285,10 @@ void SnapshotPurgeRequest<I>::finish(int r) {
 
 template <typename I>
 Context *SnapshotPurgeRequest<I>::start_lock_op(int* r) {
-  RWLock::RLocker owner_locker(m_image_ctx->owner_lock);
+  std::shared_lock owner_locker{m_image_ctx->owner_lock};
+  if (m_image_ctx->exclusive_lock == nullptr) {
+    return new LambdaContext([](int r) {});
+  }
   return m_image_ctx->exclusive_lock->start_op(r);
 }
 

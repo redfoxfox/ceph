@@ -378,7 +378,7 @@ class Journaler : public ::journal::Journaler {
 public:
   Journaler(librados::IoCtx& io_ctx, const std::string& journal_id,
 	    const std::string &client_id) :
-    ::journal::Journaler(io_ctx, journal_id, client_id, {}) {
+    ::journal::Journaler(io_ctx, journal_id, client_id, {}, nullptr) {
   }
 
   int init() {
@@ -460,9 +460,6 @@ protected:
   struct ReplayHandler : public ::journal::ReplayHandler {
     JournalPlayer *journal;
     explicit ReplayHandler(JournalPlayer *_journal) : journal(_journal) {}
-
-    void get() override {}
-    void put() override {}
 
     void handle_entries_available() override {
       journal->handle_replay_ready();
@@ -712,7 +709,7 @@ static int do_export_journal(librados::IoCtx& io_ctx,
   if (to_stdout) {
     fd = STDOUT_FILENO;
   } else {
-    fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0644);
     if (fd < 0) {
       r = -errno;
       std::cerr << "rbd: error creating " << path << std::endl;
@@ -832,7 +829,7 @@ public:
     if (r < 0) {
       return r;
     }
-    m_journaler.start_append(0, 0, 0, 0);
+    m_journaler.start_append(0);
 
     int r1 = 0;
     bufferlist bl;
@@ -856,9 +853,9 @@ public:
       ExportEntry e;
       try {
 	decode_json_obj(e, &p);
-      } catch (JSONDecoder::err& err) {
+      } catch (const JSONDecoder::err& err) {
 	std::cerr << "rbd: error json decoding import data (entry " << n << "):"
-		  << err.message << std::endl;
+		  << err.what() << std::endl;
 	r = -EINVAL;
 	if (m_no_error) {
 	  r1 = r;
@@ -923,7 +920,7 @@ static int do_import_journal(librados::IoCtx& io_ctx,
   if (from_stdin) {
     fd = STDIN_FILENO;
   } else {
-    if ((fd = open(path.c_str(), O_RDONLY)) < 0) {
+    if ((fd = open(path.c_str(), O_RDONLY|O_BINARY)) < 0) {
       r = -errno;
       std::cerr << "rbd: error opening " << path << std::endl;
       return r;
@@ -1168,7 +1165,7 @@ int execute_export(const po::variables_map &vm,
     return r;
   }
 
-  r = do_export_journal(io_ctx, journal_name, path, vm[at::NO_ERROR].as<bool>(),
+  r = do_export_journal(io_ctx, journal_name, path, vm[at::NO_ERR].as<bool>(),
 			vm[at::VERBOSE].as<bool>());
   if (r < 0) {
     std::cerr << "rbd: journal export: " << cpp_strerror(r) << std::endl;
@@ -1211,7 +1208,7 @@ int execute_import(const po::variables_map &vm,
     return r;
   }
 
-  r = do_import_journal(io_ctx, journal_name, path, vm[at::NO_ERROR].as<bool>(),
+  r = do_import_journal(io_ctx, journal_name, path, vm[at::NO_ERR].as<bool>(),
 			vm[at::VERBOSE].as<bool>());
   if (r < 0) {
     std::cerr << "rbd: journal import: " << cpp_strerror(r) << std::endl;

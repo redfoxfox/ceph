@@ -3,38 +3,40 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ReactiveFormsModule } from '@angular/forms';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import * as _ from 'lodash';
-import { ToastModule } from 'ng2-toastr';
-import { BsModalRef, ModalModule } from 'ngx-bootstrap/modal';
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
+import _ from 'lodash';
+import { ToastrModule } from 'ngx-toastr';
+import { of as observableOf } from 'rxjs';
 
-import { configureTestBed, i18nProviders } from '../../../../../testing/unit-test-helper';
-import { SharedModule } from '../../../../shared/shared.module';
+import { ConfigurationService } from '~/app/shared/api/configuration.service';
+import { SharedModule } from '~/app/shared/shared.module';
+import { configureTestBed } from '~/testing/unit-test-helper';
 import { OsdRecvSpeedModalComponent } from './osd-recv-speed-modal.component';
 
 describe('OsdRecvSpeedModalComponent', () => {
   let component: OsdRecvSpeedModalComponent;
   let fixture: ComponentFixture<OsdRecvSpeedModalComponent>;
+  let configurationService: ConfigurationService;
 
   configureTestBed({
     imports: [
       HttpClientTestingModule,
-      ModalModule.forRoot(),
       ReactiveFormsModule,
       RouterTestingModule,
       SharedModule,
-      ToastModule.forRoot()
+      ToastrModule.forRoot()
     ],
     declarations: [OsdRecvSpeedModalComponent],
-    providers: [BsModalRef, i18nProviders]
+    providers: [NgbActiveModal]
   });
 
-  let configOptions = [];
+  let configOptions: any[] = [];
 
   beforeEach(() => {
     fixture = TestBed.createComponent(OsdRecvSpeedModalComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
-
+    configurationService = TestBed.inject(ConfigurationService);
     configOptions = [
       {
         name: 'osd_max_backfills',
@@ -61,10 +63,42 @@ describe('OsdRecvSpeedModalComponent', () => {
         default: 0
       }
     ];
+    spyOn(configurationService, 'filter').and.returnValue(observableOf(configOptions));
   });
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  describe('ngOnInit', () => {
+    let setPriority: jasmine.Spy;
+    let setValidators: jasmine.Spy;
+
+    beforeEach(() => {
+      setPriority = spyOn(component, 'setPriority').and.callThrough();
+      setValidators = spyOn(component, 'setValidators').and.callThrough();
+      component.ngOnInit();
+    });
+
+    it('should call setValidators', () => {
+      expect(setValidators).toHaveBeenCalled();
+    });
+
+    it('should get and set priority correctly', () => {
+      const defaultPriority = _.find(component.priorities, (p) => {
+        return _.isEqual(p.name, 'default');
+      });
+      expect(setPriority).toHaveBeenCalledWith(defaultPriority);
+    });
+
+    it('should set descriptions correctly', () => {
+      expect(component.priorityAttrs['osd_max_backfills'].desc).toBe('');
+      expect(component.priorityAttrs['osd_recovery_max_active'].desc).toBe('');
+      expect(component.priorityAttrs['osd_recovery_max_single_start'].desc).toBe('');
+      expect(component.priorityAttrs['osd_recovery_sleep'].desc).toBe(
+        'Time in seconds to sleep before next recovery or backfill op'
+      );
+    });
   });
 
   describe('setPriority', () => {
@@ -157,35 +191,35 @@ describe('OsdRecvSpeedModalComponent', () => {
     };
 
     it('should return priority "low" if the config option values have been set accordingly', () => {
-      component.detectPriority(configOptionsLow, (priority) => {
+      component.detectPriority(configOptionsLow, (priority: Record<string, any>) => {
         expect(priority.name).toBe('low');
       });
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeFalsy();
     });
 
     it('should return priority "default" if the config option values have been set accordingly', () => {
-      component.detectPriority(configOptionsDefault, (priority) => {
+      component.detectPriority(configOptionsDefault, (priority: Record<string, any>) => {
         expect(priority.name).toBe('default');
       });
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeFalsy();
     });
 
     it('should return priority "high" if the config option values have been set accordingly', () => {
-      component.detectPriority(configOptionsHigh, (priority) => {
+      component.detectPriority(configOptionsHigh, (priority: Record<string, any>) => {
         expect(priority.name).toBe('high');
       });
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeFalsy();
     });
 
     it('should return priority "custom" if the config option values do not match any priority', () => {
-      component.detectPriority(configOptionsCustom, (priority) => {
+      component.detectPriority(configOptionsCustom, (priority: Record<string, any>) => {
         expect(priority.name).toBe('custom');
       });
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeTruthy();
     });
 
     it('should return no priority if the config option values are incomplete', () => {
-      component.detectPriority(configOptionsIncomplete, (priority) => {
+      component.detectPriority(configOptionsIncomplete, (priority: Record<string, any>) => {
         expect(priority.name).toBeNull();
       });
       expect(component.osdRecvSpeedForm.getValue('customizePriority')).toBeFalsy();

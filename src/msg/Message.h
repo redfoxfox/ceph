@@ -25,6 +25,7 @@
 #include "common/RefCountedObj.h"
 #include "common/ThrottleInterface.h"
 #include "common/config.h"
+#include "common/ref.h"
 #include "common/debug.h"
 #include "common/zipkin_trace.h"
 #include "include/ceph_assert.h" // Because intrusive_ptr clobbers our assert...
@@ -34,6 +35,10 @@
 #include "msg/MessageRef.h"
 #include "msg_types.h"
 
+#ifdef WITH_SEASTAR
+#  include "crimson/net/SocketConnection.h"
+#endif // WITH_SEASTAR
+
 // monitor internal
 #define MSG_MON_SCRUB              64
 #define MSG_MON_ELECTION           65
@@ -41,6 +46,7 @@
 #define MSG_MON_PROBE              67
 #define MSG_MON_JOIN               68
 #define MSG_MON_SYNC		   69
+#define MSG_MON_PING               140
 
 /* monitor <-> mon admin tool */
 #define MSG_MON_COMMAND            50
@@ -61,6 +67,8 @@
 #define MSG_CONFIG           62
 #define MSG_GET_CONFIG       63
 
+#define MSG_MON_GET_PURGED_SNAPS 76
+#define MSG_MON_GET_PURGED_SNAPS_REPLY 77
 
 // osd internal
 #define MSG_OSD_PING         70
@@ -69,6 +77,7 @@
 #define MSG_OSD_ALIVE        73
 #define MSG_OSD_MARK_ME_DOWN 74
 #define MSG_OSD_FULL         75
+#define MSG_OSD_MARK_ME_DEAD 123
 
 // removed right after luminous
 //#define MSG_OSD_SUBOP        76
@@ -79,10 +88,13 @@
 #define MSG_OSD_BEACON       79
 
 #define MSG_OSD_PG_NOTIFY      80
+#define MSG_OSD_PG_NOTIFY2    130
 #define MSG_OSD_PG_QUERY       81
+#define MSG_OSD_PG_QUERY2     131
 #define MSG_OSD_PG_LOG         83
 #define MSG_OSD_PG_REMOVE      84
 #define MSG_OSD_PG_INFO        85
+#define MSG_OSD_PG_INFO2      132
 #define MSG_OSD_PG_TRIM        86
 
 #define MSG_PGSTATS            87
@@ -129,15 +141,19 @@
 
 #define MSG_OSD_PG_READY_TO_MERGE 122
 
+#define MSG_OSD_PG_LEASE        133
+#define MSG_OSD_PG_LEASE_ACK    134
+
 // *** MDS ***
 
 #define MSG_MDS_BEACON             100  // to monitor
-#define MSG_MDS_SLAVE_REQUEST      101
+#define MSG_MDS_PEER_REQUEST       101
 #define MSG_MDS_TABLE_REQUEST      102
+#define MSG_MDS_SCRUB              135
 
                                 // 150 already in use (MSG_OSD_RECOVERY_RESERVE)
 
-#define MSG_MDS_RESOLVE            0x200
+#define MSG_MDS_RESOLVE            0x200 // 0x2xx are for mdcache of mds
 #define MSG_MDS_RESOLVEACK         0x201
 #define MSG_MDS_CACHEREJOIN        0x202
 #define MSG_MDS_DISCOVER           0x203
@@ -155,10 +171,10 @@
 #define MSG_MDS_OPENINOREPLY       0x210
 #define MSG_MDS_SNAPUPDATE         0x211
 #define MSG_MDS_FRAGMENTNOTIFYACK  0x212
-#define MSG_MDS_LOCK               0x300
+#define MSG_MDS_LOCK               0x300 // 0x3xx are for locker of mds
 #define MSG_MDS_INODEFILECAPS      0x301
 
-#define MSG_MDS_EXPORTDIRDISCOVER     0x449
+#define MSG_MDS_EXPORTDIRDISCOVER     0x449 // 0x4xx are for migrator of mds
 #define MSG_MDS_EXPORTDIRDISCOVERACK  0x450
 #define MSG_MDS_EXPORTDIRCANCEL       0x451
 #define MSG_MDS_EXPORTDIRPREP         0x452
@@ -176,6 +192,9 @@
 #define MSG_MDS_GATHERCAPS            0x472
 
 #define MSG_MDS_HEARTBEAT          0x500  // for mds load balancer
+#define MSG_MDS_METRICS            0x501  // for mds metric aggregator
+#define MSG_MDS_PING               0x502  // for mds pinger
+#define MSG_MDS_SCRUB_STATS        0x503  // for mds scrub stack
 
 // *** generic ***
 #define MSG_TIMECHECK             0x600
@@ -186,9 +205,6 @@
 #define MSG_CRC_HEADER         (1 << 1)
 #define MSG_CRC_ALL            (MSG_CRC_DATA | MSG_CRC_HEADER)
 
-// Xio Testing
-//#define MSG_DATA_PING		  0x602
-// Xio intends to define messages 0x603..0x606
 
 // Special
 #define MSG_NOP                   0x607
@@ -214,24 +230,21 @@
 #define MSG_SERVICE_MAP           0x707
 
 #define MSG_MGR_CLOSE             0x708
+#define MSG_MGR_COMMAND           0x709
+#define MSG_MGR_COMMAND_REPLY     0x70a
 
 // ======================================================
 
 // abstract Message class
 
-// XioMessenger conditional trace flags
-#define MSG_MAGIC_XIO          0x0002
-#define MSG_MAGIC_TRACE_XCON   0x0004
-#define MSG_MAGIC_TRACE_DTOR   0x0008
-#define MSG_MAGIC_TRACE_HDR    0x0010
-#define MSG_MAGIC_TRACE_XIO    0x0020
-#define MSG_MAGIC_TRACE_XMSGR  0x0040
-#define MSG_MAGIC_TRACE_CTR    0x0080
-
-// XioMessenger diagnostic "ping pong" flag (resend msg when send completes)
-#define MSG_MAGIC_REDUPE       0x0100
-
 class Message : public RefCountedObject {
+public:
+#ifdef WITH_SEASTAR
+  using ConnectionRef = crimson::net::ConnectionRef;
+#else
+  using ConnectionRef = ::ConnectionRef;
+#endif // WITH_SEASTAR
+
 protected:
   ceph_msg_header  header;      // headerelope
   ceph_msg_footer  footer;
@@ -257,9 +270,6 @@ protected:
   boost::intrusive::list_member_hook<> dispatch_q;
 
 public:
-  using ref = MessageRef;
-  using const_ref = MessageConstRef;
-
   // zipkin tracing
   ZTracer::Trace trace;
   void encode_trace(ceph::buffer::list &bl, uint64_t features) const;
@@ -280,6 +290,7 @@ public:
 				   boost::intrusive::list_member_hook<>,
 				   &Message::dispatch_q>> Queue;
 
+  ceph::mono_time queue_start;
 protected:
   CompletionHook* completion_hook = nullptr; // owned by Messenger
 
@@ -309,8 +320,6 @@ public:
     header.type = t;
     header.version = version;
     header.compat_version = compat_version;
-    header.priority = 0;  // undef
-    header.data_off = 0;
     memset(&footer, 0, sizeof(footer));
   }
 
@@ -330,8 +339,8 @@ protected:
   }
 public:
   const ConnectionRef& get_connection() const { return connection; }
-  void set_connection(const ConnectionRef& c) {
-    connection = c;
+  void set_connection(ConnectionRef c) {
+    connection = std::move(c);
   }
   CompletionHook* get_completion_hook() { return completion_hook; }
   void set_completion_hook(CompletionHook *hook) { completion_hook = hook; }
@@ -390,7 +399,7 @@ public:
   void set_payload(ceph::buffer::list& bl) {
     if (byte_throttler)
       byte_throttler->put(payload.length());
-    payload.claim(bl, ceph::buffer::list::CLAIM_ALLOW_NONSHAREABLE);
+    payload = std::move(bl);
     if (byte_throttler)
       byte_throttler->take(payload.length());
   }
@@ -398,7 +407,7 @@ public:
   void set_middle(ceph::buffer::list& bl) {
     if (byte_throttler)
       byte_throttler->put(middle.length());
-    middle.claim(bl, ceph::buffer::list::CLAIM_ALLOW_NONSHAREABLE);
+    middle = std::move(bl);
     if (byte_throttler)
       byte_throttler->take(middle.length());
   }
@@ -414,11 +423,10 @@ public:
 
   const ceph::buffer::list& get_data() const { return data; }
   ceph::buffer::list& get_data() { return data; }
-  void claim_data(ceph::buffer::list& bl,
-		  unsigned int flags = ceph::buffer::list::CLAIM_DEFAULT) {
+  void claim_data(ceph::buffer::list& bl) {
     if (byte_throttler)
       byte_throttler->put(data.length());
-    bl.claim(data, flags);
+    bl = std::move(data);
   }
   off_t get_data_len() const { return data.length(); }
 
@@ -505,11 +513,14 @@ public:
   void encode(uint64_t features, int crcflags, bool skip_header_crc = false);
 };
 
-extern Message *decode_message(CephContext *cct, int crcflags,
-			       ceph_msg_header &header,
-			       ceph_msg_footer& footer, ceph::buffer::list& front,
-			       ceph::buffer::list& middle, ceph::buffer::list& data,
-			       Connection* conn);
+extern Message *decode_message(CephContext *cct,
+                               int crcflags,
+                               ceph_msg_header& header,
+                               ceph_msg_footer& footer,
+                               ceph::buffer::list& front,
+                               ceph::buffer::list& middle,
+                               ceph::buffer::list& data,
+                               Message::ConnectionRef conn);
 inline std::ostream& operator<<(std::ostream& out, const Message& m) {
   m.print(out);
   if (m.get_header().version)
@@ -521,55 +532,23 @@ extern void encode_message(Message *m, uint64_t features, ceph::buffer::list& bl
 extern Message *decode_message(CephContext *cct, int crcflags,
                                ceph::buffer::list::const_iterator& bl);
 
-template <class MessageType>
-class MessageFactory {
+/// this is a "safe" version of Message. it does not allow calling get/put
+/// methods on its derived classes. This is intended to prevent some accidental
+/// reference leaks by forcing . Instead, you must either cast the derived class to a
+/// RefCountedObject to do the get/put or detach a temporary reference.
+class SafeMessage : public Message {
 public:
-template<typename... Args>
-  static typename MessageType::ref build(Args&&... args) {
-    return typename MessageType::ref(new MessageType(std::forward<Args>(args)...), false);
-  }
+  using Message::Message;
+private:
+  using RefCountedObject::get;
+  using RefCountedObject::put;
 };
 
-template<class T, class M = Message>
-class MessageSubType : public M {
-public:
-  typedef boost::intrusive_ptr<T> ref;
-  typedef boost::intrusive_ptr<T const> const_ref;
-
-  static auto msgref_cast(typename M::ref const& m) {
-    return boost::static_pointer_cast<typename T::const_ref::element_type, typename std::remove_reference<decltype(m)>::type::element_type>(m);
-  }
-  static auto msgref_cast(typename M::const_ref const& m) {
-    return boost::static_pointer_cast<typename T::ref::element_type, typename std::remove_reference<decltype(m)>::type::element_type>(m);
-  }
-
-protected:
-template<typename... Args>
-  MessageSubType(Args&&... args) : M(std::forward<Args>(args)...) {}
-  virtual ~MessageSubType() override {}
-};
-
-
-template<class T, class M = Message>
-class MessageInstance : public MessageSubType<T, M> {
-public:
-  using factory = MessageFactory<T>;
-
-  template<typename... Args>
-  static auto create(Args&&... args) {
-    return MessageFactory<T>::build(std::forward<Args>(args)...);
-  }
-  static auto msgref_cast(typename Message::ref const& m) {
-    return boost::static_pointer_cast<typename T::ref::element_type, typename std::remove_reference<decltype(m)>::type::element_type>(m);
-  }
-  static auto msgref_cast(typename Message::const_ref const& m) {
-    return boost::static_pointer_cast<typename T::const_ref::element_type, typename std::remove_reference<decltype(m)>::type::element_type>(m);
-  }
-
-protected:
-template<typename... Args>
-  MessageInstance(Args&&... args) : MessageSubType<T,M>(std::forward<Args>(args)...) {}
-  virtual ~MessageInstance() override {}
-};
+namespace ceph {
+template<class T, typename... Args>
+ceph::ref_t<T> make_message(Args&&... args) {
+  return {new T(std::forward<Args>(args)...), false};
+}
+}
 
 #endif

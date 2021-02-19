@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #ifndef CEPH_RGW_TORRENT_H
 #define CEPH_RGW_TORRENT_H
@@ -108,7 +108,7 @@ private:
   bufferlist bl;  // bufflist ready to send
 
   struct req_state *s{nullptr};
-  RGWRados *store{nullptr};
+  rgw::sal::RGWRadosStore *store{nullptr};
   SHA1 h;
 
   TorrentBencode dencode;
@@ -117,8 +117,8 @@ public:
   ~seed();
 
   int get_params();
-  void init(struct req_state *p_req, RGWRados *p_store);
-  int get_torrent_file(RGWRados::Object::Read &read_op,
+  void init(struct req_state *p_req, rgw::sal::RGWRadosStore *p_store);
+  int get_torrent_file(rgw::sal::RGWObject* object,
                        uint64_t &total_len,
                        ceph::bufferlist &bl_data,
                        rgw_obj &obj);
@@ -129,7 +129,7 @@ public:
   void set_create_date(ceph::real_time& value);
   void set_info_name(const string& value);
   void update(bufferlist &bl);
-  int complete();
+  int complete(optional_yield y);
 
 private:
   void do_encode ();
@@ -137,6 +137,6 @@ private:
   void set_exist(bool exist);
   void set_info_pieces(char *buff);
   void sha1(SHA1 *h, bufferlist &bl, off_t bl_len);
-  int save_torrent_file();
+  int save_torrent_file(optional_yield y);
 };
 #endif /* CEPH_RGW_TORRENT_H */

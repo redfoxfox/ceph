@@ -20,24 +20,17 @@
 #include "osd/OSDMap.h"
 #include "include/ceph_features.h"
 
-class MOSDMap : public MessageInstance<MOSDMap> {
-public:
-  friend factory;
+class MOSDMap final : public Message {
 private:
   static constexpr int HEAD_VERSION = 4;
   static constexpr int COMPAT_VERSION = 3;
 
- public:
+public:
   uuid_d fsid;
   uint64_t encode_features = 0;
   std::map<epoch_t, ceph::buffer::list> maps;
   std::map<epoch_t, ceph::buffer::list> incremental_maps;
   epoch_t oldest_map =0, newest_map = 0;
-
-  // if we are fetching maps from the mon and have to jump a gap
-  // (client's next needed std::map is older than mon's oldest) we can
-  // share removed snaps from the gap here.
-  mempool::osdmap::map<int64_t,OSDMap::snap_interval_set_t> gap_removed_snaps;
 
   epoch_t get_first() const {
     epoch_t e = 0;
@@ -65,13 +58,13 @@ private:
   }
 
 
-  MOSDMap() : MessageInstance(CEPH_MSG_OSD_MAP, HEAD_VERSION, COMPAT_VERSION) { }
+  MOSDMap() : Message{CEPH_MSG_OSD_MAP, HEAD_VERSION, COMPAT_VERSION} { }
   MOSDMap(const uuid_d &f, const uint64_t features)
-    : MessageInstance(CEPH_MSG_OSD_MAP, HEAD_VERSION, COMPAT_VERSION),
+    : Message{CEPH_MSG_OSD_MAP, HEAD_VERSION, COMPAT_VERSION},
       fsid(f), encode_features(features),
       oldest_map(0), newest_map(0) { }
 private:
-  ~MOSDMap() override {}
+  ~MOSDMap() final {}
 public:
   // marshalling
   void decode_payload() override {
@@ -88,6 +81,8 @@ public:
       newest_map = 0;
     }
     if (header.version >= 4) {
+      // removed in octopus
+      mempool::osdmap::map<int64_t,snap_interval_set_t> gap_removed_snaps;
       decode(gap_removed_snaps, p);
     }
   }
@@ -152,7 +147,7 @@ public:
       encode(newest_map, payload);
     }
     if (header.version >= 4) {
-      encode(gap_removed_snaps, payload);
+      encode((uint32_t)0, payload);
     }
   }
 
@@ -161,10 +156,11 @@ public:
     out << "osd_map(" << get_first() << ".." << get_last();
     if (oldest_map || newest_map)
       out << " src has " << oldest_map << ".." << newest_map;
-    if (!gap_removed_snaps.empty())
-      out << " +gap_removed_snaps";
     out << ")";
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif
